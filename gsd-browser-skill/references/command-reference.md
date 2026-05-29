@@ -1,5 +1,7 @@
 <overview>
 Complete syntax reference for gsd-browser commands. Argument syntax: `<arg>` = required positional, `[arg]` = optional positional, `--flag` = named option. Do NOT add `--` prefix to positional args.
+
+**MCP Integration Note:** The MCP server (`gsd-browser mcp`) exposes the vast majority of these commands as discoverable `browser_*` tools (e.g. `browser_navigate`, `browser_snapshot`, `browser_click_ref`, `browser_act`, `browser_fill_form`, `browser_batch`, `browser_view`, `browser_record_start`, `browser_debug_bundle`, `browser_action_cache`, etc.). Tool schemas, descriptions, and rich response envelopes (with suggested_next_actions) are served live by the MCP server. See root `docs/mcp.md`, `docs/AGENT-BEST-PRACTICES.md`, and the `gsd-browser-skill/SKILL.md` MCP highlights section. The CLI syntax here is the authoritative semantics for every MCP tool.
 </overview>
 
 <navigation>
@@ -56,6 +58,8 @@ gsd-browser fill-ref <ref> <text>
 
 **Snapshot modes:** `interactive` (default), `form`, `dialog`, `navigation`, `errors`, `headings`, `visible_only`
 
+**MCP note:** `browser_snapshot` (with mode/limit/selector/session) + `browser_get_ref`, `browser_click_ref`, `browser_fill_ref`, etc. are core. Always re-snapshot (or read `gsd-browser://latest-snapshot` resource) after page changes. Prefer semantic `browser_act`/`browser_find_best`/`browser_find_element` first when possible.
+
 </snapshot_and_refs>
 
 <inspection>
@@ -82,251 +86,235 @@ gsd-browser assert --checks '[
   {"kind": "selector_visible", "selector": "#user-menu"},
   {"kind": "value_equals", "selector": "input[name=email]", "value": "user@test.com"},
   {"kind": "no_console_errors"},
-  {"kind": "no_failed_requests"},
-  {"kind": "element_count", "selector": ".item", "min": 5}
+  {"kind": "no_failed_requests"}
 ]'
 ```
 
-**All kinds (17):** `url_contains`, `text_visible`, `text_hidden`, `selector_visible`, `selector_hidden`, `value_equals`, `checked`, `no_console_errors`, `no_failed_requests`, `request_url_seen`, `response_status`, `console_message_matches`, `network_count`, `console_count`, `element_count`, `no_console_errors_since`, `no_failed_requests_since`
+**Assertion kinds (18+):** url_contains, title_contains, text_visible, text_hidden, selector_visible, selector_hidden, value_equals, checked, no_console_errors, no_failed_requests, request_url_seen, response_status, console_message_matches, network_count, console_count, element_count, and the _since variants.
+
+**MCP:** `browser_assert` (checks array) and `browser_wait_for` (condition + value + timeout + threshold) are heavily used in agent flows and in the built-in prompts.
 
 </assertions>
 
-<batch_execution>
+<batch>
 
 ```bash
-gsd-browser batch --steps '[
-  {"action": "navigate", "url": "https://example.com"},
-  {"action": "wait_for", "condition": "network_idle"},
-  {"action": "click", "selector": "#login-btn"},
-  {"action": "type", "selector": "input[name=email]", "text": "user@test.com"},
-  {"action": "assert", "checks": [{"kind": "url_contains", "text": "/dashboard"}]}
-]'
-gsd-browser batch --steps '[...]' --summary-only
+gsd-browser batch --steps '[ ... array of step objects ... ]' --stop-on-failure --summary-only
 ```
 
-**Actions:** `navigate`, `click`, `type`, `key_press`, `wait_for`, `assert`, `click_ref`, `fill_ref`
+**Supported batch actions:** navigate, click, type, key_press, wait_for, assert, click_ref, fill_ref.
 
-</batch_execution>
+**MCP:** `browser_batch` is one of the highest-value tools for reliable long-horizon agent workflows (atomicity + fewer roundtrips). See best-practices guide.
 
-<wait_conditions>
+</batch>
+
+<waits>
 
 ```bash
-gsd-browser wait-for --condition selector_visible --value "#content"
-gsd-browser wait-for --condition selector_hidden --value ".spinner"
-gsd-browser wait-for --condition url_contains --value "/dashboard"
 gsd-browser wait-for --condition network_idle
-gsd-browser wait-for --condition delay --value 2000
+gsd-browser wait-for --condition selector_visible --value "#content" --timeout 30000
+gsd-browser wait-for --condition url_contains --value "/dashboard"
 gsd-browser wait-for --condition text_visible --value "Success"
-gsd-browser wait-for --condition text_hidden --value "Loading"
-gsd-browser wait-for --condition request_completed --value "/api/data"
-gsd-browser wait-for --condition console_message --value "ready"
 gsd-browser wait-for --condition element_count --value ".item" --threshold ">=5"
 gsd-browser wait-for --condition region_stable --value "#content"
-gsd-browser wait-for --condition selector_visible --value "#slow" --timeout 30000
+# ... many more conditions (see root SKILL.md)
 ```
 
-Default timeout: 10000ms.
-
-</wait_conditions>
+</waits>
 
 <forms>
 
 ```bash
 gsd-browser analyze-form
-gsd-browser analyze-form --selector "#signup-form"
-gsd-browser fill-form --values '{"Email": "a@b.com", "Password": "secret"}'
-gsd-browser fill-form --values '{"Email": "a@b.com"}' --submit
-gsd-browser fill-form --values '{"Email": "a@b.com"}' --selector "#login-form"
+gsd-browser analyze-form --selector "#checkout-form"
+
+gsd-browser fill-form --values '{"Email": "a@b.com", "Password": "secret"}' --submit
+gsd-browser fill-form --values '{"Full Name": "Jane"}' --selector "#signup" 
 ```
 
-Fields are matched by label, name, placeholder, or aria-label.
+**MCP equivalents:** `browser_analyze_form`, `browser_fill_form` (values object + submit + selector + session). Extremely ergonomic for agents.
 
 </forms>
 
-<semantic_intents>
+<intent_based>
 
 ```bash
-gsd-browser find-best --intent submit_form
-gsd-browser find-best --intent accept_cookies --scope "#modal"
-gsd-browser act --intent submit_form
+gsd-browser find-best --intent submit_form --scope "#modal"
 gsd-browser act --intent accept_cookies
+gsd-browser act --intent primary_cta
 ```
 
-See `references/semantic-intents.md` for all 15 intents.
+**Built-in intents (15):** submit_form, close_dialog, primary_cta, search_field, next_step, dismiss, auth_action, back_navigation, fill_email, fill_password, fill_username, accept_cookies, main_content, pagination_next, pagination_prev.
 
-</semantic_intents>
+**MCP:** `browser_act` (high value first choice) and `browser_find_best`. Combine with `browser_find_element` for resilience when refs may be stale.
 
-<pages_and_frames>
+</intent_based>
 
-Page and frame IDs are **positional**.
+<pages_frames>
 
 ```bash
 gsd-browser list-pages
-gsd-browser switch-page <id>
+gsd-browser switch-page <id>     # positional id
 gsd-browser close-page <id>
+
 gsd-browser list-frames
-gsd-browser select-frame --name "iframe-name"
-gsd-browser select-frame --url-pattern "embed"
-gsd-browser select-frame --index 0
-gsd-browser select-frame --name main                      # Return to main frame
+gsd-browser select-frame --name "main" | --index 0 | --url-pattern "embed"
 ```
 
-</pages_and_frames>
+**MCP:** `browser_list_pages`, `browser_switch_page`, `browser_close_page`, `browser_list_frames`, `browser_select_frame`.
 
-<live_viewer_and_narration>
-
-The live viewer is a localhost screen-sharing surface for the active browser session. Browser actions still run through CLI commands. The viewer displays live frames, narrated history, ref overlays, target rings, click ripples, failure markers, and page-following across navigation or tab changes.
-
-```bash
-gsd-browser view                                         # Open the live viewer
-gsd-browser view --print-only                            # Print URL only
-gsd-browser view --history                               # Open history-focused viewer
-gsd-browser view --history --print-only                  # Print history URL only
-
-gsd-browser goal "Find the checkout button"              # Set viewer goal banner
-gsd-browser goal --clear                                 # Clear goal banner
-
-gsd-browser pause                                        # Pause before next narrated action
-gsd-browser resume                                       # Resume actions
-gsd-browser step                                         # Allow one action, then pause
-gsd-browser abort                                        # Abort next gated action
-```
-
-Use `--session <name>` consistently so the viewer and commands attach to the same browser:
-
-```bash
-gsd-browser --session demo navigate https://example.com
-gsd-browser --session demo view --print-only
-gsd-browser --session demo click "h1"
-```
-
-Use `--no-narration-delay` for fast agent-only runs that keep narration events/history without lead-time sleeps:
-
-```bash
-gsd-browser --session demo --no-narration-delay click "h1"
-```
-
-</live_viewer_and_narration>
+</pages_frames>
 
 <diagnostics>
 
 ```bash
 gsd-browser console
 gsd-browser console --no-clear
-gsd-browser network
+gsd-browser network --filter errors
 gsd-browser dialog
 gsd-browser timeline
 gsd-browser session-summary
-gsd-browser debug-bundle
+gsd-browser debug-bundle --name "stuck-flow"
 ```
 
+**MCP:** `browser_console`, `browser_network`, `browser_debug_bundle`, `browser_timeline`, etc. Use `debug_stuck_agent_flow` prompt + these when an agent is lost.
+
 </diagnostics>
+
+<live_viewer_workbench>
+
+```bash
+gsd-browser view
+gsd-browser view --print-only
+gsd-browser view --interactive
+
+gsd-browser goal "Complete checkout" 
+gsd-browser goal --clear
+
+gsd-browser control-state
+gsd-browser takeover
+gsd-browser release-control
+gsd-browser pause / resume / step / abort
+gsd-browser sensitive-on / sensitive-off
+```
+
+**Annotations:**
+```bash
+gsd-browser annotations
+gsd-browser annotation-request "Please note the price shown here"
+gsd-browser annotation-clear --all
+```
+
+**Recordings (evidence bundles):**
+```bash
+gsd-browser record-start --name "checkout-bug-2026-05"
+gsd-browser record-stop
+gsd-browser recordings
+gsd-browser recording-get <id>
+gsd-browser recording-export <id> --output ./evidence/
+```
+
+**MCP equivalents are first-class superpowers for human+agent collaboration and auditability:** `browser_view`, `browser_takeover`, `browser_annotation_request`, `browser_record_*`, `browser_goal`, `browser_step`, etc. See AGENT-BEST-PRACTICES.md for patterns.
+
+</live_viewer_workbench>
 
 <visual>
 
 ```bash
-gsd-browser screenshot
-gsd-browser screenshot --output page.png
-gsd-browser screenshot --format png
-gsd-browser screenshot --full-page
-gsd-browser screenshot --selector "#hero"                  # Always PNG
-gsd-browser screenshot --quality 50                        # JPEG 1-100, default 80
-
-gsd-browser zoom-region --x 100 --y 200 --width 400 --height 300
-gsd-browser zoom-region --x 0 --y 0 --width 200 --height 200 --scale 3
-
-gsd-browser save-pdf
-gsd-browser save-pdf --output report.pdf
-gsd-browser save-pdf --format Letter                       # A4, Letter, Legal, Tabloid
-
-gsd-browser visual-diff --name "homepage"
-gsd-browser visual-diff --name "homepage" --threshold 0.05
-gsd-browser visual-diff --selector "#hero" --name "hero"
-gsd-browser visual-diff --name "homepage" --update-baseline
+gsd-browser screenshot --output page.png --full-page
+gsd-browser screenshot --selector "#hero" --format png
+gsd-browser save-pdf --output report.pdf --format A4
+gsd-browser zoom-region ...
 ```
 
 </visual>
 
-<data_extraction>
+<visual_regression>
 
 ```bash
-gsd-browser extract --schema '{
-  "type": "object",
-  "properties": {
-    "title": {"_selector": "h1", "_attribute": "textContent"},
-    "price": {"_selector": ".price", "_attribute": "textContent"}
-  }
-}'
-
-gsd-browser extract --selector ".product" --multiple --schema '{...}'
+gsd-browser visual-diff --name "homepage"
+gsd-browser visual-diff --name "homepage" --update-baseline --threshold 0.05
+gsd-browser visual-diff --selector "#main" --name "main-content"
 ```
 
-</data_extraction>
+**MCP:** `browser_visual_diff`, `browser_screenshot`, `browser_save_pdf`.
 
-<network_mocking>
+</visual_regression>
+
+<structured_extraction>
 
 ```bash
-gsd-browser mock-route --url "**/api/users*" --body '[{"name":"Alice"}]' --status 200
-gsd-browser mock-route --url "**/api/data" --body '{"ok":true}' --delay 3000
+gsd-browser extract --schema '{ "type":"object", "properties": { "price": {"_selector":".price", "_attribute":"textContent"} } }'
+gsd-browser extract --selector ".product" --multiple --schema '{ ... }'
+```
+
+**MCP:** `browser_extract`.
+
+</structured_extraction>
+
+<network_control>
+
+```bash
+gsd-browser mock-route --url "**/api/*" --body '{"ok":true}' --status 200 --delay 500
 gsd-browser block-urls "**/analytics*" "**/ads*"
 gsd-browser clear-routes
 ```
 
-</network_mocking>
+**MCP:** `browser_mock_route`, `browser_block_urls`, `browser_clear_routes`. Powerful for deterministic testing.
+
+</network_control>
 
 <device_emulation>
 
 ```bash
-gsd-browser emulate-device <device-name>
 gsd-browser emulate-device "iPhone 15"
 gsd-browser emulate-device "Pixel 7"
-gsd-browser emulate-device "iPad Pro 11"
 gsd-browser emulate-device list
 ```
 
-**Warning:** Recreates browser context. Page state and cookies are lost.
+**Warning:** Recreates browser context (cookies/state lost).
+
+**MCP:** `browser_emulate_device`.
 
 </device_emulation>
 
-<state_and_auth>
+<state_auth>
 
 ```bash
 gsd-browser save-state --name "logged-in"
 gsd-browser restore-state --name "logged-in"
 
-gsd-browser vault-save --profile github --url https://github.com/login \
-  --username user --password "secret"
-gsd-browser vault-login --profile github
+gsd-browser vault-save --profile myapp --url https://.../login --username u --password p
+gsd-browser vault-login --profile myapp
 gsd-browser vault-list
 ```
 
-Vault requires `GSD_BROWSER_VAULT_KEY` env var set **before daemon starts**.
+**Vault requires GSD_BROWSER_VAULT_KEY env var set before daemon start.**
 
-</state_and_auth>
+**MCP:** `browser_save_state`, `browser_restore_state`, `browser_vault_login`, `browser_vault_save`, `browser_vault_list`.
 
-<tracing_and_recording>
+</state_auth>
+
+<tracing_recording>
 
 ```bash
-gsd-browser trace-start
-gsd-browser trace-start --name "checkout-flow"
-gsd-browser trace-stop
-gsd-browser trace-stop --name "checkout.json"
-
-gsd-browser har-export
+gsd-browser trace-start --name "perf"
+gsd-browser trace-stop --name "perf.json"
 gsd-browser har-export --filename "session.har"
-
-gsd-browser generate-test
-gsd-browser generate-test --name "login-flow" --output tests/login.spec.ts
+gsd-browser generate-test --name "flow" --output tests/flow.spec.ts --include-assertions
 ```
 
-</tracing_and_recording>
+**MCP:** `browser_trace_*`, `browser_har_export`, `browser_generate_test`.
+
+</tracing_recording>
 
 <security>
 
 ```bash
-gsd-browser check-injection
 gsd-browser check-injection --include-hidden
 ```
+
+**MCP:** `browser_check_injection`.
 
 </security>
 
@@ -335,21 +323,27 @@ gsd-browser check-injection --include-hidden
 ```bash
 gsd-browser action-cache --action stats
 gsd-browser action-cache --action get --intent submit_form
-gsd-browser action-cache --action put --intent submit_form --selector "#submit-btn" --score 0.95
+gsd-browser action-cache --action put --intent submit_form --selector "#submit" --score 0.97
 gsd-browser action-cache --action clear
 ```
 
+**MCP:** `browser_action_cache`. Critical for long-term self-healing across MCP agent sessions (use with named --session).
+
 </action_cache>
 
-<daemon_management>
+<daemon>
 
 ```bash
 gsd-browser daemon health
-gsd-browser daemon stop
 gsd-browser daemon start
+gsd-browser daemon stop
 gsd-browser update
 ```
 
-The daemon auto-starts on browser commands. `daemon health` is read-only and does not start a session. `daemon stop` is idempotent — safe to call even if the process is already dead.
+</daemon>
 
-</daemon_management>
+<full_reference>
+For the complete up-to-date surface (including all MCP tool names, inputSchemas, prompt definitions, and resource URIs), connect an MCP client to `gsd-browser mcp` and inspect `tools/list`, `resources/list`, and `prompts/list`, or read the implementation in `cli/src/mcp.rs`.
+
+Cross-reference the root SKILL.md and docs/AGENT-BEST-PRACTICES.md for agent workflow patterns that combine these commands/tools.
+</full_reference>

@@ -1,5 +1,7 @@
 <overview>
 Common errors and their fixes. When an error occurs, match it against these patterns before attempting custom debugging.
+
+**MCP agents:** The same root causes apply. In addition, leverage `browser_debug_bundle`, `browser_console`, `browser_network`, the `debug_stuck_agent_flow` prompt, and the rich `suggested_next_actions` + `evidence_refs` returned in every tool envelope. Read `gsd-browser://current-state` or `latest-snapshot` resources when stuck. See docs/AGENT-BEST-PRACTICES.md "Use diagnostic tools when stuck".
 </overview>
 
 <error name="stale_refs">
@@ -15,144 +17,60 @@ gsd-browser snapshot
 gsd-browser click-ref @v2:e1       # Use fresh version number
 ```
 
+**MCP:** Call `browser_snapshot` again (or read the `gsd-browser://latest-snapshot` resource) before any `_ref` tool after a page-changing action. The `browser_find_element` tool and action cache also help here.
+
 </error>
 
 <error name="click_timeout">
 
 **Error:** `click timed out after 10s for: #submit-btn`
 
-**Cause:** Element not visible, behind an overlay, or doesn't exist.
+**Cause:** Element not visible, behind overlay, or not yet in DOM.
 
-**Fix:**
+**Fixes:**
+- `gsd-browser find --selector "#submit-btn"` to verify existence
+- `gsd-browser scroll --direction down` to bring into view
+- `gsd-browser wait-for --condition selector_visible --value "#submit-btn"`
+- `gsd-browser act --intent dismiss` or `accept_cookies` first if a banner is blocking
+- Re-snapshot after waits
 
-```bash
-gsd-browser find --selector "#submit-btn"                            # Verify exists
-gsd-browser scroll --direction down                                  # Scroll into view
-gsd-browser wait-for --condition selector_visible --value "#submit-btn"  # Wait for it
-gsd-browser click "#submit-btn"                                      # Retry
-```
-
-If blocked by an overlay:
-
-```bash
-gsd-browser act --intent accept_cookies
-gsd-browser act --intent dismiss
-```
+**MCP equivalents:** `browser_find`, `browser_wait_for`, `browser_act("dismiss")`, `browser_scroll` (if exposed), etc.
 
 </error>
 
-<error name="empty_logs">
+<error name="daemon_not_healthy">
 
-**Error:** Console or network logs return empty.
+**Error patterns around "daemon did not start", unhealthy sessions, or blank pages.**
 
-**Cause:** Buffers start fresh on each navigation. Logs from the previous page are gone.
-
-**Fix:** Check logs **before** navigating away:
-
+**Fix:** 
 ```bash
-gsd-browser navigate https://example.com
-gsd-browser eval "fetch('/api/data')"
-gsd-browser network                    # Check BEFORE next navigation
+gsd-browser --session foo daemon health
+gsd-browser --session foo daemon stop
+gsd-browser --session foo navigate https://...
 ```
+
+Use the **exact same** `--session` value for the entire flow. The MCP server supports the `session` argument on virtually every tool for the same reason.
 
 </error>
 
-<error name="session_about_blank">
+<error name="vault_key">
 
-**Error:** `daemon health` reports `stopped` or `unhealthy`, or a named session opens a fresh blank page.
+**Error:** Vault operations fail or "key not set".
 
-**Cause:** The named session does not currently map to a live daemon/browser pair, or the follow-up command used a different session name.
+**Fix:** `GSD_BROWSER_VAULT_KEY` must be set in the environment **before the daemon process starts**. If the daemon is already running, stop it first, export the key, then retry (or restart the MCP server process so it inherits the new env).
 
-**Fix:** Check the session state, clear it explicitly, and retry with the same session name:
-
-```bash
-gsd-browser --session site1 daemon health
-gsd-browser --session site1 daemon stop
-gsd-browser --session site1 navigate https://example.com
-```
+For MCP clients, put the key in the server's `env` config and restart the client.
 
 </error>
 
-<error name="daemon_wont_start">
+<more_errors>
+See the full error recovery section in the root SKILL.md (and the debug-and-diagnose workflow) for additional patterns (empty logs, cookie banners, etc.).
 
-**Error:** `daemon did not start within 10s`
-
-**Cause:** The session is unhealthy, startup exited early, or browser launch state is stale.
-
-**Fix:**
-
-```bash
-gsd-browser daemon stop
-gsd-browser daemon start
-gsd-browser daemon health
-```
-
-</error>
-
-<error name="vault_not_encrypted">
-
-**Error:** Vault operations fail or credentials stored in plaintext.
-
-**Cause:** `GSD_BROWSER_VAULT_KEY` not set, or set after daemon started.
-
-**Fix:**
-
-```bash
-export GSD_BROWSER_VAULT_KEY="your-encryption-key"
-gsd-browser daemon stop                # Stop existing daemon
-gsd-browser vault-save --profile ...   # Daemon restarts with key
-```
-
-</error>
-
-<error name="device_emulation_lost_state">
-
-**Error:** Cookies and page state gone after device emulation.
-
-**Cause:** `emulate-device` recreates the browser context.
-
-**Fix:** Save state before emulating, restore after:
-
-```bash
-gsd-browser save-state --name "pre-emulation"
-gsd-browser emulate-device "iPhone 15"
-gsd-browser restore-state --name "pre-emulation"
-```
-
-</error>
-
-<error name="selector_not_found">
-
-**Error:** Element not found by selector.
-
-**Cause:** Wrong selector, element not loaded yet, or element is in an iframe.
-
-**Fix:**
-
-```bash
-# Wait for it
-gsd-browser wait-for --condition selector_visible --value "#target" --timeout 30000
-
-# Check if it's in an iframe
-gsd-browser list-frames
-gsd-browser select-frame --name "content-frame"
-gsd-browser find --selector "#target"
-
-# Use accessibility tree to discover the right selector
-gsd-browser accessibility-tree
-```
-
-</error>
-
-<general_debugging_strategy>
-
-When something fails unexpectedly:
-
-1. **Get the full picture:** `gsd-browser debug-bundle`
-2. **Check the timeline:** `gsd-browser timeline` — what happened before the error?
-3. **Check console:** `gsd-browser console` — any JS errors?
-4. **Check network:** `gsd-browser network` — any failed requests?
-5. **Take a screenshot:** `gsd-browser screenshot --output debug.png` — what does the page look like?
-6. **Check for overlays:** `gsd-browser act --intent dismiss` — is something blocking interaction?
-
-</general_debugging_strategy>
+**MCP-specific resilience tools & patterns:**
+- `browser_debug_bundle`
+- `browser_find_element` (semantic + fallback)
+- `browser_action_cache`
+- The `debug_stuck_agent_flow` and `full_page_audit` prompts
+- `browser_control_state` + viewer takeover when human judgment is needed
+- Always follow the `suggested_next_actions` in tool envelopes
+</more_errors>

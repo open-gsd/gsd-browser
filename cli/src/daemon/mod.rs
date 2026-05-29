@@ -152,6 +152,103 @@ pub(crate) async fn set_default_viewport(page: &Page) {
         DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT
     );
 }
+/// Apply stealth patches for anti-detection when --stealth / backend=stealth is active.
+/// - Patches common CDP automation markers via preload JS and current-page JS
+/// - Spoofs realistic navigator properties, hardware, locale, plugins
+/// - Clears webdriver flag and automation-controlled hints
+/// - Sets matching Client Hints via emulation (best effort)
+/// This keeps the rest of the daemon (handlers using Page) unchanged.
+async fn apply_stealth_patches(page: &Page, _config: &Config) {
+    info!("[gsd-browser-daemon] applying stealth patches (UA/hardware/locale spoofing + CDP signal patches)");
+
+    // 1. Core navigator.webdriver + automation flags removal.
+    let stealth_js = r#"
+    (() => {
+        try {
+            // webdriver
+            Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
+
+            // cdc_ / $cdc_  (common chromiumoxide / chromedriver markers)
+            for (const key of Object.keys(window)) {
+                if (/^cdc_[a-zA-Z0-9]{22,}/i.test(key) || key.startsWith('$cdc_')) {
+                    try { delete window[key]; } catch(e){}
+                }
+            }
+
+            // navigator.webdriver related
+            if (navigator.webdriver === undefined) {
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            }
+
+            // Chrome object
+            if (!window.chrome) {
+                Object.defineProperty(window, 'chrome', { value: { runtime: {} }, configurable: true });
+            }
+
+            // Permissions
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+
+            // Plugins / mimeTypes (make non-empty like real browser)
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [ { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' } ],
+                configurable: true
+            });
+
+            // Hardware / locale spoof (reasonable desktop values; can be refined per-profile later)
+            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
+            Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true });
+            Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel', configurable: true });
+
+            // Languages
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
+            Object.defineProperty(navigator, 'language', { get: () => 'en-US', configurable: true });
+
+            // WebGL vendor / renderer spoof (generic but plausible)
+            const getParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(param) {
+                if (param === 37445) return 'Intel Inc.'; // UNMASKED_VENDOR_WEBGL
+                if (param === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
+                return getParameter.apply(this, [param]);
+            };
+
+            // Remove automation-controlled from document
+            document.documentElement.setAttribute('data-automation-controlled', 'false');
+
+            console.debug('[gsd-browser] stealth patches applied');
+            return true;
+        } catch (e) {
+            console.warn('[gsd-browser] stealth patch partial failure', e);
+            return false;
+        }
+    })();
+    "#;
+
+    if let Err(e) = page.evaluate_on_new_document(stealth_js).await {
+        warn!("[gsd-browser-daemon] stealth preload patch failed (non-fatal): {e}");
+    }
+    if let Err(e) = page.evaluate_expression(stealth_js).await {
+        warn!("[gsd-browser-daemon] stealth current-page patch failed (non-fatal): {e}");
+    }
+
+    // 2. Emulation: realistic UA override (v0.9 chromiumoxide compatible; advanced Client Hints require newer CDP)
+    let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+    let ua_override =
+        chromiumoxide::cdp::browser_protocol::emulation::SetUserAgentOverrideParams::new(ua);
+    if let Err(e) = page.execute(ua_override).await {
+        warn!("[gsd-browser-daemon] SetUserAgentOverride (stealth) failed (non-fatal): {e}");
+    } else {
+        debug!("[gsd-browser-daemon] stealth UA override applied");
+    }
+
+    // 3. Also set a plausible locale / tz via emulation if available (best effort)
+    // (Timezone/prefs often handled via launch profile or prefs; CDP has limited direct tz control)
+    info!("[gsd-browser-daemon] stealth patches complete (realistic UA/hardware/locale + CDP signals)");
+}
 
 async fn run_daemon(
     browser_path_arg: Option<String>,
@@ -337,6 +434,53 @@ async fn run_daemon(
             .user_data_dir(&profile_dir)
             .window_size(1920, 1080)
             .arg("--window-size=1920,1080");
+
+        // Apply user-provided extra args from config
+        for arg in &config.browser.args {
+            builder = builder.arg(arg.as_str());
+        }
+
+        // Stealth / anti-detection launch args (when --stealth or backend=stealth/chaser)
+        let effective_backend = config.browser.backend.as_deref().unwrap_or("chromiumoxide");
+        let stealth_enabled = config.browser.stealth
+            || effective_backend == "stealth"
+            || effective_backend == "chaser-oxide";
+        if stealth_enabled {
+            info!(
+                "[gsd-browser-daemon] stealth mode enabled (backend={})",
+                effective_backend
+            );
+            let stealth_args = [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process,TranslateUI",
+                "--disable-site-isolation-trials",
+                "--disable-web-security",
+                "--disable-client-side-phishing-detection",
+                "--disable-sync",
+                "--disable-default-apps",
+                "--disable-extensions",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--no-pings",
+                "--disable-background-networking",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-breakpad",
+                "--disable-component-update",
+                "--disable-domain-reliability",
+                "--disable-features=MediaRouter",
+                "--metrics-recording-only",
+                "--mute-audio",
+                // Common realistic viewport / hardware hints via args (emulation later)
+                "--force-device-scale-factor=1",
+            ];
+            for a in &stealth_args {
+                builder = builder.arg(*a);
+            }
+            // Spoof a realistic UA (can be overridden by device emulation later)
+            builder = builder.arg("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+        }
+
         if !config.browser.headless {
             builder = builder.with_head();
         }
@@ -345,7 +489,10 @@ async fn run_daemon(
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
         let result = Browser::launch(browser_config).await?;
-        info!("[gsd-browser-daemon] Chrome launched successfully");
+        info!(
+            "[gsd-browser-daemon] Chrome launched successfully (stealth={})",
+            stealth_enabled
+        );
         result
     };
 
@@ -368,6 +515,15 @@ async fn run_daemon(
     helpers::inject_helpers(&page).await;
     settle::ensure_mutation_counter(&page).await;
     info!("[gsd-browser-daemon] browser helpers injected, mutation counter installed");
+
+    // Apply stealth patches (CDP signals, navigator spoofing, realistic hardware/locale) if enabled
+    let effective_backend = config.browser.backend.as_deref().unwrap_or("chromiumoxide");
+    let stealth_enabled = config.browser.stealth
+        || effective_backend == "stealth"
+        || effective_backend == "chaser-oxide";
+    if stealth_enabled {
+        apply_stealth_patches(&page, &config).await;
+    }
 
     // Enable CDP domains for event listening
     if let Err(e) = page.execute(RuntimeEnableParams::default()).await {
@@ -427,6 +583,19 @@ async fn run_daemon(
         let page_arc = Arc::new(page);
         let mut pages = daemon_state.pages.lock().unwrap();
         pages.register(page_arc, String::new(), "about:blank".to_string());
+    }
+
+    // Spawn the always-on target lifecycle tracker.
+    // This subscribes to Target.targetCreated (and related events) so that
+    // tabs opened via window.open(), target=_blank, or other clients appear
+    // in list-pages / switch-page and have helpers injected.
+    // Must be after the initial registration and before we start accepting commands.
+    {
+        let tb = Arc::clone(&browser);
+        let ts = Arc::clone(&daemon_state);
+        tokio::spawn(async move {
+            handlers::pages::spawn_core_target_tracker(tb, ts).await;
+        });
     }
 
     // Bind Unix socket

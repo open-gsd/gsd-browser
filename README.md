@@ -1,8 +1,40 @@
 # gsd-browser
 
-Native Rust browser automation CLI for Chrome/Chromium via CDP. `gsd-browser` keeps a persistent background daemon, auto-starts on first use, and exposes 92 top-level commands for navigation, interaction, authenticated live viewing, annotations, recording bundles, snapshots with versioned refs, assertions, structured extraction, network control, visual diffing, tracing, and stateful auth flows.
+Native Rust browser automation CLI for Chrome/Chromium via CDP. `gsd-browser` keeps a persistent background daemon, auto-starts on first use, and exposes 90+ top-level commands for navigation, interaction, authenticated live viewing, annotations, recording bundles, snapshots with versioned refs, assertions, structured extraction, network control, visual diffing, tracing, and stateful auth flows.
 
 Built for AI agents, CI pipelines, and developers who want deterministic browser control without adopting a full browser test framework.
+
+### MCP Server — Massively Expanded (The Primary Path for AI Agents)
+
+`gsd-browser mcp` is now a first-class, extremely powerful browser automation platform for agents. It exposes **50+ tools**, live resources (real snapshot/refs/state/timeline data), and executable prompts over stdio (Model Context Protocol).
+
+**Completed advancements include:**
+- Full coverage of the rich surface: versioned refs + multiple snapshot modes, semantic `act` + `find_best`, advanced forms, robust assertions + waits, `browser_batch` for atomic flows, live viewer + full human collaboration (takeover, annotations, goal banners, step/abort/pause/resume, sensitive mode), first-class recording & evidence bundles, visual regression, HAR/trace/PDF export, network mocking & blocking, device emulation, encrypted auth vault + state save/restore, structured extraction, prompt injection scanning, action cache for long-term self-healing, multi-tab/frame management, rich diagnostics (`debug_bundle` etc.), and more.
+- **Resources** that actually query the daemon for live context (`gsd-browser://latest-snapshot`, `current-state`, `active-recordings`, `timeline`, etc.).
+- **Executable prompts** encoding best-practice multi-step workflows (`robust_login_flow`, `full_page_audit`, `autonomous_research_task`, `evidence_creation_workflow`, `debug_stuck_agent_flow`, etc.).
+- Standardized high-value response envelopes on every tool call: `summary`, `structured_data`, `suggested_next_actions`, `evidence_refs`.
+- Seamless reuse of the proven daemon client (auto-start, named sessions for isolation + persistent cache/state, robust error handling).
+
+**This is designed to be the high-end browser backend for serious agent platforms.**
+
+**Get started in seconds:**
+```bash
+gsd-browser mcp
+```
+Point Cursor, Claude Desktop, VS Code + Copilot, or any MCP client at it.
+
+**Tailored setup + config snippets:**
+```bash
+./scripts/mcp-quickstart.sh cursor     # claude | vscode | generic
+```
+
+**Key documentation:**
+- [docs/mcp.md](docs/mcp.md) — Full capabilities, architecture, client configs, quickstart script.
+- [docs/AGENT-BEST-PRACTICES.md](docs/AGENT-BEST-PRACTICES.md) — Golden rules, workflow patterns, "When to Use What" table, self-healing, response envelopes, prompt/resource usage (essential reading for agents).
+- [docs/examples/mcp-client-config.json](docs/examples/mcp-client-config.json) — Ready-to-paste example.
+- Root [SKILL.md](SKILL.md) and the `gsd-browser-skill/` pack — Complete underlying command semantics and curated workflows (the MCP tools are a direct mapping).
+
+Run `gsd-browser mcp` and unleash one of the most powerful browser surfaces available for agentic work.
 
 ## Install
 
@@ -29,6 +61,8 @@ cargo install --path cli
 
 The crates.io package (`gsd-browser`) is not published yet. Use GitHub release assets or a source build.
 
+The one-line installer (`curl -fsSL https://install.gsd.build/browser | bash`) also sets up the `gsd-browser-skill/` pack for coding agents and documents the MCP path in its header.
+
 ## Quick Start
 
 The daemon starts automatically on first use.
@@ -50,6 +84,8 @@ gsd-browser assert --checks '[{"kind":"url_contains","text":"iana.org"}]'
 # Capture a PNG
 gsd-browser screenshot --output page.png --format png
 ```
+
+For the modern agent experience, prefer the MCP server (see top of this README).
 
 ## Interactive Workbench
 
@@ -85,9 +121,11 @@ gsd-browser recording-discard <id>
 gsd-browser recording-validate <id-or-path> --json
 ```
 
+(MCP equivalents: `browser_view`, `browser_annotation_request`, `browser_record_start`, etc. — among the highest-leverage features for collaborative agent work.)
+
 ## Command Surface
 
-`gsd-browser` currently exposes 92 top-level commands:
+`gsd-browser` currently exposes 90+ top-level commands (the MCP server exposes the most valuable subset as 50+ discoverable tools with agent-optimized descriptions and envelopes):
 
 | Area | Commands |
 |------|----------|
@@ -127,6 +165,8 @@ gsd-browser recording-validate <id-or-path> --json
 - Visual diffing, HAR export, PDF generation, and CDP tracing in the same tool
 - Saved browser state plus encrypted credential replay through the auth vault
 - Prompt injection scanning for agent-facing browsing workflows
+- Action cache for self-healing intent mappings across sessions (especially powerful with named MCP sessions)
+- Full MCP server with resources, prompts, and agent-optimized envelopes
 
 ## Configuration
 
@@ -184,21 +224,71 @@ export GSD_BROWSER_ARTIFACTS_DIR=./browser-artifacts
 export GSD_BROWSER_VAULT_KEY=your-encryption-key
 ```
 
+For MCP usage, place the relevant `GSD_BROWSER_*` variables in your MCP client's server `env` configuration.
+
+
+## Stealth Mode & Alternative Backends (Experimental)
+
+gsd-browser defaults to the stable `chromiumoxide` CDP client for maximum compatibility.
+
+### `--stealth` / `backend = "stealth"`
+```bash
+gsd-browser --stealth navigate https://bot.sannysoft.com
+# or
+gsd-browser --backend stealth navigate ...
+# config.toml
+[browser]
+stealth = true
+backend = "chaser-oxide"   # or "stealth", "chromey"
+```
+
+Effects when enabled:
+- Anti-detection Chrome flags (`--disable-blink-features=AutomationControlled`, IsolateOrigins, etc.)
+- Realistic UA + hardware (cores, memory, platform) spoofing
+- CDP signal patches (webdriver, cdc_ markers, chrome object, permissions, WebGL)
+- Client Hints and locale/language consistency
+- (Future) human-like mouse curves via input_dispatch when chaser-oxide backend active
+
+### Feature-Gated Backends
+The following require explicit cargo features (the published binary always ships the stable default):
+
+- `chromiumoxide-backend` (default) — current stable
+- `chromey-backend` — fresher CDP definitions, adblock, fingerprint crate (drop-in, same `use chromiumoxide`)
+- `chaser-backend` / `stealth` feature — protocol-level stealth, `ChaserPage` human input (compile with `--features stealth`)
+- `ferrous-backend` — ergonomic locator/wait API (launch path experimental)
+
+To build with an alternative:
+```bash
+cargo install --path cli --no-default-features --features chromey-backend
+# or for full stealth
+cargo install --path cli --no-default-features --features stealth
+```
+
+See also the audit and superpowers plans for the "dependency/stealth refresh" item.
+
+Trade-off: stealth backends may lag the main chromiumoxide feature surface or have different perf characteristics. The daemon handlers/refs/viewer remain unchanged regardless of backend.
+
 ## How It Works
 
 - The CLI parses commands and sends them to a local daemon over a loopback HTTP channel.
 - The daemon maintains the browser lifecycle, page/frame routing, network hooks, action timeline, and session manifest state.
 - `--session <name>` creates isolated daemon and browser instances for parallel workflows.
+- The MCP stdio server (`gsd-browser mcp`) is a thin, high-fidelity adapter over the exact same daemon client used by the CLI.
 
 ## For AI Agents
 
+**Recommended 2026+ path:** Connect via the MCP server (`gsd-browser mcp`). It gives you automatic discovery of 50+ tools, resources, and prompts with rich envelopes and best-practice guidance. See the dedicated sections at the top of this README, plus `docs/mcp.md` and especially `docs/AGENT-BEST-PRACTICES.md`.
+
+When using the CLI directly (or for reference):
 - The daemon auto-starts. You almost never need `gsd-browser daemon start`.
 - `gsd-browser daemon health` reports the current session state and does not auto-start the daemon.
 - Use `--json` when you need structured output.
-- Prefer `snapshot` then `click-ref` or `fill-ref` for stable interaction, and re-snapshot after page changes.
+- Prefer `snapshot` then `click-ref` or `fill-ref` for stable interaction, and re-snapshot after page changes. (MCP: read the `latest-snapshot` resource.)
 - Use `assert` and `batch` when you need deterministic pass/fail automation.
 - `find-best` and `act` cover 15 built-in semantic intents for common navigation, form, dialog, auth, and pagination actions.
-- Read [SKILL.md](./SKILL.md) for the full command reference and workflow patterns.
+- The live viewer + annotations + recordings + human takeover are first-class superpowers for collaborative or auditable work.
+- Read [SKILL.md](./SKILL.md) for the full command reference and workflow patterns (this is the source of truth for MCP tool semantics).
+- Install the curated `gsd-browser-skill/` pack (via the main installer) for coding agents.
 
 ## License
 

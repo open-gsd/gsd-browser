@@ -18,12 +18,12 @@ const EVAL_MAX_RESULT_BYTES: usize = 64 * 1024;
 /// Handle `console` command — returns buffered console log entries.
 ///
 /// Params:
-/// - `clear` (bool, default true): if true, drains the buffer; if false, snapshots.
+/// - `clear` (bool, default false): if true, drains the buffer after reading; if false (default), snapshots (preserves for later har-export, replay, etc.).
 pub fn handle_console(logs: &DaemonLogs, params: &Value) -> Result<Value, String> {
     let clear = params
         .get("clear")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     let entries = if clear {
         logs.console.drain()
@@ -43,13 +43,13 @@ pub fn handle_console(logs: &DaemonLogs, params: &Value) -> Result<Value, String
 /// Handle `network` command — returns buffered network log entries.
 ///
 /// Params:
-/// - `clear` (bool, default true): if true, drains the buffer; if false, snapshots.
+/// - `clear` (bool, default false): if true, drains the buffer after reading; if false (default), snapshots (preserves data for har-export etc.).
 /// - `filter` (string, default "all"): "all", "errors", or "fetch-xhr".
 pub fn handle_network(logs: &DaemonLogs, params: &Value) -> Result<Value, String> {
     let clear = params
         .get("clear")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
     let filter = params
         .get("filter")
         .and_then(|v| v.as_str())
@@ -88,12 +88,12 @@ pub fn handle_network(logs: &DaemonLogs, params: &Value) -> Result<Value, String
 /// Handle `dialog` command — returns buffered dialog events.
 ///
 /// Params:
-/// - `clear` (bool, default true): if true, drains the buffer; if false, snapshots.
+/// - `clear` (bool, default false): if true, drains the buffer after reading; if false (default), snapshots (preserves for later inspection).
 pub fn handle_dialog(logs: &DaemonLogs, params: &Value) -> Result<Value, String> {
     let clear = params
         .get("clear")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     let entries = if clear {
         logs.dialog.drain()

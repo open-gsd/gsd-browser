@@ -43,6 +43,7 @@ fn mouse_button(button: Option<&str>) -> Result<MouseButton, String> {
     }
 }
 
+#[allow(dead_code)]
 pub fn mouse_buttons_mask(button: &str) -> Result<i64, String> {
     Ok(mouse_buttons_mask_for_button(&mouse_button(Some(button))?))
 }

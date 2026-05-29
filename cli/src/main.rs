@@ -1,6 +1,10 @@
 mod daemon;
 mod daemon_client;
+mod mcp;
 mod output;
+
+#[cfg(feature = "bidi")]
+mod bidi_spike;
 
 use clap::{Parser, Subcommand};
 use gsd_browser_common::config::Config;
@@ -9,7 +13,7 @@ use std::process::Command;
 
 const INSTALLER_URL: &str = "https://install.gsd.build/browser";
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(
     name = "gsd-browser",
     version,
@@ -50,11 +54,26 @@ pub struct Cli {
     #[arg(long, global = true)]
     no_narration_delay: bool,
 
+    /// Enable stealth mode for undetectable automation.
+    /// Adds realistic fingerprints (UA, hardware, locale, WebGL, etc.),
+    /// patched CDP signals, anti-detection launch flags, and human-like input.
+    /// Equivalent to --backend stealth in many cases.
+    #[arg(long, global = true)]
+    stealth: bool,
+
+    /// Choose CDP backend implementation (feature-gated).
+    /// Supported: chromiumoxide (default), chromey, chaser-oxide, ferrous, stealth.
+    /// "stealth" selects a hardened profile (chaser-oxide style when feature enabled).
+    /// Requires the matching cargo feature (e.g. cargo install --features chromey-backend ...).
+    /// Default build is always the stable chromiumoxide backend.
+    #[arg(long, global = true, value_name = "NAME")]
+    backend: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum Commands {
     /// Navigate to a URL
     Navigate {
@@ -73,14 +92,22 @@ enum Commands {
     Reload,
     /// Get console log entries
     Console {
-        /// Don't clear the buffer after reading
+        /// Clear (drain) the buffer after reading. Default: snapshot only (preserve entries for later export/replay).
         #[arg(long)]
+        clear: bool,
+
+        /// (deprecated) Use --clear instead. Kept for compatibility.
+        #[arg(long, hide = true)]
         no_clear: bool,
     },
     /// Get network log entries
     Network {
-        /// Don't clear the buffer after reading
+        /// Clear (drain) the buffer after reading. Default: snapshot only (preserve for har-export etc.).
         #[arg(long)]
+        clear: bool,
+
+        /// (deprecated) Use --clear instead. Kept for compatibility.
+        #[arg(long, hide = true)]
         no_clear: bool,
 
         /// Filter: all, errors, or fetch-xhr
@@ -89,8 +116,12 @@ enum Commands {
     },
     /// Get dialog event entries
     Dialog {
-        /// Don't clear the buffer after reading
+        /// Clear (drain) the buffer after reading. Default: snapshot only (preserve entries).
         #[arg(long)]
+        clear: bool,
+
+        /// (deprecated) Use --clear instead. Kept for compatibility.
+        #[arg(long, hide = true)]
         no_clear: bool,
     },
     /// Evaluate a JavaScript expression
@@ -344,13 +375,23 @@ enum Commands {
     ListPages,
     /// Switch active page by ID
     SwitchPage {
-        /// Page ID to switch to (from list-pages)
-        id: u64,
+        /// Page ID to switch to (from list-pages). Accepts both positional form and --id <N>.
+        #[arg(long, value_name = "ID")]
+        id: Option<u64>,
+
+        /// Positional ID (alternative to --id)
+        #[arg(value_name = "ID", required_unless_present = "id")]
+        positional: Option<u64>,
     },
     /// Close a browser page by ID
     ClosePage {
-        /// Page ID to close (from list-pages)
-        id: u64,
+        /// Page ID to close (from list-pages). Accepts both positional form and --id <N>.
+        #[arg(long, value_name = "ID")]
+        id: Option<u64>,
+
+        /// Positional ID (alternative to --id)
+        #[arg(value_name = "ID", required_unless_present = "id")]
+        positional: Option<u64>,
     },
     /// List all frames in the active page
     ListFrames,
@@ -702,6 +743,13 @@ enum Commands {
         #[arg(long)]
         identity_project: Option<String>,
     },
+    /// Internal spike: exercise rustenium BiDi backend (compile with --features bidi)
+    #[command(name = "_bidi_spike", hide = true)]
+    BidiSpike {
+        /// URL to navigate (defaults to example.com in spike)
+        #[arg(long)]
+        url: Option<String>,
+    },
     /// Daemon management
     Daemon {
         #[command(subcommand)]
@@ -711,9 +759,11 @@ enum Commands {
     CloudMethods,
     /// Update gsd-browser using the release installer
     Update,
+    /// Run as an MCP server over stdio (primary path for AI agents)
+    Mcp,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum DaemonCmd {
     /// Start the daemon (usually auto-started)
     Start,
@@ -775,6 +825,12 @@ async fn main() {
     if cli.no_narration_delay {
         std::env::set_var("GSD_BROWSER_NO_NARRATION_DELAY", "1");
     }
+    if cli.stealth {
+        std::env::set_var("GSD_BROWSER_BROWSER_STEALTH", "true");
+    }
+    if let Some(b) = &cli.backend {
+        std::env::set_var("GSD_BROWSER_BROWSER_BACKEND", b);
+    }
 
     let result = match &cli.command {
         Commands::Serve {
@@ -801,6 +857,23 @@ async fn main() {
             }
             Ok(())
         }
+
+        Commands::BidiSpike { url } => {
+            #[cfg(feature = "bidi")]
+            {
+                if let Err(e) = bidi_spike::run_bidi_spike(url.clone()).await {
+                    eprintln!("[bidi-spike] error: {e}");
+                    std::process::exit(1);
+                }
+                Ok(())
+            }
+            #[cfg(not(feature = "bidi"))]
+            {
+                let _ = url;
+                eprintln!("Error: bidi spike requires compiling with the 'bidi' feature: cargo run --features bidi -- _bidi_spike");
+                std::process::exit(1);
+            }
+        }
         Commands::Daemon { cmd } => match cmd {
             DaemonCmd::Start => cmd_daemon_start(&cli).await,
             DaemonCmd::Stop => cmd_daemon_stop(&cli).await,
@@ -808,13 +881,45 @@ async fn main() {
         },
         Commands::CloudMethods => cmd_cloud_methods(&cli),
         Commands::Update => cmd_update(&cli),
+        Commands::Mcp => cmd_mcp(&cli).await,
         Commands::Navigate { url, .. } => cmd_navigate(&cli, url).await,
         Commands::Back => cmd_back(&cli).await,
         Commands::Forward => cmd_forward(&cli).await,
         Commands::Reload => cmd_reload(&cli).await,
-        Commands::Console { no_clear } => cmd_console(&cli, *no_clear).await,
-        Commands::Network { no_clear, filter } => cmd_network(&cli, *no_clear, filter).await,
-        Commands::Dialog { no_clear } => cmd_dialog(&cli, *no_clear).await,
+        Commands::Console { clear, no_clear } => {
+            let effective_clear = if *clear {
+                true
+            } else if *no_clear {
+                false
+            } else {
+                false
+            };
+            cmd_console(&cli, effective_clear).await
+        }
+        Commands::Network {
+            clear,
+            no_clear,
+            filter,
+        } => {
+            let effective_clear = if *clear {
+                true
+            } else if *no_clear {
+                false
+            } else {
+                false
+            };
+            cmd_network(&cli, effective_clear, filter).await
+        }
+        Commands::Dialog { clear, no_clear } => {
+            let effective_clear = if *clear {
+                true
+            } else if *no_clear {
+                false
+            } else {
+                false
+            };
+            cmd_dialog(&cli, effective_clear).await
+        }
         Commands::Eval { expression } => cmd_eval(&cli, expression).await,
         Commands::Click { selector, x, y } => cmd_click(&cli, selector.as_deref(), *x, *y).await,
         Commands::Type {
@@ -927,8 +1032,18 @@ async fn main() {
             summary_only,
         } => cmd_batch(&cli, steps, *stop_on_failure, *summary_only).await,
         Commands::ListPages => cmd_list_pages(&cli).await,
-        Commands::SwitchPage { id } => cmd_switch_page(&cli, *id).await,
-        Commands::ClosePage { id } => cmd_close_page(&cli, *id).await,
+        Commands::SwitchPage { id, positional } => {
+            let resolved = id
+                .or(*positional)
+                .expect("clap guarantees one id is present");
+            cmd_switch_page(&cli, resolved).await
+        }
+        Commands::ClosePage { id, positional } => {
+            let resolved = id
+                .or(*positional)
+                .expect("clap guarantees one id is present");
+            cmd_close_page(&cli, resolved).await
+        }
         Commands::ListFrames => cmd_list_frames(&cli).await,
         Commands::SelectFrame {
             name,
@@ -1195,6 +1310,13 @@ fn cmd_update(cli: &Cli) -> CmdResult {
     Ok(())
 }
 
+async fn cmd_mcp(cli: &Cli) -> CmdResult {
+    // Delegate to the MCP module. This starts the stdio MCP server that re-uses
+    // the existing daemon client for all real browser work (auto-start, sessions,
+    // --json behavior, error handling, etc.).
+    mcp::run_stdio_server(cli).await
+}
+
 fn exit_with_validation_error(cli: &Cli, message: impl Into<String>) -> ! {
     let message = message.into();
     if cli.json {
@@ -1312,10 +1434,10 @@ async fn cmd_reload(cli: &Cli) -> CmdResult {
     handle_response(cli, resp, output::format_text_reload)
 }
 
-async fn cmd_console(cli: &Cli, no_clear: bool) -> CmdResult {
+async fn cmd_console(cli: &Cli, clear: bool) -> CmdResult {
     let resp = daemon_client::send_request(
         "console",
-        serde_json::json!({"clear": !no_clear}),
+        serde_json::json!({"clear": clear}),
         cli.browser_path.as_deref(),
         cli.cdp_url.as_deref(),
         cli.session.as_deref(),
@@ -1324,10 +1446,10 @@ async fn cmd_console(cli: &Cli, no_clear: bool) -> CmdResult {
     handle_response(cli, resp, output::format_text_console)
 }
 
-async fn cmd_network(cli: &Cli, no_clear: bool, filter: &str) -> CmdResult {
+async fn cmd_network(cli: &Cli, clear: bool, filter: &str) -> CmdResult {
     let resp = daemon_client::send_request(
         "network",
-        serde_json::json!({"clear": !no_clear, "filter": filter}),
+        serde_json::json!({"clear": clear, "filter": filter}),
         cli.browser_path.as_deref(),
         cli.cdp_url.as_deref(),
         cli.session.as_deref(),
@@ -1336,10 +1458,10 @@ async fn cmd_network(cli: &Cli, no_clear: bool, filter: &str) -> CmdResult {
     handle_response(cli, resp, output::format_text_network)
 }
 
-async fn cmd_dialog(cli: &Cli, no_clear: bool) -> CmdResult {
+async fn cmd_dialog(cli: &Cli, clear: bool) -> CmdResult {
     let resp = daemon_client::send_request(
         "dialog",
-        serde_json::json!({"clear": !no_clear}),
+        serde_json::json!({"clear": clear}),
         cli.browser_path.as_deref(),
         cli.cdp_url.as_deref(),
         cli.session.as_deref(),

@@ -4,6 +4,13 @@ set -euo pipefail
 # gsd-browser installer
 # Usage: curl -fsSL https://install.gsd.build/browser | bash
 #
+# For AI agents (recommended 2026+ path): After install, run `gsd-browser mcp` as your MCP server.
+#   - Tailored quickstart: $INSTALL_DIR/scripts/mcp-quickstart.sh cursor (or claude/vscode/generic)
+#   - Full docs: docs/mcp.md + docs/AGENT-BEST-PRACTICES.md (50+ tools, live resources, executable prompts, refs, evidence bundles, human collaboration via viewer, self-healing action cache, batch, etc.)
+#   - Example config: docs/examples/mcp-client-config.json
+#
+# The installer also offers to install the curated gsd-browser-skill/ pack for coding agents (Claude Code, Codex, Gemini CLI, etc.).
+#
 # Environment variables (advanced):
 #   GSD_BROWSER_VERSION       - install a specific version (default: latest)
 #   GSD_BROWSER_DIR           - override install directory (default: $HOME/.gsd-browser)
@@ -37,7 +44,7 @@ banner() {
   echo "  ██║  ███╗███████╗██║  ██║█████╗██████╔╝██████╔╝██║   ██║██║ █╗ ██║███████╗█████╗  ██████╔╝"
   echo "  ██║   ██║╚════██║██║  ██║╚════╝██╔══██╗██╔══██╗██║   ██║██║███╗██║╚════██║██╔══╝  ██╔══██╗"
   echo "  ╚██████╔╝███████║██████╔╝      ██████╔╝██║  ██║╚██████╔╝╚███╔███╔╝███████║███████╗██║  ██║"
-  echo "   ╚═════╝ ╚══════╝╚═════╝       ╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝  ╚═╝"
+  echo "   ╚═════╝ ╚══════╝╚═════╝       ╚═════╝ ╚═╝  ╚═╝  ╚═════╝  ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝  ╚═╝"
   printf "${reset}\n"
   printf "  ${dim}Browser automation for AI agents${reset}\n\n"
 }
@@ -572,6 +579,11 @@ main() {
   printf "    gsd-browser navigate https://example.com\n"
   printf "    gsd-browser screenshot --output page.png\n"
   printf "    gsd-browser snapshot\n"
+  echo ""
+  printf "  ${dim}For AI agents (MCP primary path):${reset}\n"
+  printf "    gsd-browser mcp\n"
+  printf "    $INSTALL_DIR/scripts/mcp-quickstart.sh cursor   # or claude/vscode\n"
+  printf "    See docs/mcp.md and docs/AGENT-BEST-PRACTICES.md\n"
   echo ""
 }
 

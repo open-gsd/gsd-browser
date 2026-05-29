@@ -2,11 +2,13 @@ use gsd_browser_common::viewer::PageStateV1;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::watch;
 
+#[allow(dead_code)]
 pub struct PageStateStore {
     frame_seq: AtomicU64,
     sender: watch::Sender<PageStateV1>,
 }
 
+#[allow(dead_code)]
 impl PageStateStore {
     pub fn new() -> Self {
         let initial = PageStateV1 {

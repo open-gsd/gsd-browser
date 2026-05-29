@@ -3,9 +3,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionHealthStatus {
+    #[default]
     Starting,
     Healthy,
     Degraded,
@@ -24,12 +25,6 @@ impl SessionHealthStatus {
             Self::Stopped => "stopped",
             Self::Unhealthy => "unhealthy",
         }
-    }
-}
-
-impl Default for SessionHealthStatus {
-    fn default() -> Self {
-        Self::Starting
     }
 }
 

@@ -1,5 +1,7 @@
 <overview>
 Snapshots assign versioned refs to interactive page elements. Refs are the primary mechanism for deterministic element interaction — they eliminate fragile CSS selectors by giving each element a stable, versioned identifier.
+
+**MCP Critical:** `browser_snapshot` (and the `gsd-browser://latest-snapshot` resource) + `_ref` tools (`browser_click_ref`, `browser_fill_ref`, `browser_get_ref`, `browser_hover_ref`) are core to reliable agent flows. The MCP best-practices guide and all built-in prompts stress "snapshot early, snapshot often". After navigation or major DOM changes, always re-snapshot (or re-read the latest-snapshot resource) before using any ref-based tool.
 </overview>
 
 <how_refs_work>
@@ -17,6 +19,8 @@ Running `gsd-browser snapshot` scans the page and assigns refs like `@v1:e1`, `@
 @v1:e4  [a] "Forgot password?"
 ```
 
+**MCP agents:** The `browser_snapshot` tool returns the same structured ref data. Several MCP prompts and the response envelopes explicitly remind you to re-snapshot.
+
 </how_refs_work>
 
 <staleness_rule>
@@ -30,60 +34,42 @@ Running `gsd-browser snapshot` scans the page and assigns refs like `@v1:e1`, `@
 After any of these, **always re-snapshot before interacting**:
 
 ```bash
-gsd-browser click-ref @v1:e3            # Submit form
+gsd-browser navigate https://example.com
+gsd-browser snapshot          # @v1:*
+# ... interact with @v1:* refs ...
+gsd-browser click-ref @v1:e3
 gsd-browser wait-for --condition network_idle
-gsd-browser snapshot                     # Get fresh refs (@v2:eN)
-gsd-browser click-ref @v2:e1            # Use new version
+gsd-browser snapshot          # now @v2:* — old refs are invalid
 ```
 
-If you use a stale ref, you'll get: `Error: resolve_ref: JS evaluation failed: ref @v1:e3 not found`
+**MCP equivalent pattern:** `browser_navigate` → (read `gsd-browser://latest-snapshot` or call `browser_snapshot`) → use refs → after action that changes page → repeat.
 
 </staleness_rule>
 
 <snapshot_modes>
 
-| Mode | What it captures | Use when |
-|------|-----------------|----------|
-| `interactive` | Buttons, inputs, links, selects | General interaction (default) |
-| `form` | Form fields with labels and current values | Filling out forms |
-| `dialog` | Elements inside open dialogs/modals | Interacting with modals |
-| `navigation` | Links and nav elements | Finding navigation paths |
-| `errors` | Error messages, validation warnings | Checking for errors |
-| `headings` | Heading elements (h1-h6) | Understanding page structure |
-| `visible_only` | All visible elements | When you need everything |
+Use `--mode` (or the `mode` param in MCP `browser_snapshot`) to focus the snapshot:
 
-```bash
-gsd-browser snapshot --mode form --selector "#signup-form"
-```
+| Mode | Captures | Typical MCP/Agent Use |
+|------|----------|-----------------------|
+| interactive (default) | Buttons, inputs, links, selects | General navigation & forms |
+| form | Form fields + current values + labels | `browser_analyze_form` + `fill_form` flows |
+| dialog | Content inside open modals | Handling dialogs |
+| navigation | Nav links and menus | Site exploration |
+| errors | Error messages / validation | Assertion + debug |
+| headings | h1-h6 | Page structure / scraping |
+| visible_only | Everything visible | Broad visual audit |
 
 </snapshot_modes>
 
-<scoping_and_limits>
+<best_practices>
 
-Scope a snapshot to a specific section:
+- Snapshot with higher `--limit` on complex/SPA pages.
+- Scope with `--selector` when you only care about a region (e.g. a specific form or table).
+- After `browser_act` (semantic) that may have caused navigation, still snapshot before the next ref-based step.
+- Combine snapshot with `browser_get_ref <ref>` (MCP) when you need bbox, ARIA, selector hints, or structural signature for debugging.
+- The action cache + `browser_find_element` provide resilience when exact refs are uncertain.
 
-```bash
-gsd-browser snapshot --selector "#login-form"
-gsd-browser snapshot --selector "main"
-```
+See root SKILL.md (Snapshot & Refs section) and docs/AGENT-BEST-PRACTICES.md (Golden Rule #1 and the self-healing section) for full patterns.
 
-Increase the element limit (default: 40):
-
-```bash
-gsd-browser snapshot --limit 80
-```
-
-</scoping_and_limits>
-
-<ref_commands>
-
-| Command | Purpose |
-|---------|---------|
-| `get-ref <ref>` | Get metadata for a ref (role, name, selector) |
-| `click-ref <ref>` | Click the element |
-| `hover-ref <ref>` | Hover over the element |
-| `fill-ref <ref> <text>` | Type text into the element |
-
-All ref args are **positional** — no `--ref` flag.
-
-</ref_commands>
+</best_practices>

@@ -142,6 +142,19 @@ pub async fn handle_assert(
                     actual_url.to_string(),
                 )
             }
+            "title_contains" => {
+                // Direct title fetch via CDP eval (target_url does not include title)
+                let actual_title = match page.evaluate_expression("document.title").await {
+                    Ok(res) => res
+                        .value()
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    Err(_) => String::new(),
+                };
+                let pass = actual_title.contains(text);
+                (pass, format!("title contains '{text}'"), actual_title)
+            }
             "text_visible" => {
                 if !text_cache.contains_key(text) {
                     let result = inspection::text_query(page, state, text, true)

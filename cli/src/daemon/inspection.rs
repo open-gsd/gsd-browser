@@ -400,7 +400,33 @@ pub async fn eval_expression(
   }}
   try {{
     const value = resolved.context.win.eval({expression});
-    return JSON.stringify({{ ok: true, value }});
+    // Preserve JSON-serializable objects while replacing values JSON cannot encode.
+    let safeValue;
+    try {{
+      if (value === undefined) {{
+        safeValue = null;
+      }} else if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {{
+        safeValue = value;
+      }} else if (typeof value === 'bigint' || typeof value === 'symbol' || typeof value === 'function') {{
+        safeValue = String(value);
+      }} else {{
+        const seen = new WeakSet();
+        const encoded = JSON.stringify(value, (_key, inner) => {{
+          if (inner === undefined) return null;
+          if (typeof inner === 'bigint' || typeof inner === 'symbol' || typeof inner === 'function') return String(inner);
+          if (inner && typeof inner === 'object') {{
+            if (inner === resolved.context.win || inner === inner.window) return '[Window]';
+            if (seen.has(inner)) return '[Circular]';
+            seen.add(inner);
+          }}
+          return inner;
+        }});
+        safeValue = encoded === undefined ? String(value) : JSON.parse(encoded);
+      }}
+    }} catch (_) {{
+      safeValue = '[Unserializable]';
+    }}
+    return JSON.stringify({{ ok: true, value: safeValue }});
   }} catch (err) {{
     return JSON.stringify({{ ok: false, error: String(err), boundaries: resolved.boundaries || [] }});
   }}

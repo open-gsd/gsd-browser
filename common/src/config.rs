@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 /// Top-level configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
     pub browser: BrowserConfig,
@@ -23,22 +23,8 @@ pub struct Config {
     pub timeline: TimelineConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            browser: BrowserConfig::default(),
-            daemon: DaemonConfig::default(),
-            screenshot: ScreenshotConfig::default(),
-            settle: SettleConfig::default(),
-            logs: LogsConfig::default(),
-            artifacts: ArtifactsConfig::default(),
-            timeline: TimelineConfig::default(),
-        }
-    }
-}
-
 /// Browser launch configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct BrowserConfig {
     /// Path to Chrome/Chromium binary. None = auto-detect.
@@ -51,17 +37,19 @@ pub struct BrowserConfig {
     pub args: Vec<String>,
     /// Whether to launch headless (default: false — visible by default).
     pub headless: bool,
-}
-
-impl Default for BrowserConfig {
-    fn default() -> Self {
-        Self {
-            path: None,
-            cdp_url: None,
-            args: Vec::new(),
-            headless: false,
-        }
-    }
+    /// Enable stealth mode: realistic UA/hardware/locale, profile spoofing,
+    /// patched CDP signals (cdc_, webdriver, etc.), human-like input curves.
+    /// When true, adds many anti-detection flags and post-launch patches.
+    /// Also honored by --stealth CLI flag (sets via env).
+    pub stealth: bool,
+    /// Backend for the CDP client (feature-gated support):
+    /// "chromiumoxide" (default, stable), "chromey" (updated CDP + features via feature flag),
+    /// "chaser-oxide" (stealth patches + human input at transport level),
+    /// "ferrous" (modern ergonomics, experimental), or "stealth" (enables stealth profile).
+    /// Requires enabling the corresponding cargo feature in cli (e.g. --features chromey-backend).
+    /// The default build always uses stable chromiumoxide unless a backend feature + this
+    /// value selects an alternative at launch time (launch code is feature-gated).
+    pub backend: Option<String>,
 }
 
 /// Daemon configuration.
@@ -144,18 +132,12 @@ impl Default for LogsConfig {
 }
 
 /// Artifact output configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ArtifactsConfig {
     /// Base directory for artifacts (screenshots, PDFs, traces, etc.).
     /// Default: `~/.gsd-browser/artifacts`
     pub dir: Option<String>,
-}
-
-impl Default for ArtifactsConfig {
-    fn default() -> Self {
-        Self { dir: None }
-    }
 }
 
 /// Timeline configuration.
@@ -292,6 +274,14 @@ impl Config {
                 self.browser.headless = b;
             }
         }
+        if let Ok(v) = std::env::var("GSD_BROWSER_BROWSER_STEALTH") {
+            if let Ok(b) = v.parse::<bool>() {
+                self.browser.stealth = b;
+            }
+        }
+        if let Ok(v) = std::env::var("GSD_BROWSER_BROWSER_BACKEND") {
+            self.browser.backend = Some(v);
+        }
 
         // Screenshot
         if let Ok(v) = std::env::var("GSD_BROWSER_SCREENSHOT_QUALITY") {
@@ -390,6 +380,8 @@ mod tests {
         // Browser
         assert!(config.browser.path.is_none());
         assert!(!config.browser.headless);
+        assert!(!config.browser.stealth);
+        assert!(config.browser.backend.is_none());
 
         // Timeline
         assert!(config.timeline.enabled);
@@ -440,6 +432,7 @@ timeout_ms = 1000
         // Sections not in the file remain unchanged
         assert_eq!(config.logs.max_buffer_size, 1000);
         assert!(!config.browser.headless);
+        assert!(!config.browser.stealth);
     }
 
     #[test]
@@ -490,6 +483,8 @@ quality = 90
         std::env::set_var("GSD_BROWSER_SETTLE_TIMEOUT_MS", "2000");
         std::env::set_var("GSD_BROWSER_LOGS_MAX_BUFFER_SIZE", "500");
         std::env::set_var("GSD_BROWSER_BROWSER_PATH", "/usr/bin/chromium");
+        std::env::set_var("GSD_BROWSER_BROWSER_STEALTH", "true");
+        std::env::set_var("GSD_BROWSER_BROWSER_BACKEND", "chaser-oxide");
 
         let mut config = Config::default();
         config.apply_env_overrides();
@@ -498,12 +493,16 @@ quality = 90
         assert_eq!(config.settle.timeout_ms, 2000);
         assert_eq!(config.logs.max_buffer_size, 500);
         assert_eq!(config.browser.path.as_deref(), Some("/usr/bin/chromium"));
+        assert!(config.browser.stealth);
+        assert_eq!(config.browser.backend.as_deref(), Some("chaser-oxide"));
 
         // Clean up
         std::env::remove_var("GSD_BROWSER_SCREENSHOT_QUALITY");
         std::env::remove_var("GSD_BROWSER_SETTLE_TIMEOUT_MS");
         std::env::remove_var("GSD_BROWSER_LOGS_MAX_BUFFER_SIZE");
         std::env::remove_var("GSD_BROWSER_BROWSER_PATH");
+        std::env::remove_var("GSD_BROWSER_BROWSER_STEALTH");
+        std::env::remove_var("GSD_BROWSER_BROWSER_BACKEND");
     }
 
     #[test]
