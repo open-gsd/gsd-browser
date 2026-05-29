@@ -17,7 +17,7 @@ Run `gsd-browser update` to install the current release.
 
 ### Pre-built binaries
 
-Download from [GitHub Releases](https://github.com/gsd-build/gsd-browser/releases):
+Download from [GitHub Releases](https://github.com/open-gsd/gsd-browser/releases):
 
 | Platform | Asset |
 |----------|-------|
@@ -29,14 +29,14 @@ Download from [GitHub Releases](https://github.com/gsd-build/gsd-browser/release
 ### Build from source
 
 ```bash
-git clone https://github.com/gsd-build/gsd-browser.git
+git clone https://github.com/open-gsd/gsd-browser.git
 cd gsd-browser
 cargo install --path cli
 ```
 
-### Package registries
+### crates.io
 
-The public npm package (`@gsd-build/gsd-browser`) and crates.io package (`gsd-browser`) are not published yet. Use the installer, GitHub release assets, or a source build.
+The crates.io package (`gsd-browser`) is not published yet. Use the installer, GitHub release assets, or a source build.
 
 ## Quick Start
 
