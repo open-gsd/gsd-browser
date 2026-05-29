@@ -26,6 +26,8 @@ vendor/
 coverage/
 .cache/
 tmp/
+audit-output/
+docs/audit-*.md
 .bg-shell/
 .worktrees/
 .rewrite-backups/

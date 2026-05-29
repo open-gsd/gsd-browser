@@ -16,22 +16,41 @@ allowed-tools: Bash(gsd-browser:*), Bash(gsd-browser *)
 
 # Browser Automation with gsd-browser
 
-## Critical Rules
+**Primary path for AI agents in 2026+:** Use the MCP server — `gsd-browser mcp`.
+
+It exposes **50+ tools**, live resources (real snapshot/refs/state data), and executable prompts over stdio. All the unique strengths (versioned refs, live viewer + human collaboration/takeover/annotations/recordings, semantic intents, evidence bundles, self-healing action cache, batch execution, vault, visual regression, safety scanning, etc.) are available automatically to Cursor, Claude Desktop, VS Code + Copilot, and any other MCP client.
+
+**Quickstart for agents:**
+```bash
+gsd-browser mcp
+```
+Then point your MCP client at it (see `./scripts/mcp-quickstart.sh cursor` or `claude`/`vscode` for tailored configs).
+
+**Essential reading for MCP agents:**
+- `docs/mcp.md` — Architecture, capabilities, client config examples, quickstart script.
+- `docs/AGENT-BEST-PRACTICES.md` — Golden rules, recommended workflows (login, audit, human-in-the-loop, evidence, self-healing), "When to Use What" table, response envelope usage, prompt/resource patterns.
+- `docs/examples/mcp-client-config.json` — Ready example.
+
+The detailed command reference, error recovery, and workflow patterns in this SKILL.md document the exact semantics of the MCP tools (they are a direct 1:1 mapping). Use this as the source of truth when an MCP tool needs deeper clarification.
+
+The installable curated skill pack lives in `gsd-browser-skill/` (installed via the main installer or `gsd-browser skill install`).
+
+## Critical Rules (apply to both direct CLI and MCP usage)
 
 1. **The daemon auto-starts on browser commands.** `daemon health` only reports state; it does not start a session. Use `daemon start` only when you want to pre-warm or verify daemon lifecycle explicitly.
-2. **Always re-snapshot after page changes.** Refs are versioned (`@v1:e1`). After navigation, form submission, or dynamic content loading, old refs are stale. Run `gsd-browser snapshot` to get fresh refs.
-3. **Use `--json` when parsing output.** Use text mode when reading output yourself. Use `--json` when you need to extract values programmatically (e.g., checking assertion results, parsing snapshot refs).
-4. **Positional args have no flag prefix.** Commands like `click`, `type`, `hover` take positional args — do NOT add `--selector`. See exact syntax in command reference below.
-5. **Use `batch` for atomic multi-step flows.** Batch reduces round trips and keeps pass/fail checks in one call. Use separate commands when you need intermediate output (e.g., snapshot to discover refs).
-6. **Use `view` when the user wants to watch or direct the browser.** The live viewer is an authenticated local workbench with Control, Annotate, Record, and Sensitive modes. Keep CLI commands on the same named session.
+2. **Always re-snapshot after page changes.** Refs are versioned (`@v1:e1`). After navigation, form submission, or dynamic content loading, old refs are stale. Run `gsd-browser snapshot` (or read the `gsd-browser://latest-snapshot` MCP resource) to get fresh refs.
+3. **Use `--json` when parsing output.** Use text mode when reading output yourself. Use `--json` when you need to extract values programmatically (e.g., checking assertion results, parsing snapshot refs). MCP tools return rich envelopes containing structured_data.
+4. **Positional args have no flag prefix.** Commands like `click`, `type`, `hover` take positional args — do NOT add `--selector`. See exact syntax in command reference below. (MCP equivalents: `browser_click_ref` etc. take `ref` as a simple string param.)
+5. **Use `batch` for atomic multi-step flows.** Batch reduces round trips and keeps pass/fail checks in one call. Use separate commands when you need intermediate output (e.g., snapshot to discover refs). MCP equivalent: `browser_batch`.
+6. **Use `view` when the user wants to watch or direct the browser.** The live viewer is an authenticated local workbench with Control, Annotate, Record, and Sensitive modes. Keep CLI/MCP commands on the same named session. MCP tools: `browser_view`, `browser_takeover`, `browser_annotation_request`, `browser_record_*`, `browser_goal`, etc.
 
 ## Core Workflow
 
 Every browser automation follows this pattern:
 
-1. **Navigate**: `gsd-browser navigate <url>`
-2. **Snapshot**: `gsd-browser snapshot` (get versioned refs like `@v1:e1`, `@v1:e2`)
-3. **Interact**: Use refs to click, fill, hover
+1. **Navigate**: `gsd-browser navigate <url>` (or `browser_navigate` via MCP)
+2. **Snapshot**: `gsd-browser snapshot` (get versioned refs like `@v1:e1`, `@v1:e2`) — or read MCP resource `gsd-browser://latest-snapshot`
+3. **Interact**: Use refs to click, fill, hover (or `browser_act` semantic intents first)
 4. **Re-snapshot**: After navigation or DOM changes, get fresh refs
 
 ```bash
@@ -46,6 +65,8 @@ gsd-browser wait-for --condition network_idle
 gsd-browser snapshot  # REQUIRED — old refs are now stale
 ```
 
+**MCP agents:** After any navigation or major action, prefer re-reading `gsd-browser://latest-snapshot` (or calling `browser_snapshot`) before using `_ref` tools.
+
 ## Command Chaining
 
 Commands can be chained with `&&` in a single shell invocation. Browser state also persists across separate invocations through the background daemon when you stay on the same session.
@@ -58,13 +79,15 @@ gsd-browser navigate https://example.com && gsd-browser wait-for --condition net
 gsd-browser fill-ref @v1:e1 "user@example.com" && gsd-browser fill-ref @v1:e2 "password123" && gsd-browser click-ref @v1:e3
 ```
 
-**When to chain:** Use `&&` when you don't need intermediate output. Run commands separately when you need to parse output first (e.g., snapshot to discover refs, then interact).
+**When to chain:** Use `&&` when you don't need intermediate output. Run commands separately when you need to parse output first (e.g., snapshot to discover refs, then interact). For MCP, use `browser_batch` for atomicity.
 
 ---
 
 ## Command Reference
 
 Argument syntax: `<arg>` = required positional, `[arg]` = optional positional, `--flag` = named option. Do NOT add `--` prefix to positional args.
+
+(MCP tool names are `browser_` + kebab-to-snake of the CLI command where applicable. Full authoritative list and schemas are returned live by the MCP server via `tools/list`. See `docs/mcp.md` and `docs/AGENT-BEST-PRACTICES.md` for agent-optimized usage.)
 
 ### Navigation
 
@@ -161,7 +184,7 @@ gsd-browser assert --checks '[
 ]'
 ```
 
-**Assertion kinds (17):** `url_contains`, `text_visible`, `text_hidden`, `selector_visible`, `selector_hidden`, `value_equals`, `checked`, `no_console_errors`, `no_failed_requests`, `request_url_seen`, `response_status`, `console_message_matches`, `network_count`, `console_count`, `element_count`, `no_console_errors_since`, `no_failed_requests_since`.
+**Assertion kinds (18):** `url_contains`, `title_contains`, `text_visible`, `text_hidden`, `selector_visible`, `selector_hidden`, `value_equals`, `checked`, `no_console_errors`, `no_failed_requests`, `request_url_seen`, `response_status`, `console_message_matches`, `network_count`, `console_count`, `element_count`, `no_console_errors_since`, `no_failed_requests_since`.
 
 ### Batch Execution
 
@@ -176,12 +199,15 @@ gsd-browser batch --steps '[
   {"action": "type", "selector": "input[name=password]", "text": "secret", "submit": true},
   {"action": "assert", "checks": [{"kind": "url_contains", "text": "/dashboard"}]}
 ]'
+```
 
 # With --summary-only to reduce output
 gsd-browser batch --steps '[...]' --summary-only
 ```
 
 **Batch actions:** `navigate`, `click`, `type`, `key_press`, `wait_for`, `assert`, `click_ref`, `fill_ref`.
+
+(MCP: `browser_batch` — highly recommended for complex agent flows.)
 
 ### Wait Conditions
 
@@ -253,6 +279,8 @@ gsd-browser act --intent fill_email
 | `pagination_next` | click | Next page in pagination |
 | `pagination_prev` | click | Previous page in pagination |
 
+(MCP equivalents: `browser_act`, `browser_find_best`, `browser_find_element` for resilience.)
+
 ### Pages & Frames
 
 Page and frame IDs are **positional** — do NOT use `--id`.
@@ -280,6 +308,8 @@ gsd-browser timeline                               # Query the action timeline
 gsd-browser session-summary                        # Diagnostic summary of current session
 gsd-browser debug-bundle                           # Full debug bundle: screenshot + logs + timeline + a11y tree
 ```
+
+(MCP: `browser_debug_bundle`, `browser_console`, `browser_network`, etc. — use early when stuck.)
 
 ### Live Viewer & Workbench
 
@@ -365,6 +395,8 @@ Use `--no-narration-delay` for fast agent-only runs that keep narration events/h
 ```bash
 gsd-browser --session demo --no-narration-delay click "h1"
 ```
+
+(MCP agents: These are among the highest-leverage capabilities. See `browser_view`, `browser_takeover`, `browser_annotation_*`, `browser_record_*`, `browser_goal`, `browser_step` etc. in the MCP surface and the best-practices guide.)
 
 ### Visual
 
@@ -481,7 +513,7 @@ gsd-browser check-injection --include-hidden       # Include hidden/invisible te
 
 ### Action Cache
 
-Reduce repeated element lookups by caching intent-to-selector mappings.
+Reduce repeated element lookups by caching intent-to-selector mappings (especially powerful for long-running MCP agent sessions with named sessions).
 
 ```bash
 gsd-browser action-cache --action stats            # Show cache metrics
@@ -489,6 +521,8 @@ gsd-browser action-cache --action get --intent submit_form  # Look up cached sel
 gsd-browser action-cache --action put --intent submit_form --selector "#submit-btn" --score 0.95
 gsd-browser action-cache --action clear            # Flush cache
 ```
+
+(MCP: `browser_action_cache` — use for self-healing across agent runs.)
 
 ### Daemon Management
 
@@ -515,9 +549,13 @@ Available on all commands:
 | `--session <name>` | Named session for parallel browser instances |
 | `--no-narration-delay` | Skip narration lead-time sleeps while keeping history/events |
 
+For MCP: pass `session` as a top-level argument to most tools; configure env vars in your MCP client config.
+
 ---
 
 ## Error Recovery
+
+(See also `gsd-browser-skill/references/error-recovery.md` for the curated agent skill version.)
 
 ### Stale refs
 
@@ -531,6 +569,8 @@ Refs become stale after page changes. Fix: re-snapshot and use the new version.
 gsd-browser snapshot        # Get fresh refs (@v2:eN)
 gsd-browser click-ref @v2:e1
 ```
+
+(MCP agents: read `gsd-browser://latest-snapshot` resource or call `browser_snapshot`.)
 
 ### Click/type timeouts
 
@@ -595,6 +635,8 @@ gsd-browser daemon start                           # Retry explicit startup
 ---
 
 ## Common Patterns
+
+(See the MCP best-practices doc for agent-native versions of these flows using tools/resources/prompts.)
 
 ### Form Submission
 
@@ -765,6 +807,8 @@ GSD_BROWSER_SETTLE_TIMEOUT_MS=1000
 GSD_BROWSER_VAULT_KEY=your-encryption-key
 ```
 
+For MCP clients, set these in the `env` block of your mcpServer definition (especially `GSD_BROWSER_VAULT_KEY` and browser path).
+
 ---
 
 ## Session Cleanup
@@ -781,3 +825,14 @@ For parallel sessions:
 gsd-browser --session agent1 daemon stop
 gsd-browser --session agent2 daemon stop
 ```
+
+---
+
+## Additional Resources for Agents
+
+- **MCP-first experience**: `docs/mcp.md`, `docs/AGENT-BEST-PRACTICES.md`, `./scripts/mcp-quickstart.sh`
+- **Curated skill pack for coding agents**: `gsd-browser-skill/SKILL.md` + `references/` + `workflows/` (install via the main installer)
+- **AGENTS.md** (repo root) — high-level pointer
+- **README.md** — highlights and install instructions
+
+The MCP server makes gsd-browser a first-class, extremely powerful browser platform for agents. The content in this SKILL.md remains the complete reference for every capability exposed via MCP.

@@ -400,7 +400,20 @@ pub async fn eval_expression(
   }}
   try {{
     const value = resolved.context.win.eval({expression});
-    return JSON.stringify({{ ok: true, value }});
+    // Safe return: prefer primitive/string, else toString to avoid circular/ non-JSON values (Window etc.)
+    let safeValue;
+    try {{
+      if (value === null || value === undefined || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {{
+        safeValue = value;
+      }} else if (typeof value === 'object') {{
+        safeValue = '[Object]';
+      }} else {{
+        safeValue = String(value);
+      }}
+    }} catch (_) {{
+      safeValue = '[Unserializable]';
+    }}
+    return JSON.stringify({{ ok: true, value: safeValue }});
   }} catch (err) {{
     return JSON.stringify({{ ok: false, error: String(err), boundaries: resolved.boundaries || [] }});
   }}
