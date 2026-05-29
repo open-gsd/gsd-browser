@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "gsd-browser": {
+      "command": "gsd-browser",
+      "args": ["mcp"],
+      "env": {
+        "GSD_BROWSER_BROWSER_PATH": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "GSD_BROWSER_VAULT_KEY": "your-secure-key-here-for-vault"
+      }
+    }
+  }
+}

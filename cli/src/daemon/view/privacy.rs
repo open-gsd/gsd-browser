@@ -1,4 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum CaptureConsumer {
     LocalViewer,
     CloudFrame,
@@ -20,12 +21,14 @@ pub enum CaptureDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum InputActor {
     Agent,
     User,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum InputDecision {
     Allowed,
     Blocked,
@@ -69,6 +72,7 @@ impl PrivacyPolicy {
         }
     }
 
+    #[allow(dead_code)]
     pub fn input_decision(&self, actor: InputActor) -> InputDecision {
         if self.sensitive && actor == InputActor::Agent {
             InputDecision::Blocked

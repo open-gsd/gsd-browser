@@ -22,6 +22,7 @@ pub struct ViewerTokenClaims {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AuthRejectReason {
     MissingToken,
     MalformedToken,
@@ -51,6 +52,7 @@ impl ViewerTokenIssuer {
         Self { secret }
     }
 
+    #[allow(dead_code)]
     pub fn new_for_tests(secret: [u8; 32]) -> Self {
         Self { secret }
     }

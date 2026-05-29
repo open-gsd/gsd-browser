@@ -2381,3 +2381,8 @@ git commit -m "docs: document interactive browser workbench"
 - Keep viewer HTML target-origin-free: no iframe, no proxy, no target script execution in the viewer.
 - Use Browser Use for final viewer UI verification.
 - Use `cargo test --workspace` and `cargo build --workspace` at the final gate.
+
+
+---
+
+**Post-MVP Note (Stealth Backend Integration):** The "remaining-stealth" item (dependency refresh + optional chromey/chaser-oxide/ferrous backends + --stealth flag for fingerprinting + protocol patches + realistic UA/input) was completed separately as an additive, feature-flagged change. It touches only launch/config/CLI surface + a self-contained `apply_stealth_patches` helper. All viewer, control, risk, annotation, and handler contracts remain unchanged. See root README "Stealth Mode" and `cli/src/daemon/mod.rs`.

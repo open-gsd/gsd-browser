@@ -4,6 +4,7 @@ use gsd_browser_common::viewer::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum PageEffect {
     Input,
     Observe,
@@ -13,6 +14,7 @@ pub enum PageEffect {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum PageEffectSource {
     Cloud,
     Viewer,
@@ -193,6 +195,7 @@ impl SharedControlStore {
         Ok(self.snapshot())
     }
 
+    #[allow(dead_code)]
     pub fn request_approval(
         &mut self,
         request: ApprovalRequestV1,
@@ -248,6 +251,7 @@ impl SharedControlStore {
         Ok(self.snapshot())
     }
 
+    #[allow(dead_code)]
     pub fn expire_approval(&mut self) -> Result<SharedControlStateV1, String> {
         self.pending_approval = None;
         self.pending_input = None;

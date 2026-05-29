@@ -1,5 +1,7 @@
 <overview>
 Semantic intents allow interaction by purpose rather than selector. `find-best` returns scored candidates. `act` finds the best match and clicks/focuses it in one call. Intents are predefined categories, not free-form text.
+
+**MCP Note (High Value):** In the MCP server, prefer `browser_act` (and `browser_find_best`) as the first approach for common actions. They are among the most agent-friendly tools because they require no prior snapshot or fragile selectors. Fall back to snapshot + refs only when needed. `browser_find_element` adds further resilience. The action cache (`browser_action_cache`) lets successful intent→selector mappings persist across sessions (use named sessions).
 </overview>
 
 <intent_table>
@@ -18,7 +20,7 @@ Semantic intents allow interaction by purpose rather than selector. `find-best` 
 | `fill_password` | focus | Password input fields |
 | `fill_username` | focus | Username/login input fields |
 | `accept_cookies` | click | Cookie consent accept buttons |
-| `main_content` | click | Main content area (requires semantic markup) |
+| `main_content` | click | Main content area (semantic markup required) |
 | `pagination_next` | click | Next page in pagination |
 | `pagination_prev` | click | Previous page in pagination |
 
@@ -26,49 +28,31 @@ Semantic intents allow interaction by purpose rather than selector. `find-best` 
 
 <usage>
 
-**Find candidates (returns scored matches with selectors):**
-
+**CLI:**
 ```bash
-gsd-browser find-best --intent submit_form
-gsd-browser find-best --intent accept_cookies --scope "#modal"
-```
-
-**Act (find + click/focus in one call):**
-
-```bash
-gsd-browser act --intent submit_form
 gsd-browser act --intent accept_cookies
-gsd-browser act --intent auth_action
-gsd-browser act --intent close_dialog
+gsd-browser find-best --intent primary_cta --scope "#hero"
+gsd-browser act --intent submit_form
 ```
+
+**MCP (recommended for agents):**
+- `browser_act` with `intent` (and optional `scope` + `session`)
+- `browser_find_best` (inspect before acting)
+- `browser_find_element` (intent + text/role/selector fallbacks — great when refs may be stale)
+- After success, optionally `browser_action_cache put` to train the system
+
+See docs/AGENT-BEST-PRACTICES.md "Prefer semantic first, refs second" and the self-healing section. Many of the built-in MCP prompts start with semantic intents.
 
 </usage>
 
-<when_to_use_intents>
+<when_to_fallback>
 
-Use intents when:
-- You don't know the exact selector (cookie banners vary per site)
-- You want resilient interaction that adapts to different page layouts
-- The intent maps cleanly to a predefined category
+Use snapshot + refs (or `browser_find_element`) when:
+- The intent system does not have a matching category for your target
+- You need pixel-precise or context-specific targeting inside a complex widget
+- You have already snapshotted and have fresh, reliable refs
+- You need the full metadata from `get-ref` (bbox, deepPath, structuralSignature, etc.)
 
-Use refs or selectors when:
-- You need precision (specific field among many)
-- The element doesn't map to any predefined intent
-- You've already snapshotted and have the ref
+The combination (semantic first → refs for precision → action cache for learning) is one of gsd-browser's strongest advantages for long-running agentic work.
 
-</when_to_use_intents>
-
-<action_cache>
-
-Intents can be cached to avoid repeated lookups on the same page:
-
-```bash
-gsd-browser action-cache --action put --intent submit_form --selector "#submit-btn" --score 0.95
-gsd-browser action-cache --action get --intent submit_form
-gsd-browser action-cache --action stats
-gsd-browser action-cache --action clear
-```
-
-Cache is per-session and cleared on navigation.
-
-</action_cache>
+</when_to_fallback>
