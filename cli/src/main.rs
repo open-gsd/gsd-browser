@@ -858,7 +858,7 @@ async fn main() {
             Ok(())
         }
 
-        Commands::BidiSpike { url: _ } => {
+        Commands::BidiSpike { url } => {
             #[cfg(feature = "bidi")]
             {
                 if let Err(e) = bidi_spike::run_bidi_spike(url.clone()).await {
@@ -869,6 +869,7 @@ async fn main() {
             }
             #[cfg(not(feature = "bidi"))]
             {
+                let _ = url;
                 eprintln!("Error: bidi spike requires compiling with the 'bidi' feature: cargo run --features bidi -- _bidi_spike");
                 std::process::exit(1);
             }

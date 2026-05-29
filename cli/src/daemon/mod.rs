@@ -153,7 +153,7 @@ pub(crate) async fn set_default_viewport(page: &Page) {
     );
 }
 /// Apply stealth patches for anti-detection when --stealth / backend=stealth is active.
-/// - Patches common CDP automation markers via JS (isolated world where possible)
+/// - Patches common CDP automation markers via preload JS and current-page JS
 /// - Spoofs realistic navigator properties, hardware, locale, plugins
 /// - Clears webdriver flag and automation-controlled hints
 /// - Sets matching Client Hints via emulation (best effort)
@@ -161,7 +161,7 @@ pub(crate) async fn set_default_viewport(page: &Page) {
 async fn apply_stealth_patches(page: &Page, _config: &Config) {
     info!("[gsd-browser-daemon] applying stealth patches (UA/hardware/locale spoofing + CDP signal patches)");
 
-    // 1. Core navigator.webdriver + automation flags removal (works on about:blank and future pages)
+    // 1. Core navigator.webdriver + automation flags removal.
     let stealth_js = r#"
     (() => {
         try {
@@ -228,8 +228,11 @@ async fn apply_stealth_patches(page: &Page, _config: &Config) {
     })();
     "#;
 
+    if let Err(e) = page.evaluate_on_new_document(stealth_js).await {
+        warn!("[gsd-browser-daemon] stealth preload patch failed (non-fatal): {e}");
+    }
     if let Err(e) = page.evaluate_expression(stealth_js).await {
-        warn!("[gsd-browser-daemon] stealth JS patch failed (non-fatal): {e}");
+        warn!("[gsd-browser-daemon] stealth current-page patch failed (non-fatal): {e}");
     }
 
     // 2. Emulation: realistic UA override (v0.9 chromiumoxide compatible; advanced Client Hints require newer CDP)

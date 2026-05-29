@@ -52,7 +52,16 @@ gsd-browser --browser-path "/path/to/chrome" navigate https://example.com
 
 **Step 3: Project-level configuration**
 
-Create `gsd-browser.toml` in your project root (example above in original).
+Create `gsd-browser.toml` in your project root when a project needs browser settings that should travel with the checkout:
+
+```toml
+[browser]
+path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+headless = false
+
+[sessions]
+default = "project"
+```
 
 **Step 4: Set up the encrypted auth vault**
 

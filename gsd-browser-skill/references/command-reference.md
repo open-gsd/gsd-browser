@@ -90,7 +90,7 @@ gsd-browser assert --checks '[
 ]'
 ```
 
-**Assertion kinds (17+):** url_contains, text_visible, text_hidden, selector_visible, selector_hidden, value_equals, checked, no_console_errors, no_failed_requests, request_url_seen, response_status, console_message_matches, network_count, console_count, element_count, and the _since variants.
+**Assertion kinds (18+):** url_contains, title_contains, text_visible, text_hidden, selector_visible, selector_hidden, value_equals, checked, no_console_errors, no_failed_requests, request_url_seen, response_status, console_message_matches, network_count, console_count, element_count, and the _since variants.
 
 **MCP:** `browser_assert` (checks array) and `browser_wait_for` (condition + value + timeout + threshold) are heavily used in agent flows and in the built-in prompts.
 

@@ -219,6 +219,18 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
                             "name": "Active Recordings",
                             "description": "List of in-progress and completed recording bundles",
                             "mimeType": "application/json"
+                        },
+                        {
+                            "uri": "gsd-browser://current-refs",
+                            "name": "Current Refs",
+                            "description": "Fresh interactive snapshot with versioned element refs",
+                            "mimeType": "application/json"
+                        },
+                        {
+                            "uri": "gsd-browser://timeline",
+                            "name": "Timeline",
+                            "description": "Recent browser action timeline for the active session",
+                            "mimeType": "application/json"
                         }
                     ]
                 }
@@ -2323,6 +2335,98 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 return Err(err.message);
             }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
+        }
+
+        "browser_takeover"
+        | "browser_release_control"
+        | "browser_pause"
+        | "browser_resume"
+        | "browser_sensitive_on"
+        | "browser_sensitive_off"
+        | "browser_annotation_clear"
+        | "browser_har_export"
+        | "browser_trace_start"
+        | "browser_trace_stop"
+        | "browser_emulate_device"
+        | "browser_visual_diff" => {
+            let method = match name {
+                "browser_takeover" => "takeover",
+                "browser_release_control" => "release_control",
+                "browser_pause" => "pause",
+                "browser_resume" => "resume",
+                "browser_sensitive_on" => "sensitive_on",
+                "browser_sensitive_off" => "sensitive_off",
+                "browser_annotation_clear" => "annotation_clear",
+                "browser_har_export" => "har_export",
+                "browser_trace_start" => "trace_start",
+                "browser_trace_stop" => "trace_stop",
+                "browser_emulate_device" => "emulate_device",
+                "browser_visual_diff" => "visual_diff",
+                _ => unreachable!(),
+            };
+            let mut params = arguments.clone();
+            if let Some(obj) = params.as_object_mut() {
+                obj.remove("session");
+            }
+            let resp = crate::daemon_client::send_request(
+                method,
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
+            serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
+        }
+
+        "browser_find_element" => {
+            let mut params = json!({});
+            if let Some(intent) = arguments.get("intent").and_then(|v| v.as_str()) {
+                params["intent"] = json!(intent);
+                if let Some(selector) = arguments.get("selector").and_then(|v| v.as_str()) {
+                    params["scope"] = json!(selector);
+                }
+                let resp = crate::daemon_client::send_request(
+                    "find_best",
+                    params,
+                    cli.browser_path.as_deref(),
+                    cli.cdp_url.as_deref(),
+                    session,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                if let Some(err) = resp.error {
+                    return Err(err.message);
+                }
+                serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
+            } else {
+                if let Some(text) = arguments.get("text").and_then(|v| v.as_str()) {
+                    params["text"] = json!(text);
+                }
+                if let Some(role) = arguments.get("role").and_then(|v| v.as_str()) {
+                    params["role"] = json!(role);
+                }
+                if let Some(selector) = arguments.get("selector").and_then(|v| v.as_str()) {
+                    params["selector"] = json!(selector);
+                }
+                let resp = crate::daemon_client::send_request(
+                    "find",
+                    params,
+                    cli.browser_path.as_deref(),
+                    cli.cdp_url.as_deref(),
+                    session,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                if let Some(err) = resp.error {
+                    return Err(err.message);
+                }
+                serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
+            }
         }
 
         other => {

@@ -60,7 +60,7 @@ pub async fn run_bidi_spike(url: Option<String>) -> Result<(), Box<dyn std::erro
     // Basic interaction: click (find a link on example.com and click it via precise BidiMouse)
     // example.com has one primary <a> link.
     match browser.find_node(css!("a")).await {
-        Ok(Some(mut link)) => {
+        Ok(Some(_link)) => {
             info!("[bidi-spike] found link element for click demo");
             // Get context for input APIs
             let ctx = browser

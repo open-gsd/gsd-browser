@@ -117,7 +117,7 @@ This makes `gsd-browser mcp` a drop-in, extremely powerful browser platform for 
 ## Current Status
 
 The MCP layer is production-ready for agent use and has been massively expanded beyond the initial prototype:
-- Full tool coverage of the rich daemon surface (navigation, refs, semantic, viewer/collaboration, recordings/evidence, diagnostics, batch (supports both {action, ...} and legacy {tool, params} formats), self-healing, etc.).
+- Broad tool coverage of the rich daemon surface (navigation, refs, semantic actions, viewer/collaboration, recordings/evidence, diagnostics, batch (supports both {action, ...} and legacy {tool, params} formats), self-healing, etc.). `tools/list` is the source of truth for the currently wired MCP contract.
 - Live resources and executable prompts.
 - Rich envelopes + best-practice guidance in responses.
 
