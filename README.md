@@ -34,9 +34,9 @@ cd gsd-browser
 cargo install --path cli
 ```
 
-### Package registries
+### crates.io
 
-The public npm package (`@gsd-build/gsd-browser`) and crates.io package (`gsd-browser`) are not published yet. Use the installer, GitHub release assets, or a source build.
+The crates.io package (`gsd-browser`) is not published yet. Use the installer, GitHub release assets, or a source build.
 
 ## Quick Start
 
