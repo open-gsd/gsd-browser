@@ -6,15 +6,6 @@ Built for AI agents, CI pipelines, and developers who want deterministic browser
 
 ## Install
 
-### Recommended: installer (macOS / Linux)
-
-```bash
-curl -fsSL https://install.gsd.build/browser | bash
-```
-
-The installer downloads the correct `gsd-browser` binary for your platform. If Chrome or Chromium is already installed, it uses that. Otherwise it downloads Chromium automatically when Chrome for Testing is available for your platform.
-Run `gsd-browser update` to install the current release.
-
 ### Pre-built binaries
 
 Download from [GitHub Releases](https://github.com/open-gsd/gsd-browser/releases):
@@ -36,7 +27,7 @@ cargo install --path cli
 
 ### crates.io
 
-The crates.io package (`gsd-browser`) is not published yet. Use the installer, GitHub release assets, or a source build.
+The crates.io package (`gsd-browser`) is not published yet. Use GitHub release assets or a source build.
 
 ## Quick Start
 
