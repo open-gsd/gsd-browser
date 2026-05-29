@@ -33,3 +33,8 @@ docs/audit-*.md
 .rewrite-backups/
 assets/gsd-browser-banner.*
 spikes/
+
+# Temporary PR prep files
+PR_DESCRIPTION.md
+pr-description*.md
+*.pr.md

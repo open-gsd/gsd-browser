@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::debug;
 
 // ── Mock Route Types ──
 
@@ -90,7 +91,13 @@ impl PageRegistry {
     pub fn register(&mut self, page: Arc<Page>, title: String, url: String) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        let target_id = page.target_id().as_ref().to_string();
+        let raw_target_id = page.target_id();
+        let target_id = raw_target_id.as_ref().to_string();
+
+        debug!(
+            "[pages] register page id={id} stored_target_id={target_id} url={url} title={title}"
+        );
+
         self.entries.push(PageEntry {
             id,
             target_id,
@@ -146,6 +153,21 @@ impl PageRegistry {
             self.active_page_id = self.entries[0].id;
         }
         Ok(removed.page)
+    }
+
+    /// Remove a page by its CDP target_id, if doing so would not leave zero pages.
+    /// Returns the internal page id that was removed, if any.
+    pub fn remove_by_target_id(&mut self, target_id: &str) -> Option<u64> {
+        if self.entries.len() <= 1 {
+            return None;
+        }
+        let pos = self.entries.iter().position(|e| e.target_id == target_id)?;
+        let removed_id = self.entries[pos].id;
+        self.entries.remove(pos);
+        if self.active_page_id == removed_id && !self.entries.is_empty() {
+            self.active_page_id = self.entries[0].id;
+        }
+        Some(removed_id)
     }
 
     /// Update stored title/url for a page.

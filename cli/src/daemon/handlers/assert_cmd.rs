@@ -143,20 +143,17 @@ pub async fn handle_assert(
                 )
             }
             "title_contains" => {
-                // Get title from target_url or fall back to a quick eval
-                let mut actual_title = target_url.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if actual_title.is_empty() {
-                    // Fallback quick title fetch
-                    if let Ok(title_res) = inspection::target_url(page, state).await {
-                        actual_title = title_res.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    }
-                }
+                // Direct title fetch via CDP eval (target_url does not include title)
+                let actual_title = match page.evaluate_expression("document.title").await {
+                    Ok(res) => res
+                        .value()
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    Err(_) => String::new(),
+                };
                 let pass = actual_title.contains(text);
-                (
-                    pass,
-                    format!("title contains '{text}'"),
-                    actual_title,
-                )
+                (pass, format!("title contains '{text}'"), actual_title)
             }
             "text_visible" => {
                 if !text_cache.contains_key(text) {

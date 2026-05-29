@@ -60,8 +60,11 @@ impl EncryptedBlob {
 
 fn get_vault_key() -> Result<String, String> {
     std::env::var("GSD_BROWSER_VAULT_KEY").map_err(|_| {
-        "GSD_BROWSER_VAULT_KEY environment variable not set. \
-         Set it to a passphrase to encrypt/decrypt the auth vault."
+        "GSD_BROWSER_VAULT_KEY environment variable not set (or not visible to the running daemon). \
+         The vault key must be present in the daemon process environment at launch time. \
+         If the daemon is already running, stop it (`gsd-browser daemon stop`), export the variable in your shell, \
+         then start fresh (`gsd-browser navigate ...` or `gsd-browser daemon start`). \
+         Setting the variable only in the calling shell after the daemon has started has no effect."
             .to_string()
     })
 }

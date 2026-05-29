@@ -134,14 +134,24 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
                         suggested_next.push("Re-snapshot (browser_snapshot) before any _ref or interaction tools after page changes".to_string());
                         suggested_next.push("Use browser_wait_for with network_idle or selector_visible on dynamic pages".to_string());
                     }
-                    if tool_name.contains("act") || tool_name.contains("click_ref") || tool_name.contains("fill_ref") {
+                    if tool_name.contains("act")
+                        || tool_name.contains("click_ref")
+                        || tool_name.contains("fill_ref")
+                    {
                         suggested_next.push("Always re-snapshot after actions that cause navigation or major DOM updates".to_string());
                     }
-                    if tool_name.contains("view") || tool_name.contains("takeover") || tool_name.contains("annotation") {
+                    if tool_name.contains("view")
+                        || tool_name.contains("takeover")
+                        || tool_name.contains("annotation")
+                    {
                         suggested_next.push("Leverage the live viewer + annotations for human collaboration and evidence".to_string());
                     }
 
-                    let evidence_refs = if tool_name.contains("record") || tool_name.contains("annotation") || tool_name.contains("debug") || tool_name.contains("visual") {
+                    let evidence_refs = if tool_name.contains("record")
+                        || tool_name.contains("annotation")
+                        || tool_name.contains("debug")
+                        || tool_name.contains("visual")
+                    {
                         json!({"note": "Recordings, annotations and evidence bundles are first-class. Use browser resources and recording tools to manage them."})
                     } else {
                         json!(null)
@@ -216,8 +226,15 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
         }
 
         "resources/read" => {
-            let uri = request.get("params").and_then(|p| p.get("uri")).and_then(|v| v.as_str()).unwrap_or("");
-            let session = request.get("params").and_then(|p| p.get("session")).and_then(|v| v.as_str());
+            let uri = request
+                .get("params")
+                .and_then(|p| p.get("uri"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let session = request
+                .get("params")
+                .and_then(|p| p.get("session"))
+                .and_then(|v| v.as_str());
 
             // Make key resources actually useful by performing real work where possible.
             if uri == "gsd-browser://latest-snapshot" {
@@ -234,8 +251,15 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
                 let text = if let Ok(r) = resp {
                     if let Some(data) = r.result {
                         serde_json::to_string_pretty(&data).unwrap_or_default()
-                    } else { "Snapshot call succeeded but no data returned.".to_string() }
-                } else { format!("Snapshot failed: {}", resp.err().map(|e| e.to_string()).unwrap_or_default()) };
+                    } else {
+                        "Snapshot call succeeded but no data returned.".to_string()
+                    }
+                } else {
+                    format!(
+                        "Snapshot failed: {}",
+                        resp.err().map(|e| e.to_string()).unwrap_or_default()
+                    )
+                };
                 json!({
                     "jsonrpc": jsonrpc,
                     "id": id,
@@ -250,10 +274,19 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
             } else if uri == "gsd-browser://current-state" {
                 // Rich current state via debug bundle (blocking)
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let resp = rt.block_on(crate::daemon_client::send_request("debug_bundle", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session));
+                let resp = rt.block_on(crate::daemon_client::send_request(
+                    "debug_bundle",
+                    json!({}),
+                    cli.browser_path.as_deref(),
+                    cli.cdp_url.as_deref(),
+                    session,
+                ));
                 let text = if let Ok(r) = resp {
-                    serde_json::to_string_pretty(&r.result.unwrap_or(json!({}))).unwrap_or("Debug bundle unavailable".to_string())
-                } else { "Use browser_debug_bundle tool for full current state.".to_string() };
+                    serde_json::to_string_pretty(&r.result.unwrap_or(json!({})))
+                        .unwrap_or("Debug bundle unavailable".to_string())
+                } else {
+                    "Use browser_debug_bundle tool for full current state.".to_string()
+                };
                 json!({
                     "jsonrpc": jsonrpc,
                     "id": id,
@@ -267,8 +300,18 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
                 })
             } else if uri == "gsd-browser://current-refs" {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let resp = rt.block_on(crate::daemon_client::send_request("snapshot", json!({"limit": 20}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session));
-                let text = if let Ok(r) = resp { serde_json::to_string_pretty(&r.result.unwrap_or(json!({}))).unwrap_or_default() } else { "Snapshot for refs unavailable".to_string() };
+                let resp = rt.block_on(crate::daemon_client::send_request(
+                    "snapshot",
+                    json!({"limit": 20}),
+                    cli.browser_path.as_deref(),
+                    cli.cdp_url.as_deref(),
+                    session,
+                ));
+                let text = if let Ok(r) = resp {
+                    serde_json::to_string_pretty(&r.result.unwrap_or(json!({}))).unwrap_or_default()
+                } else {
+                    "Snapshot for refs unavailable".to_string()
+                };
                 json!({
                     "jsonrpc": jsonrpc,
                     "id": id,
@@ -283,12 +326,25 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
             } else if uri == "gsd-browser://active-recordings" {
                 // Real data via blocking call (resources/read is sync)
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let resp = rt.block_on(crate::daemon_client::send_request("recordings", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session));
+                let resp = rt.block_on(crate::daemon_client::send_request(
+                    "recordings",
+                    json!({}),
+                    cli.browser_path.as_deref(),
+                    cli.cdp_url.as_deref(),
+                    session,
+                ));
                 let text = if let Ok(r) = resp {
                     if let Some(data) = r.result {
-                        format!("Active recordings:\n{}", serde_json::to_string_pretty(&data).unwrap_or_default())
-                    } else { "No active recordings.".to_string() }
-                } else { "Use browser_recordings tool for live list.".to_string() };
+                        format!(
+                            "Active recordings:\n{}",
+                            serde_json::to_string_pretty(&data).unwrap_or_default()
+                        )
+                    } else {
+                        "No active recordings.".to_string()
+                    }
+                } else {
+                    "Use browser_recordings tool for live list.".to_string()
+                };
                 json!({
                     "jsonrpc": jsonrpc,
                     "id": id,
@@ -302,8 +358,18 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
                 })
             } else if uri == "gsd-browser://timeline" {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let resp = rt.block_on(crate::daemon_client::send_request("timeline", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session));
-                let text = if let Ok(r) = resp { serde_json::to_string_pretty(&r.result.unwrap_or(json!({}))).unwrap_or_default() } else { "Timeline not available - use the timeline tool.".to_string() };
+                let resp = rt.block_on(crate::daemon_client::send_request(
+                    "timeline",
+                    json!({}),
+                    cli.browser_path.as_deref(),
+                    cli.cdp_url.as_deref(),
+                    session,
+                ));
+                let text = if let Ok(r) = resp {
+                    serde_json::to_string_pretty(&r.result.unwrap_or(json!({}))).unwrap_or_default()
+                } else {
+                    "Timeline not available - use the timeline tool.".to_string()
+                };
                 json!({
                     "jsonrpc": jsonrpc,
                     "id": id,
@@ -378,28 +444,32 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
         }
 
         "prompts/get" => {
-            let name = request.get("params").and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+            let name = request
+                .get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             // Rich, executable multi-step prompts that agents can follow or use as templates.
             let messages = match name {
                 "robust_login_flow" => vec![
-                    json!({"role": "user", "content": {"type": "text", "text": "STEP 1: browser_navigate to the login URL.\nSTEP 2: If present, browser_act('accept_cookies').\nSTEP 3: Use browser_vault_login if a profile exists, otherwise browser_snapshot + targeted browser_fill_ref / browser_click_ref for username/password/submit.\nSTEP 4: browser_wait_for network_idle or url_contains dashboard.\nSTEP 5: browser_assert for logged-in indicators (user menu, dashboard URL, etc.).\nSTEP 6: Optionally browser_save_state for reuse.\nAlways re-snapshot after navigation and use refs for precision."}})
+                    json!({"role": "user", "content": {"type": "text", "text": "STEP 1: browser_navigate to the login URL.\nSTEP 2: If present, browser_act('accept_cookies').\nSTEP 3: Use browser_vault_login if a profile exists, otherwise browser_snapshot + targeted browser_fill_ref / browser_click_ref for username/password/submit.\nSTEP 4: browser_wait_for network_idle or url_contains dashboard.\nSTEP 5: browser_assert for logged-in indicators (user menu, dashboard URL, etc.).\nSTEP 6: Optionally browser_save_state for reuse.\nAlways re-snapshot after navigation and use refs for precision."}}),
                 ],
                 "full_page_audit" => vec![
-                    json!({"role": "user", "content": {"type": "text", "text": "Parallel where possible:\n- browser_snapshot (mode: visible_only or interactive)\n- browser_console\n- browser_network\n- browser_debug_bundle\n- browser_visual_diff against a known baseline if one exists\n\nThen synthesize: security notes (via check_injection if relevant), performance observations, broken elements, and recommended next actions. Include refs and evidence links."}})
+                    json!({"role": "user", "content": {"type": "text", "text": "Parallel where possible:\n- browser_snapshot (mode: visible_only or interactive)\n- browser_console\n- browser_network\n- browser_debug_bundle\n- browser_visual_diff against a known baseline if one exists\n\nThen synthesize: security notes (via check_injection if relevant), performance observations, broken elements, and recommended next actions. Include refs and evidence links."}}),
                 ],
                 "create_evidence_bundle" => vec![
-                    json!({"role": "user", "content": {"type": "text", "text": "1. browser_record_start with a clear name.\n2. Perform the exact reproduction steps using refs or act for precision.\n3. At key moments use browser_annotation_request to capture human or agent observations.\n4. browser_record_stop.\n5. browser_recording_export or use the bundle ID for validation/export.\nThis creates a high-fidelity, shareable reproduction package with annotations."}})
+                    json!({"role": "user", "content": {"type": "text", "text": "1. browser_record_start with a clear name.\n2. Perform the exact reproduction steps using refs or act for precision.\n3. At key moments use browser_annotation_request to capture human or agent observations.\n4. browser_record_stop.\n5. browser_recording_export or use the bundle ID for validation/export.\nThis creates a high-fidelity, shareable reproduction package with annotations."}}),
                 ],
                 "autonomous_research_task" => vec![
-                    json!({"role": "user", "content": {"type": "text", "text": "You are an autonomous researcher.\n1. Start at start_url.\n2. Use browser_snapshot + browser_act or refs to explore relevant sections.\n3. Use browser_extract for structured data where possible.\n4. Take key screenshots with browser_screenshot.\n5. If login needed, use vault or form tools.\n6. At the end: browser_debug_bundle + start a recording if the flow was long, add annotations for key findings.\n7. Summarize findings with refs and evidence links.\nGoal: {goal}"}})
+                    json!({"role": "user", "content": {"type": "text", "text": "You are an autonomous researcher.\n1. Start at start_url.\n2. Use browser_snapshot + browser_act or refs to explore relevant sections.\n3. Use browser_extract for structured data where possible.\n4. Take key screenshots with browser_screenshot.\n5. If login needed, use vault or form tools.\n6. At the end: browser_debug_bundle + start a recording if the flow was long, add annotations for key findings.\n7. Summarize findings with refs and evidence links.\nGoal: {goal}"}}),
                 ],
                 "evidence_creation_workflow" => vec![
-                    json!({"role": "user", "content": {"type": "text", "text": "1. browser_record_start with the provided name.\n2. Perform the target actions using refs/act for precision.\n3. Use browser_annotation_request at key decision points for observations.\n4. browser_record_stop.\n5. browser_recording_export (or use the ID).\n6. Add final annotations if needed and summarize the bundle for audit."}})
+                    json!({"role": "user", "content": {"type": "text", "text": "1. browser_record_start with the provided name.\n2. Perform the target actions using refs/act for precision.\n3. Use browser_annotation_request at key decision points for observations.\n4. browser_record_stop.\n5. browser_recording_export (or use the ID).\n6. Add final annotations if needed and summarize the bundle for audit."}}),
                 ],
                 "debug_stuck_agent_flow" => vec![
-                    json!({"role": "user", "content": {"type": "text", "text": "1. Call browser_debug_bundle immediately.\n2. browser_console + browser_network + browser_snapshot + browser_timeline (via tool or resource).\n3. Check for stale refs or console errors.\n4. If human input needed, use browser_view + browser_annotation_request or browser_takeover.\n5. Suggest concrete next tools or handoff to human with evidence links."}})
+                    json!({"role": "user", "content": {"type": "text", "text": "1. Call browser_debug_bundle immediately.\n2. browser_console + browser_network + browser_snapshot + browser_timeline (via tool or resource).\n3. Check for stale refs or console errors.\n4. If human input needed, use browser_view + browser_annotation_request or browser_takeover.\n5. Suggest concrete next tools or handoff to human with evidence links."}}),
                 ],
-                _ => vec![]
+                _ => vec![],
             };
             json!({
                 "jsonrpc": jsonrpc,
@@ -441,7 +511,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["url"]
             }
         }),
-
         // === Snapshot & Refs - This is a core differentiator ===
         json!({
             "name": "browser_snapshot",
@@ -468,7 +537,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["ref"]
             }
         }),
-
         // === Precise Interaction via Refs ===
         json!({
             "name": "browser_click_ref",
@@ -510,7 +578,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["ref"]
             }
         }),
-
         // === Semantic / Intent-based (huge for agents) ===
         json!({
             "name": "browser_act",
@@ -538,7 +605,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["intent"]
             }
         }),
-
         // === Forms (very common agent need) ===
         json!({
             "name": "browser_analyze_form",
@@ -565,7 +631,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["values"]
             }
         }),
-
         // === Assertions & Control Flow ===
         json!({
             "name": "browser_assert",
@@ -594,7 +659,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["condition"]
             }
         }),
-
         // === Visual & Evidence ===
         json!({
             "name": "browser_screenshot",
@@ -625,7 +689,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["name"]
             }
         }),
-
         // === Live Viewer & Human Collaboration (unique strength) ===
         json!({
             "name": "browser_view",
@@ -654,7 +717,6 @@ fn build_tool_list() -> Vec<Value> {
                 "properties": { "session": { "type": "string" } }
             }
         }),
-
         // === State, Auth & Persistence ===
         json!({
             "name": "browser_save_state",
@@ -680,7 +742,7 @@ fn build_tool_list() -> Vec<Value> {
         }),
         json!({
             "name": "browser_vault_login",
-            "description": "Login using credentials previously saved in the encrypted auth vault. Requires GSD_BROWSER_VAULT_KEY to be set before daemon start.",
+            "description": "Login using credentials previously saved in the encrypted auth vault. Requires GSD_BROWSER_VAULT_KEY to be set in the daemon's environment *at launch time* (not after). If the daemon is already running without it, you must stop and restart the daemon after exporting the variable.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -690,7 +752,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["profile"]
             }
         }),
-
         // === Diagnostics & Observability ===
         json!({
             "name": "browser_debug_bundle",
@@ -705,28 +766,27 @@ fn build_tool_list() -> Vec<Value> {
         }),
         json!({
             "name": "browser_console",
-            "description": "Get recent console messages (errors, warnings, logs). Automatically cleared after reading unless no_clear is used.",
+            "description": "Get recent console messages (errors, warnings, logs). By default snapshots (preserves buffer); pass clear:true to drain after reading.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "no_clear": { "type": "boolean", "default": false },
+                    "clear": { "type": "boolean", "default": false, "description": "If true, drain the buffer after reading" },
                     "session": { "type": "string" }
                 }
             }
         }),
         json!({
             "name": "browser_network",
-            "description": "Get recent network requests/responses. Very useful for API debugging or understanding what data the page fetched.",
+            "description": "Get recent network requests/responses. Very useful for API debugging or understanding what data the page fetched. Defaults to snapshot (safe to call before har-export); pass clear:true to drain.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "filter": { "type": "string", "default": "all", "description": "all, errors, or fetch-xhr" },
-                    "no_clear": { "type": "boolean", "default": false },
+                    "clear": { "type": "boolean", "default": false, "description": "If true, drain the buffer after reading" },
                     "session": { "type": "string" }
                 }
             }
         }),
-
         // === Advanced / Power User ===
         json!({
             "name": "browser_extract",
@@ -765,7 +825,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["expression"]
             }
         }),
-
         // === Recording & Evidence Bundles (major differentiator) ===
         json!({
             "name": "browser_record_start",
@@ -820,7 +879,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["id", "output"]
             }
         }),
-
         // === Annotations (human + agent collaboration) ===
         json!({
             "name": "browser_annotations",
@@ -854,7 +912,6 @@ fn build_tool_list() -> Vec<Value> {
                 }
             }
         }),
-
         // === More Evidence & Diagnostics ===
         json!({
             "name": "browser_har_export",
@@ -901,7 +958,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["device"]
             }
         }),
-
         // === Viewer & Control Enhancements ===
         json!({
             "name": "browser_sensitive_on",
@@ -919,7 +975,6 @@ fn build_tool_list() -> Vec<Value> {
                 "properties": { "session": { "type": "string" } }
             }
         }),
-
         // === Refs Self-Healing / Resilience (for agents) ===
         json!({
             "name": "browser_find_element",
@@ -951,7 +1006,6 @@ fn build_tool_list() -> Vec<Value> {
                 "properties": { "session": { "type": "string" } }
             }
         }),
-
         // === Network & Advanced Control (for completeness) ===
         json!({
             "name": "browser_mock_route",
@@ -1027,7 +1081,6 @@ fn build_tool_list() -> Vec<Value> {
                 "properties": { "session": { "type": "string" } }
             }
         }),
-
         // === Action Cache & Self-Healing Intents (for long-term agent resilience) ===
         json!({
             "name": "browser_action_cache",
@@ -1044,7 +1097,6 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["action"]
             }
         }),
-
         // === Additional Evidence & Polish ===
         json!({
             "name": "browser_save_pdf",
@@ -1058,7 +1110,6 @@ fn build_tool_list() -> Vec<Value> {
                 }
             }
         }),
-
         // === Batch, Diff & Multi-Page (for complex agent flows) ===
         json!({
             "name": "browser_batch",
@@ -1138,7 +1189,6 @@ fn build_tool_list() -> Vec<Value> {
                 }
             }
         }),
-
         // === Viewer & Control Polish ===
         json!({
             "name": "browser_goal",
@@ -1266,14 +1316,28 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
         }
 
         "browser_fill_ref" => {
-            let r#ref = arguments.get("ref").and_then(|v| v.as_str()).ok_or("ref is required")?;
-            let text = arguments.get("text").and_then(|v| v.as_str()).ok_or("text is required")?;
+            let r#ref = arguments
+                .get("ref")
+                .and_then(|v| v.as_str())
+                .ok_or("ref is required")?;
+            let text = arguments
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("text is required")?;
 
             let mut params = json!({ "ref": r#ref, "text": text });
-            if arguments.get("clear_first").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if arguments
+                .get("clear_first")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 params["clear_first"] = json!(true);
             }
-            if arguments.get("submit").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if arguments
+                .get("submit")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 params["submit"] = json!(true);
             }
 
@@ -1294,7 +1358,10 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
         }
 
         "browser_wait_for" => {
-            let condition = arguments.get("condition").and_then(|v| v.as_str()).ok_or("condition is required")?;
+            let condition = arguments
+                .get("condition")
+                .and_then(|v| v.as_str())
+                .ok_or("condition is required")?;
             let mut params = json!({ "condition": condition });
 
             if let Some(value) = arguments.get("value").and_then(|v| v.as_str()) {
@@ -1321,7 +1388,10 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
         }
 
         "browser_assert" => {
-            let checks = arguments.get("checks").ok_or("checks array is required")?.clone();
+            let checks = arguments
+                .get("checks")
+                .ok_or("checks array is required")?
+                .clone();
 
             let resp = crate::daemon_client::send_request(
                 "assert",
@@ -1364,7 +1434,10 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
         }
 
         "browser_act" => {
-            let intent = arguments.get("intent").and_then(|v| v.as_str()).ok_or("intent is required")?;
+            let intent = arguments
+                .get("intent")
+                .and_then(|v| v.as_str())
+                .ok_or("intent is required")?;
             let mut params = json!({ "intent": intent });
             if let Some(scope) = arguments.get("scope").and_then(|v| v.as_str()) {
                 params["scope"] = json!(scope);
@@ -1387,7 +1460,10 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
         }
 
         "browser_view" => {
-            let print_only = arguments.get("print_only").and_then(|v| v.as_bool()).unwrap_or(true);
+            let print_only = arguments
+                .get("print_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let params = json!({ "print_only": print_only });
 
             let resp = crate::daemon_client::send_request(
@@ -1407,236 +1483,641 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
         }
 
         "browser_get_ref" => {
-            let r#ref = arguments.get("ref").and_then(|v| v.as_str()).ok_or("ref is required")?;
+            let r#ref = arguments
+                .get("ref")
+                .and_then(|v| v.as_str())
+                .ok_or("ref is required")?;
             let resp = crate::daemon_client::send_request(
                 "get_ref",
                 json!({ "ref": r#ref }),
                 cli.browser_path.as_deref(),
                 cli.cdp_url.as_deref(),
                 session,
-            ).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_hover_ref" => {
-            let r#ref = arguments.get("ref").and_then(|v| v.as_str()).ok_or("ref is required")?;
-            let resp = crate::daemon_client::send_request("hover_ref", json!({ "ref": r#ref }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let r#ref = arguments
+                .get("ref")
+                .and_then(|v| v.as_str())
+                .ok_or("ref is required")?;
+            let resp = crate::daemon_client::send_request(
+                "hover_ref",
+                json!({ "ref": r#ref }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             "Hovered successfully".to_string()
         }
 
         "browser_find_best" => {
-            let intent = arguments.get("intent").and_then(|v| v.as_str()).ok_or("intent is required")?;
+            let intent = arguments
+                .get("intent")
+                .and_then(|v| v.as_str())
+                .ok_or("intent is required")?;
             let mut params = json!({ "intent": intent });
-            if let Some(scope) = arguments.get("scope").and_then(|v| v.as_str()) { params["scope"] = json!(scope); }
-            let resp = crate::daemon_client::send_request("find_best", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(scope) = arguments.get("scope").and_then(|v| v.as_str()) {
+                params["scope"] = json!(scope);
+            }
+            let resp = crate::daemon_client::send_request(
+                "find_best",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_analyze_form" => {
             let mut params = json!({});
-            if let Some(sel) = arguments.get("selector").and_then(|v| v.as_str()) { params["selector"] = json!(sel); }
-            let resp = crate::daemon_client::send_request("analyze_form", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(sel) = arguments.get("selector").and_then(|v| v.as_str()) {
+                params["selector"] = json!(sel);
+            }
+            let resp = crate::daemon_client::send_request(
+                "analyze_form",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_fill_form" => {
-            let values = arguments.get("values").ok_or("values object is required")?.clone();
+            let values = arguments
+                .get("values")
+                .ok_or("values object is required")?
+                .clone();
             let mut params = json!({ "values": values, "submit": arguments.get("submit").and_then(|v| v.as_bool()).unwrap_or(false) });
-            if let Some(sel) = arguments.get("selector").and_then(|v| v.as_str()) { params["selector"] = json!(sel); }
-            let resp = crate::daemon_client::send_request("fill_form", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(sel) = arguments.get("selector").and_then(|v| v.as_str()) {
+                params["selector"] = json!(sel);
+            }
+            let resp = crate::daemon_client::send_request(
+                "fill_form",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_save_state" => {
-            let name = arguments.get("name").and_then(|v| v.as_str()).unwrap_or("default");
-            let resp = crate::daemon_client::send_request("save_state", json!({ "name": name }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let name = arguments
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default");
+            let resp = crate::daemon_client::send_request(
+                "save_state",
+                json!({ "name": name }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             format!("State '{}' saved", name)
         }
 
         "browser_restore_state" => {
-            let name = arguments.get("name").and_then(|v| v.as_str()).unwrap_or("default");
-            let resp = crate::daemon_client::send_request("restore_state", json!({ "name": name }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let name = arguments
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default");
+            let resp = crate::daemon_client::send_request(
+                "restore_state",
+                json!({ "name": name }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             format!("State '{}' restored", name)
         }
 
         "browser_vault_login" => {
-            let profile = arguments.get("profile").and_then(|v| v.as_str()).ok_or("profile is required")?;
-            let resp = crate::daemon_client::send_request("vault_login", json!({ "profile": profile }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let profile = arguments
+                .get("profile")
+                .and_then(|v| v.as_str())
+                .ok_or("profile is required")?;
+            let resp = crate::daemon_client::send_request(
+                "vault_login",
+                json!({ "profile": profile }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             format!("Vault login with profile '{}' completed", profile)
         }
 
         "browser_debug_bundle" => {
             let mut params = json!({});
-            if let Some(name) = arguments.get("name").and_then(|v| v.as_str()) { params["name"] = json!(name); }
-            let resp = crate::daemon_client::send_request("debug_bundle", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(name) = arguments.get("name").and_then(|v| v.as_str()) {
+                params["name"] = json!(name);
+            }
+            let resp = crate::daemon_client::send_request(
+                "debug_bundle",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_console" => {
-            let no_clear = arguments.get("no_clear").and_then(|v| v.as_bool()).unwrap_or(false);
-            let resp = crate::daemon_client::send_request("console", json!({ "clear": !no_clear }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let clear = arguments
+                .get("clear")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let resp = crate::daemon_client::send_request(
+                "console",
+                json!({ "clear": clear }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_network" => {
-            let filter = arguments.get("filter").and_then(|v| v.as_str()).unwrap_or("all");
-            let no_clear = arguments.get("no_clear").and_then(|v| v.as_bool()).unwrap_or(false);
-            let resp = crate::daemon_client::send_request("network", json!({ "filter": filter, "clear": !no_clear }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let filter = arguments
+                .get("filter")
+                .and_then(|v| v.as_str())
+                .unwrap_or("all");
+            let clear = arguments
+                .get("clear")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let resp = crate::daemon_client::send_request(
+                "network",
+                json!({ "filter": filter, "clear": clear }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_extract" => {
             let schema = arguments.get("schema").ok_or("schema is required")?.clone();
             let mut params = json!({ "schema": schema });
-            if let Some(sel) = arguments.get("selector").and_then(|v| v.as_str()) { params["selector"] = json!(sel); }
-            if arguments.get("multiple").and_then(|v| v.as_bool()).unwrap_or(false) { params["multiple"] = json!(true); }
-            let resp = crate::daemon_client::send_request("extract", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(sel) = arguments.get("selector").and_then(|v| v.as_str()) {
+                params["selector"] = json!(sel);
+            }
+            if arguments
+                .get("multiple")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                params["multiple"] = json!(true);
+            }
+            let resp = crate::daemon_client::send_request(
+                "extract",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_check_injection" => {
-            let include_hidden = arguments.get("include_hidden").and_then(|v| v.as_bool()).unwrap_or(true);
-            let resp = crate::daemon_client::send_request("check_injection", json!({ "include_hidden": include_hidden }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let include_hidden = arguments
+                .get("include_hidden")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let resp = crate::daemon_client::send_request(
+                "check_injection",
+                json!({ "include_hidden": include_hidden }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_evaluate" => {
-            let expression = arguments.get("expression").and_then(|v| v.as_str()).ok_or("expression is required")?;
-            let resp = crate::daemon_client::send_request("eval", json!({ "expression": expression }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let expression = arguments
+                .get("expression")
+                .and_then(|v| v.as_str())
+                .ok_or("expression is required")?;
+            let resp = crate::daemon_client::send_request(
+                "eval",
+                json!({ "expression": expression }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         // Recording tools
         "browser_record_start" => {
-            let name = arguments.get("name").and_then(|v| v.as_str()).ok_or("name is required")?;
-            let resp = crate::daemon_client::send_request("record_start", json!({ "name": name }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let name = arguments
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or("name is required")?;
+            let resp = crate::daemon_client::send_request(
+                "record_start",
+                json!({ "name": name }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_record_stop" => {
-            let resp = crate::daemon_client::send_request("record_stop", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let resp = crate::daemon_client::send_request(
+                "record_stop",
+                json!({}),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_recordings" => {
-            let resp = crate::daemon_client::send_request("recordings", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let resp = crate::daemon_client::send_request(
+                "recordings",
+                json!({}),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_recording_get" => {
-            let id = arguments.get("id").and_then(|v| v.as_str()).ok_or("id is required")?;
-            let resp = crate::daemon_client::send_request("recording_get", json!({ "id": id }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let id = arguments
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("id is required")?;
+            let resp = crate::daemon_client::send_request(
+                "recording_get",
+                json!({ "id": id }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_recording_export" => {
-            let id = arguments.get("id").and_then(|v| v.as_str()).ok_or("id is required")?;
-            let output = arguments.get("output").and_then(|v| v.as_str()).ok_or("output path is required")?;
-            let resp = crate::daemon_client::send_request("recording_export", json!({ "id": id, "output": output }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let id = arguments
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("id is required")?;
+            let output = arguments
+                .get("output")
+                .and_then(|v| v.as_str())
+                .ok_or("output path is required")?;
+            let resp = crate::daemon_client::send_request(
+                "recording_export",
+                json!({ "id": id, "output": output }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         // Annotation tools
         "browser_annotations" => {
-            let resp = crate::daemon_client::send_request("annotations", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let resp = crate::daemon_client::send_request(
+                "annotations",
+                json!({}),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_annotation_request" => {
-            let note = arguments.get("note").and_then(|v| v.as_str()).ok_or("note is required")?;
-            let resp = crate::daemon_client::send_request("annotation_request", json!({ "note": note }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let note = arguments
+                .get("note")
+                .and_then(|v| v.as_str())
+                .ok_or("note is required")?;
+            let resp = crate::daemon_client::send_request(
+                "annotation_request",
+                json!({ "note": note }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_mock_route" => {
-            let url = arguments.get("url").and_then(|v| v.as_str()).ok_or("url pattern is required")?;
+            let url = arguments
+                .get("url")
+                .and_then(|v| v.as_str())
+                .ok_or("url pattern is required")?;
             let mut params = json!({ "url": url });
-            if let Some(s) = arguments.get("status") { params["status"] = s.clone(); }
-            if let Some(b) = arguments.get("body") { params["body"] = b.clone(); }
-            if let Some(ct) = arguments.get("content_type") { params["content_type"] = ct.clone(); }
-            if let Some(d) = arguments.get("delay") { params["delay"] = d.clone(); }
-            if let Some(h) = arguments.get("headers") { params["headers"] = h.clone(); }
-            let resp = crate::daemon_client::send_request("mock_route", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(s) = arguments.get("status") {
+                params["status"] = s.clone();
+            }
+            if let Some(b) = arguments.get("body") {
+                params["body"] = b.clone();
+            }
+            if let Some(ct) = arguments.get("content_type") {
+                params["content_type"] = ct.clone();
+            }
+            if let Some(d) = arguments.get("delay") {
+                params["delay"] = d.clone();
+            }
+            if let Some(h) = arguments.get("headers") {
+                params["headers"] = h.clone();
+            }
+            let resp = crate::daemon_client::send_request(
+                "mock_route",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_block_urls" => {
-            let patterns = arguments.get("patterns").ok_or("patterns array required")?.clone();
-            let resp = crate::daemon_client::send_request("block_urls", json!({ "patterns": patterns }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let patterns = arguments
+                .get("patterns")
+                .ok_or("patterns array required")?
+                .clone();
+            let resp = crate::daemon_client::send_request(
+                "block_urls",
+                json!({ "patterns": patterns }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             "URLs blocked".to_string()
         }
         "browser_clear_routes" => {
-            let resp = crate::daemon_client::send_request("clear_routes", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let resp = crate::daemon_client::send_request(
+                "clear_routes",
+                json!({}),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             "All routes cleared".to_string()
         }
         "browser_generate_test" => {
-            let name = arguments.get("name").and_then(|v| v.as_str()).unwrap_or("recorded-session");
+            let name = arguments
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("recorded-session");
             let mut params = json!({ "name": name, "include_assertions": arguments.get("include_assertions").and_then(|v| v.as_bool()).unwrap_or(true) });
-            if let Some(o) = arguments.get("output") { params["output"] = o.clone(); }
-            let resp = crate::daemon_client::send_request("generate_test", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(o) = arguments.get("output") {
+                params["output"] = o.clone();
+            }
+            let resp = crate::daemon_client::send_request(
+                "generate_test",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_vault_save" => {
-            let profile = arguments.get("profile").and_then(|v| v.as_str()).ok_or("profile required")?;
-            let url = arguments.get("url").and_then(|v| v.as_str()).ok_or("url required")?;
-            let username = arguments.get("username").and_then(|v| v.as_str()).ok_or("username required")?;
-            let password = arguments.get("password").and_then(|v| v.as_str()).ok_or("password required")?;
+            let profile = arguments
+                .get("profile")
+                .and_then(|v| v.as_str())
+                .ok_or("profile required")?;
+            let url = arguments
+                .get("url")
+                .and_then(|v| v.as_str())
+                .ok_or("url required")?;
+            let username = arguments
+                .get("username")
+                .and_then(|v| v.as_str())
+                .ok_or("username required")?;
+            let password = arguments
+                .get("password")
+                .and_then(|v| v.as_str())
+                .ok_or("password required")?;
             let mut params = json!({ "profile": profile, "url": url, "username": username, "password": password });
-            if let Some(extra) = arguments.get("extra_fields") { params["extra_fields"] = extra.clone(); }
-            let resp = crate::daemon_client::send_request("vault_save", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(extra) = arguments.get("extra_fields") {
+                params["extra_fields"] = extra.clone();
+            }
+            let resp = crate::daemon_client::send_request(
+                "vault_save",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             format!("Credentials saved to vault profile '{}'", profile)
         }
         "browser_vault_list" => {
-            let resp = crate::daemon_client::send_request("vault_list", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let resp = crate::daemon_client::send_request(
+                "vault_list",
+                json!({}),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_action_cache" => {
-            let action = arguments.get("action").and_then(|v| v.as_str()).unwrap_or("stats");
+            let action = arguments
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("stats");
             let mut params = json!({ "action": action });
-            if let Some(i) = arguments.get("intent") { params["intent"] = i.clone(); }
-            if let Some(s) = arguments.get("selector") { params["selector"] = s.clone(); }
-            if let Some(sc) = arguments.get("score") { params["score"] = sc.clone(); }
-            let resp = crate::daemon_client::send_request("action_cache", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(i) = arguments.get("intent") {
+                params["intent"] = i.clone();
+            }
+            if let Some(s) = arguments.get("selector") {
+                params["selector"] = s.clone();
+            }
+            if let Some(sc) = arguments.get("score") {
+                params["score"] = sc.clone();
+            }
+            let resp = crate::daemon_client::send_request(
+                "action_cache",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_save_pdf" => {
             let mut params = json!({});
-            if let Some(f) = arguments.get("format") { params["format"] = f.clone(); }
-            if let Some(o) = arguments.get("output") { params["output"] = o.clone(); }
-            let resp = crate::daemon_client::send_request("save_pdf", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(f) = arguments.get("format") {
+                params["format"] = f.clone();
+            }
+            if let Some(o) = arguments.get("output") {
+                params["output"] = o.clone();
+            }
+            let resp = crate::daemon_client::send_request(
+                "save_pdf",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_batch" => {
-            let mut steps = arguments.get("steps").ok_or("steps array required")?.clone();
+            let mut steps = arguments
+                .get("steps")
+                .ok_or("steps array required")?
+                .clone();
             // Normalize legacy MCP-style steps {tool, params} -> daemon format {action, ...inlined}
             if let Some(arr) = steps.as_array_mut() {
                 for step in arr.iter_mut() {
                     if let Some(obj) = step.as_object_mut() {
-                        if let Some(tool) = obj.remove("tool").and_then(|v| v.as_str().map(|s| s.to_string())) {
+                        if let Some(tool) = obj
+                            .remove("tool")
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        {
                             obj.insert("action".to_string(), json!(tool));
                         }
                         if let Some(params) = obj.remove("params") {
@@ -1650,69 +2131,197 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 }
             }
             let params = json!({ "steps": steps, "stop_on_failure": arguments.get("stop_on_failure").and_then(|v| v.as_bool()).unwrap_or(true), "summary_only": arguments.get("summary_only").and_then(|v| v.as_bool()).unwrap_or(false) });
-            let resp = crate::daemon_client::send_request("batch", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let resp = crate::daemon_client::send_request(
+                "batch",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_diff" => {
             let mut params = json!({});
-            if let Some(s) = arguments.get("since") { params["since"] = s.clone(); }
-            let resp = crate::daemon_client::send_request("diff", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(s) = arguments.get("since") {
+                params["since"] = s.clone();
+            }
+            let resp = crate::daemon_client::send_request(
+                "diff",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_list_pages" => {
-            let resp = crate::daemon_client::send_request("list_pages", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let resp = crate::daemon_client::send_request(
+                "list_pages",
+                json!({}),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_switch_page" => {
-            let id = arguments.get("id").and_then(|v| v.as_i64()).ok_or("id required")?;
-            let resp = crate::daemon_client::send_request("switch_page", json!({ "id": id }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let id = arguments
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .ok_or("id required")?;
+            let resp = crate::daemon_client::send_request(
+                "switch_page",
+                json!({ "id": id }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             "Switched page".to_string()
         }
         "browser_close_page" => {
-            let id = arguments.get("id").and_then(|v| v.as_i64()).ok_or("id required")?;
-            let resp = crate::daemon_client::send_request("close_page", json!({ "id": id }), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let id = arguments
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .ok_or("id required")?;
+            let resp = crate::daemon_client::send_request(
+                "close_page",
+                json!({ "id": id }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             "Page closed".to_string()
         }
         "browser_list_frames" => {
-            let resp = crate::daemon_client::send_request("list_frames", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let resp = crate::daemon_client::send_request(
+                "list_frames",
+                json!({}),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_select_frame" => {
             let mut params = json!({});
-            if let Some(n) = arguments.get("name") { params["name"] = n.clone(); }
-            if let Some(i) = arguments.get("index") { params["index"] = i.clone(); }
-            if let Some(u) = arguments.get("url_pattern") { params["urlPattern"] = u.clone(); }
-            let resp = crate::daemon_client::send_request("select_frame", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(n) = arguments.get("name") {
+                params["name"] = n.clone();
+            }
+            if let Some(i) = arguments.get("index") {
+                params["index"] = i.clone();
+            }
+            if let Some(u) = arguments.get("url_pattern") {
+                params["urlPattern"] = u.clone();
+            }
+            let resp = crate::daemon_client::send_request(
+                "select_frame",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             "Frame selected".to_string()
         }
         "browser_goal" => {
             let mut params = json!({});
-            if let Some(t) = arguments.get("text") { params["text"] = t.clone(); }
-            if let Some(c) = arguments.get("clear") { params["clear"] = c.clone(); }
-            let resp = crate::daemon_client::send_request("goal", params, cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            if let Some(t) = arguments.get("text") {
+                params["text"] = t.clone();
+            }
+            if let Some(c) = arguments.get("clear") {
+                params["clear"] = c.clone();
+            }
+            let resp = crate::daemon_client::send_request(
+                "goal",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             "Goal updated".to_string()
         }
         "browser_step" => {
-            let resp = crate::daemon_client::send_request("step", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let resp = crate::daemon_client::send_request(
+                "step",
+                json!({}),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             "Step allowed".to_string()
         }
         "browser_abort" => {
-            let resp = crate::daemon_client::send_request("abort", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let resp = crate::daemon_client::send_request(
+                "abort",
+                json!({}),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             "Action aborted".to_string()
         }
         "browser_control_state" => {
-            let resp = crate::daemon_client::send_request("control_state", json!({}), cli.browser_path.as_deref(), cli.cdp_url.as_deref(), session).await.map_err(|e| e.to_string())?;
-            if let Some(err) = resp.error { return Err(err.message); }
+            let resp = crate::daemon_client::send_request(
+                "control_state",
+                json!({}),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 

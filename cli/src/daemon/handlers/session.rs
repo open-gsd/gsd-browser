@@ -261,7 +261,16 @@ pub async fn sync_session_manifest(
     health_override: Option<SessionHealthStatus>,
     reason_override: Option<String>,
 ) -> Result<SessionManifest, String> {
-    let (active_page_id, _page_count, registry_url, registry_title) = current_active_page(state);
+    // The page object we were explicitly given. We must update *its* registry entry,
+    // not whatever happens to be marked active at the moment this async function runs.
+    // This closes the race where a background targetCreated handler's sync_session_manifest
+    // stomps metadata of the currently-active tab (the root cause of the list-pages corruption
+    // after dynamic tab creation + switch-page that was found during agent testing).
+    let given_target_id = page.target_id().as_ref().to_string();
+
+    // What the session currently declares as active (used for the manifest's "active page" concept)
+    let (current_active_id, _page_count, registry_url, registry_title) = current_active_page(state);
+
     let (browser_connected, live_url, probe_reason) = probe_active_page(page).await;
     let live_title = page
         .evaluate_expression("document.title")
@@ -279,14 +288,26 @@ pub async fn sync_session_manifest(
     } else {
         live_title
     };
-    set_active_page_metadata(state, active_page_id, &final_url, &final_title);
+
+    // Resolve the concrete registry entry for the page we were *given*, not the live active id.
+    let target_page_id = {
+        let pages = state.pages.lock().unwrap();
+        pages
+            .find_by_target_id(&given_target_id)
+            .unwrap_or(current_active_id)
+    };
+
+    set_active_page_metadata(state, target_page_id, &final_url, &final_title);
+
     let (derived_health, derived_reason) =
         health_status_from_browser_probe(browser_connected, &final_url, &probe_reason);
+
+    // The persisted manifest still records the session's declared active page at write time.
     build_and_persist_manifest(
         state,
         health_override.unwrap_or(derived_health),
         reason_override.unwrap_or(derived_reason),
-        active_page_id,
+        current_active_id,
         final_url,
         final_title,
     )
