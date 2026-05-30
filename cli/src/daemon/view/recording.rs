@@ -371,12 +371,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// Uses key structural fields (counts, headings, focus) + url/title for replayable signature.
 /// Wired from capture_compact_page_state (used alongside settle_after_action).
 pub fn compute_dom_hash(state: &CompactPageState) -> String {
+    // Use canonical JSON for headings (and a subset) to guarantee injective structural sig
+    // (no delimiter collisions from user content). Good for reliable replay/comparison.
+    let headings_json = serde_json::to_string(&state.headings).unwrap_or_default();
     let structural = format!(
         "v1|url:{}|title:{}|focus:{}|h:{}|land:{}|btn:{}|lnk:{}|inp:{}",
         state.url,
         state.title,
         state.focus,
-        state.headings.join(";"),
+        headings_json,
         state.counts.landmarks,
         state.counts.buttons,
         state.counts.links,
@@ -385,13 +388,15 @@ pub fn compute_dom_hash(state: &CompactPageState) -> String {
     sha256_hex(structural.as_bytes())
 }
 
-/// Basic sessionStateHash for PR-1 (placeholder).
-/// Full wiring would capture cookies + localStorage + sessionStorage (as in handle_save_state
-/// in handlers/state_persist.rs) + settle state, serialize, and sha256. Initially basic to keep
-/// schema evolvable for replayable evidence bundles.
+/// Legacy/basic sessionStateHash marker (PR-1).
+/// Real functional session capture (counts + sha of summary using the exact CDP/JS patterns
+/// from handle_save_state) now happens in the dispatch recording path via
+/// capture_basic_session_meta, which embeds a rich "session" object under before/after.
+/// This fn remains for the minority call sites (recording start/stop boundaries) and
+/// returns a clear "legacy" marker so consumers know to prefer the per-event session data.
+/// Keeps schema evolvable and honest for replayable bundles.
 pub fn compute_session_state_hash() -> String {
-    // Stable marker; real per-action capture happens at before/after boundaries using save-state primitives.
-    "sha256:session-state-v1-basic".to_string()
+    "sha256:session-state-v1-legacy-use-per-event-session-object".to_string()
 }
 
 #[cfg(test)]

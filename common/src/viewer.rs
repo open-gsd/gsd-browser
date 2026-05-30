@@ -353,6 +353,13 @@ pub struct RecordingEventV1 {
     pub after: serde_json::Value,
     pub redaction: serde_json::Value,
     pub artifact_refs: serde_json::Value,
+    // PR-1 enrichment fields (always present in new events.jsonl).
+    // Default for round-tripping older bundles + evolvability (Value keeps schema flexible
+    // for future Playwright-style output, full sessionState objects, etc.).
+    #[serde(default)]
+    pub command: serde_json::Value,
+    #[serde(default)]
+    pub network: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
