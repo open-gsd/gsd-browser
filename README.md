@@ -46,7 +46,7 @@ npm install -g @gsd-build/gsd-browser
 
 ### Pre-built binaries
 
-Download from [GitHub Releases](https://github.com/open-gsd/gsd-browser/releases):
+Download from [GitHub Releases](https://github.com/gsd-build/gsd-browser/releases):
 
 | Platform | Asset |
 |----------|-------|
