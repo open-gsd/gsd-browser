@@ -1,0 +1,40 @@
+{
+  "name": "gsd-browser",
+  "version": "0.1.24",
+  "description": "Native Chrome/Chromium browser automation for Codex agents.",
+  "author": {
+    "name": "open-gsd",
+    "url": "https://github.com/open-gsd"
+  },
+  "homepage": "https://github.com/open-gsd/gsd-browser",
+  "repository": "https://github.com/open-gsd/gsd-browser",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "browser",
+    "automation",
+    "cdp",
+    "codex",
+    "testing",
+    "screenshots"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "gsd-browser",
+    "shortDescription": "Browser automation for Codex agents.",
+    "longDescription": "Adds the gsd-browser skill to Codex so agents can drive Chrome or Chromium through the native gsd-browser CLI: navigation, clicking, typing, screenshots, snapshots with refs, assertions, extraction, visual diffs, network controls, and live viewer workflows.",
+    "developerName": "open-gsd",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/open-gsd/gsd-browser",
+    "defaultPrompt": [
+      "Open localhost:3000 and inspect the page",
+      "Test this web app with gsd-browser",
+      "Take a screenshot of the current page"
+    ],
+    "brandColor": "#2563EB"
+  }
+}

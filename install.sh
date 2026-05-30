@@ -17,6 +17,7 @@ set -euo pipefail
 #   GSD_BROWSER_INSTALL_MODE  - install or update (default: install)
 #   GSD_BROWSER_SKIP_CHROMIUM - skip Chrome/Chromium setup when set to 1
 #   GSD_BROWSER_SKIP_SKILL    - skip AI agent skill installation when set to 1
+#   GSD_BROWSER_INSTALL_CODEX_PLUGIN - install the Codex Plugin when set to 1
 
 VERSION="${GSD_BROWSER_VERSION:-latest}"
 REPO="open-gsd/gsd-browser"
@@ -26,6 +27,7 @@ CHROMIUM_DIR="$INSTALL_DIR/chromium"
 INSTALL_MODE="${GSD_BROWSER_INSTALL_MODE:-install}"
 SKIP_CHROMIUM="${GSD_BROWSER_SKIP_CHROMIUM:-0}"
 SKIP_SKILL="${GSD_BROWSER_SKIP_SKILL:-0}"
+INSTALL_CODEX_PLUGIN="${GSD_BROWSER_INSTALL_CODEX_PLUGIN:-0}"
 
 # Colors
 cyan="\033[36m"
@@ -67,6 +69,9 @@ parse_args() {
         ;;
       --skip-skill)
         SKIP_SKILL=1
+        ;;
+      --codex-plugin)
+        INSTALL_CODEX_PLUGIN=1
         ;;
       *)
         fail "Unknown option: $arg"
@@ -407,6 +412,11 @@ SKILL_FILES=(
   "workflows/debug-and-diagnose.md"
 )
 
+CODEX_PLUGIN_NAME="gsd-browser"
+CODEX_PLUGIN_REPO_BASE="https://raw.githubusercontent.com/$REPO/main/codex-plugin"
+CODEX_PLUGIN_ROOT="$HOME/plugins/$CODEX_PLUGIN_NAME"
+CODEX_MARKETPLACE_PATH="$HOME/.agents/plugins/marketplace.json"
+
 install_skill_to() {
   local dest="$1"
   mkdir -p "$dest" "$dest/references" "$dest/workflows"
@@ -429,15 +439,194 @@ install_skill_to() {
   return 0
 }
 
+install_codex_plugin_files() {
+  local plugin_root="$1"
+  mkdir -p "$plugin_root/.codex-plugin"
+
+  local manifest_tmp
+  manifest_tmp="$(mktemp "$plugin_root/.codex-plugin/plugin.json.XXXXXX")"
+  if ! curl -fsSL -o "$manifest_tmp" "$CODEX_PLUGIN_REPO_BASE/.codex-plugin/plugin.json" 2>/dev/null; then
+    rm -f "$manifest_tmp"
+    warn "Failed to download Codex plugin manifest — check network or repo access"
+    return 1
+  fi
+  mv -f "$manifest_tmp" "$plugin_root/.codex-plugin/plugin.json"
+
+  install_skill_to "$plugin_root/skills/$CODEX_PLUGIN_NAME"
+}
+
+update_codex_marketplace() {
+  local marketplace_path="$1"
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$marketplace_path" "$CODEX_PLUGIN_NAME" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+plugin_name = sys.argv[2]
+entry = {
+    "name": plugin_name,
+    "source": {"source": "local", "path": f"./plugins/{plugin_name}"},
+    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+    "category": "Coding",
+}
+
+if path.exists():
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"Unable to parse {path}: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    if not isinstance(payload, dict):
+        print(f"{path} must contain a JSON object", file=sys.stderr)
+        raise SystemExit(2)
+else:
+    payload = {"name": "personal", "interface": {"displayName": "Personal"}, "plugins": []}
+
+name = payload.get("name")
+if not isinstance(name, str) or not name.strip():
+    name = "personal"
+    payload["name"] = name
+
+interface = payload.get("interface")
+if not isinstance(interface, dict):
+    interface = {}
+    payload["interface"] = interface
+if not isinstance(interface.get("displayName"), str) or not interface["displayName"].strip():
+    interface["displayName"] = "Personal" if name == "personal" else name
+
+plugins = payload.get("plugins")
+if plugins is None:
+    plugins = []
+    payload["plugins"] = plugins
+if not isinstance(plugins, list):
+    print(f"{path} field 'plugins' must be an array", file=sys.stderr)
+    raise SystemExit(2)
+
+for index, plugin in enumerate(plugins):
+    if isinstance(plugin, dict) and plugin.get("name") == plugin_name:
+        plugins[index] = entry
+        break
+else:
+    plugins.append(entry)
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+print(name)
+PY
+    return $?
+  fi
+
+  if command -v node >/dev/null 2>&1; then
+    node - "$marketplace_path" "$CODEX_PLUGIN_NAME" <<'JS'
+const fs = require("fs");
+const path = require("path");
+
+const marketplacePath = process.argv[2];
+const pluginName = process.argv[3];
+const entry = {
+  name: pluginName,
+  source: { source: "local", path: `./plugins/${pluginName}` },
+  policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+  category: "Coding",
+};
+
+let payload;
+if (fs.existsSync(marketplacePath)) {
+  try {
+    payload = JSON.parse(fs.readFileSync(marketplacePath, "utf8"));
+  } catch (error) {
+    console.error(`Unable to parse ${marketplacePath}: ${error.message}`);
+    process.exit(2);
+  }
+  if (!payload || Array.isArray(payload) || typeof payload !== "object") {
+    console.error(`${marketplacePath} must contain a JSON object`);
+    process.exit(2);
+  }
+} else {
+  payload = { name: "personal", interface: { displayName: "Personal" }, plugins: [] };
+}
+
+if (typeof payload.name !== "string" || payload.name.trim() === "") {
+  payload.name = "personal";
+}
+if (!payload.interface || Array.isArray(payload.interface) || typeof payload.interface !== "object") {
+  payload.interface = {};
+}
+if (typeof payload.interface.displayName !== "string" || payload.interface.displayName.trim() === "") {
+  payload.interface.displayName = payload.name === "personal" ? "Personal" : payload.name;
+}
+if (payload.plugins == null) {
+  payload.plugins = [];
+}
+if (!Array.isArray(payload.plugins)) {
+  console.error(`${marketplacePath} field 'plugins' must be an array`);
+  process.exit(2);
+}
+
+const existing = payload.plugins.findIndex((plugin) => plugin && plugin.name === pluginName);
+if (existing >= 0) {
+  payload.plugins[existing] = entry;
+} else {
+  payload.plugins.push(entry);
+}
+
+fs.mkdirSync(path.dirname(marketplacePath), { recursive: true });
+fs.writeFileSync(marketplacePath, `${JSON.stringify(payload, null, 2)}\n`);
+console.log(payload.name);
+JS
+    return $?
+  fi
+
+  printf "Python 3 or Node.js is required to update Codex marketplace.json automatically\n" >&2
+  return 1
+}
+
+install_codex_plugin() {
+  local plugin_root="$CODEX_PLUGIN_ROOT"
+  local marketplace_path="$CODEX_MARKETPLACE_PATH"
+
+  info "Installing Codex Plugin → $plugin_root"
+  if ! install_codex_plugin_files "$plugin_root"; then
+    return 1
+  fi
+  ok "Codex Plugin files installed: $plugin_root"
+
+  local marketplace_name
+  if ! marketplace_name="$(update_codex_marketplace "$marketplace_path")"; then
+    warn "Codex Plugin files were installed, but marketplace update failed"
+    return 1
+  fi
+  ok "Codex marketplace updated: $marketplace_path"
+
+  if command -v codex >/dev/null 2>&1; then
+    if codex plugin add "$CODEX_PLUGIN_NAME@$marketplace_name" >/dev/null 2>&1; then
+      ok "Codex Plugin installed: $CODEX_PLUGIN_NAME@$marketplace_name"
+    else
+      warn "Marketplace updated, but 'codex plugin add $CODEX_PLUGIN_NAME@$marketplace_name' failed"
+      warn "Open the Codex plugin UI or run that command after Codex is available"
+    fi
+  else
+    info "Codex CLI not found; install from the Codex plugin UI when Codex is available"
+  fi
+}
+
 install_skill() {
   if [ "$SKIP_SKILL" = "1" ]; then
     info "Skipping skill installation"
     return
   fi
 
+  if [ "$INSTALL_CODEX_PLUGIN" = "1" ]; then
+    install_codex_plugin
+    return
+  fi
+
   echo ""
-  printf "  ${cyan}${bold}AI Agent Skill Installation${reset}\n"
-  printf "  ${dim}Install the gsd-browser skill so your AI coding agent knows how to use it${reset}\n"
+  printf "  ${cyan}${bold}AI Agent Integration Installation${reset}\n"
+  printf "  ${dim}Install gsd-browser support so your AI coding agent knows how to use it${reset}\n"
   echo ""
 
   # Detect available AI CLIs
@@ -450,7 +639,11 @@ install_skill() {
   fi
   if command -v codex >/dev/null 2>&1; then
     available+=("codex")
-    labels+=("OpenAI Codex CLI")
+    labels+=("OpenAI Codex CLI Skill")
+  fi
+  if command -v codex >/dev/null 2>&1 || [ -d "$HOME/.codex" ] || [ -d "$HOME/.agents" ]; then
+    available+=("codex-plugin")
+    labels+=("OpenAI Codex Plugin")
   fi
   if command -v gemini >/dev/null 2>&1; then
     available+=("gemini")
@@ -459,7 +652,7 @@ install_skill() {
 
   if [ ${#available[@]} -eq 0 ]; then
     info "No AI coding agents detected (claude, codex, gemini)"
-    info "Install one, then re-run: gsd-browser skill install"
+    info "Install one, then re-run this installer"
     return
   fi
 
@@ -474,11 +667,11 @@ install_skill() {
   echo ""
 
   local choice
-  read -rp "  Install skill for which agent(s)? [a]: " choice < /dev/tty || choice="a"
+  read -rp "  Install support for which agent(s)? [a]: " choice < /dev/tty || choice="a"
   choice="${choice:-a}"
 
   if [ "$choice" = "s" ] || [ "$choice" = "S" ]; then
-    info "Skipping skill installation"
+    info "Skipping AI agent integration installation"
     return
   fi
 
@@ -498,19 +691,29 @@ install_skill() {
   fi
 
   if [ ${#selected[@]} -eq 0 ]; then
-    warn "No valid selection — skipping skill installation"
+    warn "No valid selection — skipping AI agent integration installation"
     return
   fi
 
   # Ask scope
-  echo ""
-  printf "  Install scope:\n"
-  printf "    ${bold}g)${reset} Global (available in all projects)\n"
-  printf "    ${bold}l)${reset} Local  (current directory only)\n"
-  echo ""
-  local scope
-  read -rp "  Scope? [g]: " scope < /dev/tty || scope="g"
-  scope="${scope:-g}"
+  local needs_scope=0
+  for tool in "${selected[@]}"; do
+    if [ "$tool" != "codex-plugin" ]; then
+      needs_scope=1
+      break
+    fi
+  done
+
+  local scope="g"
+  if [ "$needs_scope" -eq 1 ]; then
+    echo ""
+    printf "  Install scope:\n"
+    printf "    ${bold}g)${reset} Global (available in all projects)\n"
+    printf "    ${bold}l)${reset} Local  (current directory only)\n"
+    echo ""
+    read -rp "  Scope? [g]: " scope < /dev/tty || scope="g"
+    scope="${scope:-g}"
+  fi
 
   for tool in "${selected[@]}"; do
     local dest=""
@@ -528,6 +731,10 @@ install_skill() {
         else
           dest="$HOME/.codex/skills/gsd-browser"
         fi
+        ;;
+      codex-plugin)
+        install_codex_plugin
+        continue
         ;;
       gemini)
         if [ "$scope" = "l" ] || [ "$scope" = "L" ]; then
