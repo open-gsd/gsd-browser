@@ -33,9 +33,10 @@ Its superpowers are:
    - Recordings started during viewer sessions become extremely high-quality reproduction packages.
    - Use `browser_goal`, `browser_control_state`, pause/resume/step for shared control flows.
 
-4. **Treat recordings and annotations as first-class evidence**
+4. **Treat recordings, annotations, *and replayable test artifacts* as first-class evidence**
    - Use `browser_record_start` / `stop` + annotations for any flow that might need to be reproduced, audited, or shown to a human later.
-   - Export bundles (`browser_recording_export`) for sharing.
+   - Export bundles (`browser_recording_export`) — this applies redaction automatically.
+   - **Always follow export with `browser_generate_replayable_test`** (recordingId or bundlePath) to produce a commit-ready Playwright regression test. See the dedicated "Replayable Evidence Bundles..." section below.
    - Combine with `browser_annotation_request` at key decision points.
 
 5. **Assert explicitly**
@@ -104,6 +105,82 @@ Then synthesize with refs and evidence links.
 
 See also the `autonomous_research_task` prompt.
 
+## Replayable Evidence Bundles as First-Class Test Artifacts (PR 1-6 Capstone)
+
+This is the **core vision delivered across PR 1-6**: any exploratory, repro, or human+agent flow can be captured as a rich, portable, redacted "replayable evidence bundle" and automatically turned into a high-quality, safe-to-commit Playwright regression test artifact.
+
+**End-to-end agent workflow (record → export → test):**
+
+1. **Record the flow** (highest fidelity when mixed with human judgment):
+   - `browser_record_start({name: "checkout-bug-2026-05"})`
+   - Perform steps with `browser_snapshot` + `browser_act`/`_ref` tools (or let human drive via `browser_view` + takeover + annotations at decision points).
+   - Use `browser_annotation_request` for "why this step matters" notes.
+   - `browser_record_stop`
+
+2. **Export the bundle** (triggers full enrichment + safety):
+   - `browser_recording_export({recordingId, outputPath: "./evidence/checkout-bug"})` (or pass the ID directly to generator in step 4).
+   - Export redacts sensitive state (cookies/tokens matching patterns like session/auth/jwt + high-entropy), writes `manifest.json` (with `replayable: true`, `replayFormatVersion`, `redaction` policy, `stateRestorationHints`, `networkSliceManifest`), `events.jsonl` (enriched with before/after DOM snapshots + full per-action network slices), `screenshots/`, `states/*.pwstate.json` (redacted), optional HAR subset.
+   - The bundle is now a durable, shareable, CI-friendly artifact.
+
+3. **Validate** (recommended before generating test or archiving):
+   - `browser_recording_validate({path: "rec_xxx or ./evidence/..."})` (or CLI `recording-validate <id-or-path>`).
+     The handler accepts either a recording ID (resolved via daemon state) or a filesystem path to an exported bundle directory. Confirms `replayable: true`, redaction details, state hints, etc.
+   - See narration_cmds.rs + mcp.rs for exact param wiring.
+
+4. **Generate the replayable test** (the payoff):
+   - `browser_generate_replayable_test({ recordingId: "...", name: "checkout-regression", output: "tests/e2e/checkout.spec.ts" })`
+   - Or from bundle dir: `{ bundlePath: "./evidence/checkout-bug" }`
+   - Output: ready-to-run .spec.ts with:
+     - `test.describe` + `test.use({ storageState: '...' })` auto-emitted when redacted pwstate present (best-effort auth replay)
+     - Step-by-step replay of actions
+     - Rich DOM assertions per step (element counts, text content, structural headings/focus) + commented expected-vs-actual diffs from the recording
+     - Network slice assertions (request/response shapes without secrets)
+     - Optional HAR subset for deterministic mocking
+     - Screenshot refs in comments for visual cross-check
+   - **Always review the generated test before commit**: refine locators (gsd @vN:eM refs are ephemeral starting points — replace with stable `getByRole`/`getByText` etc.), tune assertion strictness, add missing waits. The generator bakes in safety comments and "review locators" guidance.
+
+**Safety model (non-negotiable):**
+- Read-only by default for bundles.
+- Redaction is automatic and aggressive on export for any state material. Raw secrets never reach the bundle or generated test.
+- Manifest explicitly documents what was redacted; generators surface the limitation ("best-effort state restoration — pair with vault or clean re-login for prod parity").
+- Never commit unredacted material. Use `recording-validate` + manual inspection of `states/` before treating as golden.
+
+**When this shines:**
+- Stateful/authenticated regression suites (login once during recording with vault or real creds; redacted state lets the test start "logged-in-ish").
+- Complex multi-step UI flows with network side-effects.
+- Bug repros turned into permanent guards (record during investigation with human annotations → export → generate test).
+- Human+agent collaboration: viewer Record + annotations produce the richest bundles.
+
+**MVP scope & limitations (be honest in prompts/docs):**
+- Playwright + TypeScript output only (for now).
+- Locator quality: starting point only; production tests require human curation of selectors.
+- DOM assertions: tolerant smoke (counts) + diff comments; not full visual (pair with `visual-diff` or manual screenshots).
+- No automatic self-healing in the emitted test (the original recording + action cache during capture provides the learning).
+- HAR subset is opt-in / partial for size & determinism.
+- State restoration fidelity is "best effort" post-redaction.
+
+**Agent best practices for this workflow:**
+- Always end evidence flows by calling generate-replayable-test (or instruct the user to) and checking the artifact into the repo under `tests/e2e/` or similar.
+- Use named sessions + `evidence_creation_workflow` (or `create_evidence_bundle`) prompt as starting point, then explicitly follow up: "now call browser_generate_replayable_test on the resulting bundle and show me the test + any review notes".
+- Store exported bundles alongside generated tests (or in CI artifacts) for audit/replay.
+- For CI: a basic pattern (example, adapt to your runner):
+
+  ```yaml
+  # .github/workflows/replayable-regression.yml (sketch)
+  - name: Validate + generate + run replayable test from bundle
+    run: |
+      gsd-browser recording-validate "$BUNDLE_DIR" --json
+      gsd-browser generate-replayable-test --bundle "$BUNDLE_DIR" --name "ci-regression" --output "tests/ci-replay.spec.ts"
+      # Review step (or pre-committed reviewed version):
+      npx playwright test "tests/ci-replay.spec.ts" --reporter=list
+  ```
+  Store reviewed generated tests in repo; use exported bundles as CI artifacts for audit. Re-record on major UI changes.
+- Update `suggested_next_actions` awareness: after export the envelope often points to the generator.
+
+See illustrative example artifacts under `docs/examples/replayable-test-artifact/` (manifest + events + redacted pwstate + generated spec). These are pedagogical approximations synthesized from the real schemas (common/src/viewer.rs) and generator logic (codegen.rs + recording.rs export enrichment); they are not byte-for-byte output from a live run. Always produce fresh bundles via the daemon for production use.
+
+This turns every agent exploration or human-assisted repro into lasting, reviewable, executable regression value — the "record once, test forever (with review)" loop.
+
 ## Response Envelope (Major Differentiator)
 
 Every successful `tools/call` returns a rich, standardized envelope (inside the text content as JSON):
@@ -134,10 +211,12 @@ The built-in prompts are executable multi-step guides that encode these best pra
 - `full_page_audit`
 - `create_evidence_bundle`
 - `autonomous_research_task`
-- `evidence_creation_workflow`
+- `evidence_creation_workflow` (record + annotate + export; follow up by calling `browser_generate_replayable_test` on the result to produce the regression test artifact)
 - `debug_stuck_agent_flow`
 
 Ask your MCP client: "Use the gsd-browser prompt `autonomous_research_task` with start_url X and goal Y".
+
+**Pro tip for replayable tests:** After any `evidence_creation_workflow` or manual recording, explicitly say "now use browser_generate_replayable_test with the latest recording or exported bundle and output a reviewed test skeleton under tests/replayable/".
 
 ## Self-Healing & Resilience Patterns
 
@@ -166,6 +245,7 @@ Ask your MCP client: "Use the gsd-browser prompt `autonomous_research_task` with
 | Performance or deep debugging          | `browser_trace_start/stop` + HAR export + network                    |
 | Long-term self-healing across runs     | `browser_action_cache` (stats/get/put) + persistent named sessions   |
 | Archiving evidence                     | `browser_save_pdf`, `browser_recording_export`                       |
+| Turn recorded flow into regression test | `browser_record_*` + `browser_recording_export` (or direct ID) → `browser_generate_replayable_test` (PR1-6 workflow; produces safe, rich Playwright artifact) |
 | Complex multi-step atomic flows        | `browser_batch` (highly recommended for reliability + fewer roundtrips) |
 | Tab/frame management                   | `browser_list_pages` / `switch_page` / `list_frames` / `select_frame` |
 | Human goal setting & fine control      | `browser_goal`, `browser_step`, `browser_abort`, `browser_control_state` |

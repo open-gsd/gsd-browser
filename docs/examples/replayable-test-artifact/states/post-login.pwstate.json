@@ -1,0 +1,28 @@
+{
+  "cookies": [
+    {
+      "name": "session",
+      "value": "[REDACTED:sensitive]",
+      "domain": "app.example.com",
+      "path": "/",
+      "expires": 1760000000,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "csrf",
+      "value": "[REDACTED:sensitive]",
+      "domain": "app.example.com",
+      "path": "/"
+    }
+  ],
+  "origins": [
+    {
+      "origin": "https://app.example.com",
+      "localStorage": [
+        { "name": "user_pref", "value": "dark" }
+      ]
+    }
+  ]
+}
