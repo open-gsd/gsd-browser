@@ -493,7 +493,7 @@ install_codex_plugin_files() {
     rmdir "$skill_backup"
     if ! mv "$skill_dest" "$skill_backup"; then
       rm -f "$manifest_tmp"
-      rm -rf "$skill_tmp"
+      rm -rf "$skill_tmp" "$assets_tmp"
       return 1
     fi
   fi
