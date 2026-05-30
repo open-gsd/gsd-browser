@@ -1,7 +1,9 @@
 use crate::daemon::logs::LogBuffer;
 use base64::{engine::general_purpose, Engine as _};
 use gsd_browser_common::types::{CompactPageState, NetworkLogEntry};
-use gsd_browser_common::viewer::{BrowserArtifactManifestV1, BROWSER_ARTIFACT_BUNDLE_SCHEMA};
+use gsd_browser_common::viewer::{
+    BrowserArtifactManifestV1, BROWSER_ARTIFACT_BUNDLE_SCHEMA, BROWSER_EVENT_V1_SCHEMA,
+};
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -266,7 +268,7 @@ impl RecordingStore {
         let event = json!({
             "seq": seq,
             "timestampMs": now_ms(),
-            "schema": "BrowserEventV1",
+            "schema": BROWSER_EVENT_V1_SCHEMA,
             "recordingId": active.recording_id,
             "sessionId": active.session_id,
             "source": input.source,
@@ -435,6 +437,17 @@ impl RecordingStore {
                 "deltas": "deltas.json"
             }),
             hashes: Value::Object(self.hashes.clone()),
+
+            // PR-3 defaults: new recordings via stop() are not yet marked replayable.
+            // Replayable=true + populated fields are injected at *export* time (see export fn)
+            // so that even legacy stop() bundles can be exported as first-class replay artifacts.
+            // This keeps creation path simple and evolvable.
+            replayable: false,
+            replay_format_version: None,
+            entry_point_command: None,
+            expected_final_state: None,
+            network_slice_manifest: None,
+            state_restoration_hints: None,
         };
         let dir = self.root.join(&manifest.recording_id);
         let data = serde_json::to_string_pretty(&manifest).map_err(|err| err.to_string())?;
@@ -467,7 +480,87 @@ impl RecordingStore {
             return Err(format!("recording not found: {recording_id}"));
         }
         fs::create_dir_all(output).map_err(|err| format!("failed to create export dir: {err}"))?;
-        Ok(src)
+
+        // PR-3: Actually copy bundle contents to export location (previous impl was a no-op placeholder).
+        // This makes `recording-export --output ./evidence/` produce a self-contained, portable
+        // artifact dir. During export we *upgrade* the manifest copy with replayable fields
+        // populated from the event stream. This turns any bundle (even legacy) into a
+        // first-class replayable test artifact targeting high-quality Playwright output,
+        // without mutating the original recording store.
+        let dest = output.join(recording_id);
+        fs::create_dir_all(&dest)
+            .map_err(|err| format!("failed to create export bundle dir: {err}"))?;
+
+        copy_recording_bundle_for_export(&src, &dest)?;
+
+        // Load, enrich for replay, and overwrite manifest in the *exported* copy only.
+        let manifest_path = dest.join("manifest.json");
+        let mut manifest: BrowserArtifactManifestV1 =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?)
+                .map_err(|e| format!("malformed exported manifest: {e}"))?;
+
+        manifest.replayable = true;
+        manifest.replay_format_version = Some("playwright-1".to_string());
+
+        // Best-effort population of replay fields from the events.jsonl present in the copy.
+        // Uses PR-1 enriched command/before/after/network so entry + final state are high fidelity.
+        if let Ok(events_data) = fs::read_to_string(dest.join("events.jsonl")) {
+            let lines: Vec<&str> = events_data
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .collect();
+            if !lines.is_empty() {
+                if let Ok(first) = serde_json::from_str::<serde_json::Value>(lines[0]) {
+                    if let Some(cmd) = first.get("command").cloned() {
+                        if cmd != serde_json::json!({}) && !cmd.is_null() {
+                            manifest.entry_point_command = Some(cmd);
+                        } else if let Some(kind) = first.get("kind").and_then(|k| k.as_str()) {
+                            // Fallback: synthesize minimal entry from boundary event
+                            manifest.entry_point_command =
+                                Some(json!({ "kind": kind, "name": manifest.name }));
+                        }
+                    }
+                }
+                if let Ok(last) = serde_json::from_str::<serde_json::Value>(lines[lines.len() - 1])
+                {
+                    let final_state = json!({
+                        "url": last.get("url"),
+                        "title": last.get("title"),
+                        "after": last.get("after"),
+                        "domHash": last.get("after").and_then(|a| a.get("domHash")),
+                        "sessionStateHash": last.get("after").and_then(|a| a.get("sessionStateHash")),
+                    });
+                    manifest.expected_final_state = Some(final_state);
+                }
+            }
+        }
+
+        // Network slice manifest synthesized from per-event network (PR-2 ready).
+        // Real slicing may be deeper in future; this provides the declared field for consumers.
+        let net_hint = json!({
+            "derivedFrom": "per-action-network-in-events",
+            "format": "summary-slice-v1",
+            "note": "Full HAR slices available via browser_network + export; use for deterministic replay mocking"
+        });
+        manifest.network_slice_manifest = Some(net_hint);
+
+        // State restoration hints: point consumers at the rich per-event before/after.session
+        // objects (from PR-1 capture_basic_session_meta + save-state patterns) + redaction policy.
+        manifest.state_restoration_hints = Some(json!({
+            "strategy": "replay-from-events",
+            "usePerEventSession": true,
+            "cookiesFrom": "event.before.session or event.after.session",
+            "storageFrom": "event.before/after",
+            "authVault": "required for any redacted secrets; see gsd-browser auth-vault",
+            "viewport": "from frames or last after.viewport",
+            "warning": "secrets redacted by default; provide via env or vault for full replay fidelity"
+        }));
+
+        let updated = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+        fs::write(&manifest_path, updated)
+            .map_err(|e| format!("failed to write replay-enhanced manifest: {e}"))?;
+
+        Ok(dest)
     }
 
     pub fn discard(&mut self, recording_id: &str) -> Result<bool, String> {
@@ -554,7 +647,15 @@ pub fn validate_recording_bundle(path: &Path) -> Result<serde_json::Value, Strin
         "ok": true,
         "recordingId": manifest.recording_id,
         "eventCount": manifest.event_count,
-        "redaction": manifest.redaction
+        "redaction": manifest.redaction,
+        // PR-3: surface replayable metadata so `recording-validate` on exported bundles
+        // confirms first-class replay artifact status (for CI, audits, Playwright consumers).
+        "replayable": manifest.replayable,
+        "replayFormatVersion": manifest.replay_format_version,
+        "hasEntryPoint": manifest.entry_point_command.is_some(),
+        "hasExpectedFinalState": manifest.expected_final_state.is_some(),
+        "hasNetworkSliceManifest": manifest.network_slice_manifest.is_some(),
+        "hasStateRestorationHints": manifest.state_restoration_hints.is_some()
     }))
 }
 
@@ -608,6 +709,42 @@ pub fn compute_dom_hash(state: &CompactPageState) -> String {
 /// Keeps schema evolvable and honest for replayable bundles.
 pub fn compute_session_state_hash() -> String {
     "sha256:session-state-v1-legacy-use-per-event-session-object".to_string()
+}
+
+/// PR-3 helper: copy the known bundle layout (non-recursive top-level + 1-level dirs)
+/// to the export destination. Avoids pulling in fs-extra; tailored to artifact layout.
+fn copy_recording_bundle_for_export(src: &Path, dest: &Path) -> Result<(), String> {
+    // Top-level files that always exist for valid bundles
+    for name in ["manifest.json", "events.jsonl", "deltas.json"] {
+        let s = src.join(name);
+        if s.exists() {
+            fs::copy(&s, dest.join(name)).map_err(|e| format!("failed to copy {name}: {e}"))?;
+        }
+    }
+    // Known artifact subdirectories (flat or with files; no deep nesting expected)
+    for dir in ["frames", "snapshots", "annotations", "logs"] {
+        let sdir = src.join(dir);
+        if sdir.exists() && sdir.is_dir() {
+            let ddir = dest.join(dir);
+            copy_dir_recursive(&sdir, &ddir)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("failed mkdir {dst:?}: {e}"))?;
+    for entry in fs::read_dir(src).map_err(|e| format!("readdir {src:?}: {e}"))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let s = entry.path();
+        let d = dst.join(entry.file_name());
+        if s.is_dir() {
+            copy_dir_recursive(&s, &d)?;
+        } else {
+            fs::copy(&s, &d).map_err(|e| format!("copy file {s:?} -> {d:?}: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

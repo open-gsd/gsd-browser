@@ -6,6 +6,16 @@ pub const ANNOTATION_SCHEMA: &str = "AnnotationV1";
 pub const RECORDING_EVENT_SCHEMA: &str = "RecordingEventV1";
 pub const BROWSER_ARTIFACT_BUNDLE_SCHEMA: &str = "BrowserArtifactBundleV1";
 
+/// PR-3 / evolvability: declare the current event schema explicitly (was previously only a literal).
+pub const BROWSER_EVENT_V1_SCHEMA: &str = "BrowserEventV1";
+
+/// PR-3: Minimal replayable schema version for events in replayable evidence bundles.
+/// V2 is a strict superset of the PR-1-enriched BrowserEventV1 (adds replayIntent,
+/// stableSelectorHints, actionKey etc in future generators). For PR-3 we declare the
+/// identifier for evolvability and validation; emission/population of V2 events
+/// is reserved for replay generator work (later PRs).
+pub const BROWSER_EVENT_V2_SCHEMA: &str = "BrowserEventV2";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ControlOwner {
@@ -393,6 +403,30 @@ pub struct BrowserArtifactManifestV1 {
     pub redaction: serde_json::Value,
     pub artifacts: serde_json::Value,
     pub hashes: serde_json::Value,
+
+    // === PR-3 Replayable Bundle Manifest Additions ===
+    // All fields optional-with-defaults to preserve 100% backward compatibility
+    // when deserializing existing V1 bundles (pre-PR3). Clean, evolvable design:
+    // - replayable flag gates "replayable test artifact" semantics (Gerald Sterling feedback).
+    // - replayFormatVersion allows independent evolution of replay expectations
+    //   (e.g. "playwright-1", "gsd-replay-v1") without new top-level bundle schema.
+    // - entryPointCommand, expectedFinalState, networkSliceManifest, stateRestorationHints
+    //   make bundles first-class replayable artifacts (high-fidelity for Playwright
+    //   codegen, CI assertions, human audit, self-healing).
+    // - Populated at export time (or by future recorders); present in exported
+    //   artifacts even if source recording used legacy stop().
+    #[serde(default)]
+    pub replayable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_format_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_point_command: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_final_state: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_slice_manifest: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_restoration_hints: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
