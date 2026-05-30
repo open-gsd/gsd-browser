@@ -1070,6 +1070,20 @@ fn build_tool_list() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "browser_generate_replayable_test",
+            "description": "MVP replayable test generator (PR4). Consumes a full recording bundle (enriched events + network slices from PR1-3) and emits a high-quality Playwright test with command sequence, URL checks, basic network assertions, and screenshot references. Makes evidence bundles first-class replayable test artifacts (Gerald Sterling). Supports recordingId or bundlePath. Prefer this for regression tests over timeline generate_test.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "default": "replayable-session" },
+                    "recordingId": { "type": "string", "description": "Recording ID from browser_recordings or record_stop" },
+                    "bundlePath": { "type": "string", "description": "Filesystem path to exported bundle dir (with manifest.json + events.jsonl)" },
+                    "output": { "type": "string", "description": "Output .spec.ts path (defaults co-located with bundle when possible)" },
+                    "session": { "type": "string" }
+                }
+            }
+        }),
+        json!({
             "name": "browser_vault_save",
             "description": "Save credentials to the encrypted auth vault for future use with vault_login.",
             "inputSchema": {
@@ -1997,11 +2011,54 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .and_then(|v| v.as_str())
                 .unwrap_or("recorded-session");
             let mut params = json!({ "name": name, "include_assertions": arguments.get("include_assertions").and_then(|v| v.as_bool()).unwrap_or(true) });
-            if let Some(o) = arguments.get("output") {
+            if let Some(o) = arguments
+                .get("output")
+                .or_else(|| arguments.get("outputPath"))
+            {
                 params["output"] = o.clone();
+                params["outputPath"] = o.clone(); // normalize for daemon handler (which reads outputPath)
             }
             let resp = crate::daemon_client::send_request(
                 "generate_test",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
+            serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
+        }
+        "browser_generate_replayable_test" => {
+            let name = arguments
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("replayable-session");
+            let mut params = json!({ "name": name });
+            if let Some(id) = arguments
+                .get("recordingId")
+                .or_else(|| arguments.get("recording_id"))
+            {
+                params["recordingId"] = id.clone();
+            }
+            if let Some(bp) = arguments
+                .get("bundlePath")
+                .or_else(|| arguments.get("bundle_path"))
+            {
+                params["bundlePath"] = bp.clone();
+            }
+            if let Some(o) = arguments
+                .get("output")
+                .or_else(|| arguments.get("outputPath"))
+            {
+                params["output"] = o.clone();
+                params["outputPath"] = o.clone(); // normalize for daemon handler
+            }
+            let resp = crate::daemon_client::send_request(
+                "generate_replayable_test",
                 params,
                 cli.browser_path.as_deref(),
                 cli.cdp_url.as_deref(),
