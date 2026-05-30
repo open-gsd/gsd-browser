@@ -119,6 +119,10 @@ pub struct NetworkLogEntry {
     pub failure_text: String,
     #[serde(default)]
     pub response_body: String,
+    /// PR-2: recording seq this entry was tagged with at listener time (enables networkSlice per event).
+    /// Absent/None for untagged entries (no active recording or pre-PR2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_seq: Option<u64>,
 }
 
 // ── Action Timeline Entry ──

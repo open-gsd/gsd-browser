@@ -1,11 +1,13 @@
+use crate::daemon::logs::LogBuffer;
 use base64::{engine::general_purpose, Engine as _};
-use gsd_browser_common::types::CompactPageState;
+use gsd_browser_common::types::{CompactPageState, NetworkLogEntry};
 use gsd_browser_common::viewer::{BrowserArtifactManifestV1, BROWSER_ARTIFACT_BUNDLE_SCHEMA};
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +29,7 @@ pub struct RecordingEventInput {
     pub title: String,
     pub redacted: bool,
     // PR-1 enrichment: full command params + before/after with DOM hash + sessionStateHash + per-action network tags
+    // PR-2: network now also carries "networkSlice" (computed in record_event via extract from tagged buffer)
     pub command: serde_json::Value,
     pub before: serde_json::Value,
     pub after: serde_json::Value,
@@ -41,6 +44,9 @@ pub struct RecordingStore {
     redaction_hits: u64,
     frame_count: u64,
     hashes: Map<String, Value>,
+    // PR-2 fields for per-action network slicing (wired at daemon start from DaemonLogs)
+    current_recording_seq: Option<Arc<Mutex<u64>>>,
+    network_buffer: Option<LogBuffer<NetworkLogEntry>>,
 }
 
 fn now_ms() -> u64 {
@@ -60,7 +66,19 @@ impl RecordingStore {
             redaction_hits: 0,
             frame_count: 0,
             hashes: Map::new(),
+            current_recording_seq: None,
+            network_buffer: None,
         }
+    }
+
+    /// PR-2: wire the shared tagger (updated by prepare/record to stamp live network entries).
+    pub fn set_network_tagger(&mut self, tagger: Arc<Mutex<u64>>) {
+        self.current_recording_seq = Some(tagger);
+    }
+
+    /// PR-2: wire the network buffer so record_event can extract the tagged slice for this seq.
+    pub fn set_network_buffer(&mut self, buffer: LogBuffer<NetworkLogEntry>) {
+        self.network_buffer = Some(buffer);
     }
 
     pub fn start(&mut self, name: &str, session_id: &str) -> Result<RecordingSession, String> {
@@ -71,6 +89,9 @@ impl RecordingStore {
         self.redaction_hits = 0;
         self.frame_count = 0;
         self.hashes.clear();
+        if let Some(t) = &self.current_recording_seq {
+            *t.lock().unwrap() = 0;
+        }
         fs::create_dir_all(&self.root)
             .map_err(|err| format!("failed to create recordings root: {err}"))?;
         let recording_id = format!("rec_{}", uuid::Uuid::new_v4());
@@ -106,6 +127,9 @@ impl RecordingStore {
             return Err(format!("recording not active: {recording_id}"));
         }
         active.paused = true;
+        if let Some(t) = &self.current_recording_seq {
+            *t.lock().unwrap() = 0;
+        }
         Ok(active.clone())
     }
 
@@ -131,10 +155,15 @@ impl RecordingStore {
         let text = redact_text(&redaction_probe);
         let url = redact_text(&input.url);
         let title = redact_text(&input.title);
+        if let Some(tagger) = &self.current_recording_seq {
+            *tagger.lock().unwrap() = seq;
+        }
+        let network_slice = self.extract_network_slice(seq);
         let (command, command_redacted) = redact_recording_value(&input.command);
         let (before, before_redacted) = redact_recording_value(&input.before);
         let (after, after_redacted) = redact_recording_value(&input.after);
         let (network, network_redacted) = redact_recording_value(&input.network);
+        let (network_slice, network_slice_redacted) = redact_recording_value(&network_slice);
         let redacted = text != redaction_probe
             || url != input.url
             || title != input.title
@@ -142,6 +171,7 @@ impl RecordingStore {
             || before_redacted
             || after_redacted
             || network_redacted
+            || network_slice_redacted
             || input.redacted;
         if redacted {
             self.redaction_hits += 1;
@@ -164,6 +194,7 @@ impl RecordingStore {
             "before": before,
             "after": after,
             "network": network,
+            "networkSlice": network_slice,
             "redaction": { "status": if redacted { "redacted" } else { "none" } },
             "artifactRefs": {},
         });
@@ -176,6 +207,63 @@ impl RecordingStore {
             .map_err(|err| format!("failed to open events.jsonl: {err}"))?;
         writeln!(file, "{line}").map_err(|err| format!("failed to append event: {err}"))?;
         Ok(())
+    }
+
+    /// PR-2: called pre-dispatch for record_timeline actions to arm the tagger with upcoming seq.
+    /// Network events during the action thus get stamped before we reach record_event (which advances).
+    /// Returns the seq (or None if no active non-paused recording).
+    pub fn prepare_for_next_recorded_event(&mut self) -> Option<u64> {
+        let Some(active) = self.active.as_ref() else {
+            return None;
+        };
+        if active.paused {
+            if let Some(t) = &self.current_recording_seq {
+                *t.lock().unwrap() = 0;
+            }
+            return None;
+        }
+        let seq = self.next_seq;
+        if let Some(t) = &self.current_recording_seq {
+            *t.lock().unwrap() = seq;
+        }
+        Some(seq)
+    }
+
+    /// PR-2: extraction/slicing logic — filters the (tagged) network buffer for entries matching this seq.
+    /// Produces the "networkSlice" value embedded in each recorded event (and thus in events.jsonl).
+    /// Reuses existing LogBuffer.snapshot() + the seq tags set at listener time.
+    /// Redacts sensitive bits for bundle hygiene. Minimal shape for replayable artifacts.
+    fn extract_network_slice(&self, seq: u64) -> serde_json::Value {
+        match &self.network_buffer {
+            Some(buf) => {
+                let entries: Vec<_> = buf
+                    .snapshot()
+                    .into_iter()
+                    .filter(|e| e.recording_seq == Some(seq))
+                    .map(|e| {
+                        json!({
+                            "method": e.method,
+                            "url": redact_text(&e.url),
+                            "status": e.status,
+                            "resourceType": e.resource_type,
+                            "timestamp": e.timestamp,
+                            "failed": e.failed,
+                            "failureText": if e.failure_text.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                json!(redact_text(&e.failure_text))
+                            },
+                        })
+                    })
+                    .collect();
+                json!({
+                    "seq": seq,
+                    "count": entries.len(),
+                    "entries": entries,
+                })
+            }
+            None => json!({ "seq": seq, "count": 0, "entries": [], "note": "buffer-not-wired" }),
+        }
     }
 
     pub fn record_frame(
@@ -205,6 +293,9 @@ impl RecordingStore {
         if active.recording_id != recording_id {
             self.active = Some(active);
             return Err(format!("recording not active: {recording_id}"));
+        }
+        if let Some(t) = &self.current_recording_seq {
+            *t.lock().unwrap() = 0;
         }
         let event_count =
             count_jsonl_lines(&self.root.join(&active.recording_id).join("events.jsonl"))?;

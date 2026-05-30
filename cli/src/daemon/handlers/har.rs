@@ -202,6 +202,7 @@ mod tests {
             failed: false,
             failure_text: String::new(),
             response_body: String::new(),
+            recording_seq: None,
         });
 
         let tmp = std::env::temp_dir().join("bt-har-test.har");

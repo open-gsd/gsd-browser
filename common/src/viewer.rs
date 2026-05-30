@@ -360,6 +360,11 @@ pub struct RecordingEventV1 {
     pub command: serde_json::Value,
     #[serde(default)]
     pub network: serde_json::Value,
+    /// PR-2: per-action network slice (requests/responses tagged with this event's seq by the
+    /// network listener at capture time, extracted at record_event emission).
+    /// Enables clean replayable evidence bundles (filter network by slice per event).
+    #[serde(default)]
+    pub network_slice: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
