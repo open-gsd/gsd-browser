@@ -41,12 +41,12 @@ Run `gsd-browser mcp` and unleash one of the most powerful browser surfaces avai
 ### npm
 
 ```bash
-npm install -g @gsd-build/gsd-browser
+npm install -g @open-gsd/gsd-browser
 ```
 
 ### Pre-built binaries
 
-Download from [GitHub Releases](https://github.com/gsd-build/gsd-browser/releases):
+Download from [GitHub Releases](https://github.com/open-gsd/gsd-browser/releases):
 
 | Platform | Asset |
 |----------|-------|

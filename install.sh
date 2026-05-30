@@ -13,8 +13,7 @@ set -euo pipefail
 #
 # Environment variables (advanced):
 #   GSD_BROWSER_VERSION       - install a specific version (default: latest)
-#   GSD_BROWSER_SOURCE_REPO   - repo for installer-managed source files (default: open-gsd/gsd-browser)
-#   GSD_BROWSER_RELEASE_REPO  - repo for release binaries (default: gsd-build/gsd-browser)
+#   GSD_BROWSER_REPO          - repo for source files and release binaries (default: open-gsd/gsd-browser)
 #   GSD_BROWSER_DIR           - override install directory (default: $HOME/.gsd-browser)
 #   GSD_BROWSER_INSTALL_MODE  - install or update (default: install)
 #   GSD_BROWSER_SKIP_CHROMIUM - skip Chrome/Chromium setup when set to 1
@@ -22,8 +21,7 @@ set -euo pipefail
 #   GSD_BROWSER_INSTALL_CODEX_PLUGIN - install the Codex Plugin when set to 1
 
 VERSION="${GSD_BROWSER_VERSION:-latest}"
-SOURCE_REPO="${GSD_BROWSER_SOURCE_REPO:-open-gsd/gsd-browser}"
-RELEASE_REPO="${GSD_BROWSER_RELEASE_REPO:-gsd-build/gsd-browser}"
+REPO="${GSD_BROWSER_REPO:-open-gsd/gsd-browser}"
 INSTALL_DIR="${GSD_BROWSER_DIR:-$HOME/.gsd-browser}"
 BIN_DIR="$INSTALL_DIR/bin"
 CHROMIUM_DIR="$INSTALL_DIR/chromium"
@@ -120,9 +118,9 @@ detect_platform() {
 resolve_version() {
   if [ "$VERSION" = "latest" ]; then
     info "Fetching latest release..."
-    VERSION=$(curl -fsSL "https://api.github.com/repos/$RELEASE_REPO/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')
+    VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')
     if [ -z "$VERSION" ]; then
-      fail "Could not determine latest version from $RELEASE_REPO. Set GSD_BROWSER_VERSION manually."
+      fail "Could not determine latest version from $REPO. Set GSD_BROWSER_VERSION manually."
     fi
   fi
   ok "Version: $VERSION"
@@ -131,7 +129,7 @@ resolve_version() {
 download_binary() {
   local url filename
   filename="gsd-browser-${PLATFORM}"
-  url="https://github.com/$RELEASE_REPO/releases/download/v${VERSION}/${filename}"
+  url="https://github.com/$REPO/releases/download/v${VERSION}/${filename}"
 
   info "Downloading gsd-browser for $PLATFORM..."
   mkdir -p "$BIN_DIR"
@@ -399,7 +397,7 @@ verify() {
   warn "Set browser.path in ~/.gsd-browser/config.toml"
 }
 
-SKILL_REPO_BASE="https://raw.githubusercontent.com/$SOURCE_REPO/main/gsd-browser-skill"
+SKILL_REPO_BASE="https://raw.githubusercontent.com/$REPO/main/gsd-browser-skill"
 SKILL_FILES=(
   "SKILL.md"
   "references/command-reference.md"
@@ -416,7 +414,7 @@ SKILL_FILES=(
 )
 
 CODEX_PLUGIN_NAME="gsd-browser"
-CODEX_PLUGIN_REPO_BASE="https://raw.githubusercontent.com/$SOURCE_REPO/main/codex-plugin"
+CODEX_PLUGIN_REPO_BASE="https://raw.githubusercontent.com/$REPO/main/codex-plugin"
 CODEX_PLUGIN_ROOT="$HOME/plugins/$CODEX_PLUGIN_NAME"
 CODEX_MARKETPLACE_PATH="$HOME/.agents/plugins/marketplace.json"
 

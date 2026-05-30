@@ -6,8 +6,7 @@ const path = require("path");
 const https = require("https");
 const { execSync } = require("child_process");
 
-const SOURCE_REPO = "open-gsd/gsd-browser";
-const RELEASE_REPO = "gsd-build/gsd-browser";
+const REPO = "open-gsd/gsd-browser";
 
 const PLATFORM_MAP = {
   "darwin-arm64": "gsd-browser-darwin-arm64",
@@ -83,7 +82,7 @@ async function main() {
   let version = pkg.version;
 
   // Download from GitHub releases
-  let url = `https://github.com/${RELEASE_REPO}/releases/download/v${version}/${binaryName}`;
+  let url = `https://github.com/${REPO}/releases/download/v${version}/${binaryName}`;
 
   // If version is 0.1.0 or similar pre-release, try latest
   try {
@@ -93,7 +92,7 @@ async function main() {
     // Fall back to latest release
     console.log(`gsd-browser: v${version} not found, trying latest release...`);
     try {
-      const release = await fetchJSON(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`);
+      const release = await fetchJSON(`https://api.github.com/repos/${REPO}/releases/latest`);
       const asset = release.assets.find((a) => a.name === binaryName);
       if (!asset) {
         throw new Error(`No asset ${binaryName} in latest release`);
@@ -105,7 +104,7 @@ async function main() {
         `gsd-browser: failed to download binary.\n` +
         `  ${e2.message}\n` +
         `  You can build from a repo checkout:\n` +
-        `    git clone https://github.com/${SOURCE_REPO}.git\n` +
+        `    git clone https://github.com/${REPO}.git\n` +
         `    cd gsd-browser\n` +
         `    cargo install --path cli\n` +
         `  Or use the installer: curl -fsSL https://raw.githubusercontent.com/open-gsd/gsd-browser/main/install.sh | bash`

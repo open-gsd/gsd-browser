@@ -63,6 +63,12 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
         run: |
+          if [ -z "${APPLE_CERTIFICATE_BASE64:-}" ] || [ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ] || [ -z "${APPLE_KEYCHAIN_PASSWORD:-}" ]; then
+            echo "Apple signing secrets are not configured; publishing unsigned macOS binary."
+            ./${{ matrix.artifact }} --version
+            exit 0
+          fi
+
           # Decode certificate
           echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > certificate.p12
 
@@ -102,6 +108,12 @@ jobs:
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_ID_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "Apple notarization secrets are not configured; skipping notarization."
+            ./${{ matrix.artifact }} --version
+            exit 0
+          fi
+
           # Create ZIP for notarization (notarytool requires archive)
           ditto -c -k --keepParent "${{ matrix.artifact }}" "${{ matrix.artifact }}.zip"
 
