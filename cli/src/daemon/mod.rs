@@ -913,12 +913,14 @@ async fn dispatch(
         diff.before = Some(before_state);
     }
 
-    // PR-2: arm the tagger *before* dispatch_inner (and settle) using the *next* seq.
-    // This tags any network requests that fire during the action with the correct recording seq
-    // for later slice extraction in the store. (Seq is only advanced in record_event.)
+    // PR-2: arm the tagger *before* dispatch_inner (and settle) and *claim* the seq.
+    // prepare_for_next_recorded_event now advances next_seq and stores pending_seq.
+    // This tags networks during the action and guarantees monotonic seqs even under pause
+    // interleaving (no reuse/pollution for replay artifacts). Return value captured for
+    // future use / audit (the store's pending_seq is the source of truth).
     if record_timeline {
         let mut recs = state.recordings.lock().await;
-        recs.prepare_for_next_recorded_event();
+        let _claimed_seq = recs.prepare_for_next_recorded_event();
     }
 
     let response = dispatch_inner(req, page, logs, state, browser).await;
@@ -1006,7 +1008,7 @@ async fn dispatch(
                 .take(5)
                 .map(|e| serde_json::json!({"url": e.url, "status": e.status, "method": e.method, "resourceType": e.resource_type}))
                 .collect();
-            serde_json::json!({ "recent": snaps, "tagging": "per-action-for-replayable-evidence", "note": "use networkSlice in event for precise per-seq slice (PR-2)" })
+            serde_json::json!({ "recent": snaps, "tagging": "per-action-for-replayable-evidence", "note": "compat snapshot (PR-1); prefer networkSlice (PR-2) in the emitted event for authoritative per-action tagged requests" })
         };
 
         // Late (post-dispatch_inner) session meta capture — serves the "after" side.

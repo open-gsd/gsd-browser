@@ -209,6 +209,9 @@ pub async fn spawn_network_listener(
                 .unwrap_or_else(|| "GET".to_string());
 
             let recording_seq = {
+                // unwrap safe: follows exact LogBuffer precedent (push/snapshot/drain);
+                // critical section is a few instructions, never held across await or in
+                // re-entrant code. Poison would be fatal to the listener task anyway.
                 let s = *tagger_resp.lock().unwrap();
                 if s > 0 {
                     Some(s)
@@ -250,6 +253,9 @@ pub async fn spawn_network_listener(
             let resource_type = format!("{:?}", event.r#type);
 
             let recording_seq = {
+                // unwrap safe: follows exact LogBuffer precedent (push/snapshot/drain);
+                // critical section is a few instructions, never held across await or in
+                // re-entrant code. Poison would be fatal to the listener task anyway.
                 let s = *tagger_fail.lock().unwrap();
                 if s > 0 {
                     Some(s)
@@ -259,7 +265,10 @@ pub async fn spawn_network_listener(
             };
             let entry = NetworkLogEntry {
                 method: String::new(),
-                url: String::new(), // loadingFailed doesn't include URL, only requestId
+                url: String::new(), // loadingFailed doesn't include URL (or requestId in this event shape).
+                // This is a pre-existing CDP limitation. Slices will contain
+                // failureText + resourceType + timestamp + recording_seq for such
+                // entries; url will be empty. See extract_network_slice docs.
                 status: 0,
                 resource_type,
                 timestamp: *event.timestamp.inner(),

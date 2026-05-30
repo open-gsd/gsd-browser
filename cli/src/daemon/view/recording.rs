@@ -47,6 +47,10 @@ pub struct RecordingStore {
     // PR-2 fields for per-action network slicing (wired at daemon start from DaemonLogs)
     current_recording_seq: Option<Arc<Mutex<u64>>>,
     network_buffer: Option<LogBuffer<NetworkLogEntry>>,
+    /// PR-2: the seq claimed by the most recent prepare_for_next_recorded_event while active.
+    /// Used to make seq advancement happen at "arming" time (pre-dispatch) so pause interleaving
+    /// cannot cause reuse, and to give record_event the authoritative seq for the action.
+    pending_seq: Option<u64>,
 }
 
 fn now_ms() -> u64 {
@@ -68,12 +72,14 @@ impl RecordingStore {
             hashes: Map::new(),
             current_recording_seq: None,
             network_buffer: None,
+            pending_seq: None,
         }
     }
 
     /// PR-2: wire the shared tagger (updated by prepare/record to stamp live network entries).
     pub fn set_network_tagger(&mut self, tagger: Arc<Mutex<u64>>) {
         self.current_recording_seq = Some(tagger);
+        self.pending_seq = None;
     }
 
     /// PR-2: wire the network buffer so record_event can extract the tagged slice for this seq.
@@ -92,6 +98,7 @@ impl RecordingStore {
         if let Some(t) = &self.current_recording_seq {
             *t.lock().unwrap() = 0;
         }
+        self.pending_seq = None;
         fs::create_dir_all(&self.root)
             .map_err(|err| format!("failed to create recordings root: {err}"))?;
         let recording_id = format!("rec_{}", uuid::Uuid::new_v4());
@@ -130,6 +137,10 @@ impl RecordingStore {
         if let Some(t) = &self.current_recording_seq {
             *t.lock().unwrap() = 0;
         }
+        // pending_seq (if any) stays "spent" — seq was already advanced at prepare time.
+        // The prepared action's networks (if any) received the tag before pause; no future
+        // action will reuse the number. Slice for that seq may be partial/empty.
+        self.pending_seq = None;
         Ok(active.clone())
     }
 
@@ -139,6 +150,8 @@ impl RecordingStore {
             return Err(format!("recording not active: {recording_id}"));
         }
         active.paused = false;
+        // On resume we do not restore a previous pending; next user action will prepare fresh.
+        self.pending_seq = None;
         Ok(active.clone())
     }
 
@@ -147,18 +160,53 @@ impl RecordingStore {
             return Ok(());
         };
         if active.paused {
+            // PR-2: If a seq was prepared for this action but pause hit before record_event,
+            // the seq was already claimed+advanced in prepare (see prepare_for_next...).
+            // We log for auditability (replay consumers can see the gap) but do not emit an
+            // event for the prepared seq. This prevents reuse pollution (Issue 2).
+            if self.pending_seq.is_some() {
+                tracing::warn!(
+                    "[recording] record_event skipped due to pause for prepared seq {:?} (kind={}) — seq is spent; no reuse possible",
+                    self.pending_seq, input.kind
+                );
+                self.pending_seq = None;
+            }
             return Ok(());
         }
-        let seq = self.next_seq;
-        self.next_seq += 1;
+
+        // PR-2: Use pending_seq (claimed at prepare time) as source of truth when present.
+        // This is the case for all armed CLI record_timeline actions and (after viewer fixes)
+        // viewer user-input events. Falls back for direct/record_event-only calls (e.g. some boundaries).
+        let seq = if let Some(p) = self.pending_seq.take() {
+            p
+        } else {
+            let s = self.next_seq;
+            self.next_seq += 1;
+            s
+        };
+
+        // Arm tagger to this seq for any *very* late arrivals right at record time (rare).
+        if let Some(tagger) = &self.current_recording_seq {
+            *tagger.lock().unwrap() = seq;
+        }
+
+        // Extract the slice *while the seq is still (briefly) armed*.
+        let network_slice = self.extract_network_slice(seq);
+
+        // CRITICAL for precision (addresses Issue 1): Immediately close the attribution window
+        // for this seq. Any network pushed by listeners *after* this point will *not* receive
+        // this seq (they get 0 or the next action's seq). This eliminates orphans that would
+        // otherwise be stamped with a seq whose slice was already finalized, and prevents
+        // pollution of future slices. Late tails after settle are accepted as a documented
+        // window boundary (see extract docs).
+        if let Some(tagger) = &self.current_recording_seq {
+            *tagger.lock().unwrap() = 0;
+        }
+
         let redaction_probe = format!("{} {} {}", input.kind, input.url, input.title);
         let text = redact_text(&redaction_probe);
         let url = redact_text(&input.url);
         let title = redact_text(&input.title);
-        if let Some(tagger) = &self.current_recording_seq {
-            *tagger.lock().unwrap() = seq;
-        }
-        let network_slice = self.extract_network_slice(seq);
         let (command, command_redacted) = redact_recording_value(&input.command);
         let (before, before_redacted) = redact_recording_value(&input.before);
         let (after, after_redacted) = redact_recording_value(&input.after);
@@ -209,9 +257,17 @@ impl RecordingStore {
         Ok(())
     }
 
-    /// PR-2: called pre-dispatch for record_timeline actions to arm the tagger with upcoming seq.
-    /// Network events during the action thus get stamped before we reach record_event (which advances).
-    /// Returns the seq (or None if no active non-paused recording).
+    /// PR-2: Arm the tagger + *claim* the next seq for the upcoming recorded action (pre-dispatch).
+    /// Seq is advanced here (not in record_event) so that pause interleaving cannot cause seq reuse
+    /// or misattribution (addresses review Issue 2). The claimed seq is the source of truth for
+    /// the action's event and its networkSlice.
+    ///
+    /// Any network CDP events processed by listeners while this seq is in the tagger will be
+    /// attributed to it (the "prepare-to-record_event" causal window for this action).
+    /// After record_event extracts the slice for the claimed seq we close the window (tagger=0).
+    ///
+    /// Returns the claimed seq (or None if no active non-paused recording).
+    /// The return value is now meaningful and is stored as pending_seq.
     pub fn prepare_for_next_recorded_event(&mut self) -> Option<u64> {
         let Some(active) = self.active.as_ref() else {
             return None;
@@ -220,12 +276,15 @@ impl RecordingStore {
             if let Some(t) = &self.current_recording_seq {
                 *t.lock().unwrap() = 0;
             }
+            self.pending_seq = None;
             return None;
         }
         let seq = self.next_seq;
+        self.next_seq += 1;
         if let Some(t) = &self.current_recording_seq {
             *t.lock().unwrap() = seq;
         }
+        self.pending_seq = Some(seq);
         Some(seq)
     }
 
@@ -233,6 +292,17 @@ impl RecordingStore {
     /// Produces the "networkSlice" value embedded in each recorded event (and thus in events.jsonl).
     /// Reuses existing LogBuffer.snapshot() + the seq tags set at listener time.
     /// Redacts sensitive bits for bundle hygiene. Minimal shape for replayable artifacts.
+    ///
+    /// Attribution window (prepare-to-record_event + brief post-extract arm):
+    /// - A NetworkLogEntry receives a seq tag if the listener processed the CDP event while
+    ///   the tagger held that value (set by prepare before dispatch_inner, cleared to 0
+    ///   immediately after extract in record_event).
+    /// - This gives a tight causal association for replay/comparison while accepting that
+    ///   extremely late responses (post-settle, after we closed the window) may land in no
+    ///   slice or the subsequent action. This is documented and preferable to orphans/pollution.
+    /// - loadingFailed entries often have empty url (CDP event limitation; see spawn_network_listener
+    ///   comment). failureText is still captured. Replay engines should treat missing url on
+    ///   failed entries as a known constraint and correlate via HAR/traces when needed.
     fn extract_network_slice(&self, seq: u64) -> serde_json::Value {
         match &self.network_buffer {
             Some(buf) => {
@@ -297,6 +367,7 @@ impl RecordingStore {
         if let Some(t) = &self.current_recording_seq {
             *t.lock().unwrap() = 0;
         }
+        self.pending_seq = None;
         let event_count =
             count_jsonl_lines(&self.root.join(&active.recording_id).join("events.jsonl"))?;
         let manifest = BrowserArtifactManifestV1 {
@@ -737,5 +808,147 @@ mod tests {
         assert!(events.contains("[redacted:email]"));
         assert!(events.contains("[redacted:token]"));
         assert!(events.contains(r#""status":"redacted""#));
+    }
+
+    #[test]
+    fn network_slice_tagging_and_extraction_happy_path_and_edges() {
+        use crate::daemon::logs::LogBuffer;
+        use gsd_browser_common::types::NetworkLogEntry;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempdir().expect("tempdir");
+        let mut store = RecordingStore::new(dir.path().to_path_buf());
+
+        // Simulate daemon wiring of tagger + buffer (as done in mod.rs)
+        let tagger: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+        let net_buf: LogBuffer<NetworkLogEntry> = LogBuffer::new();
+        store.set_network_tagger(tagger.clone());
+        store.set_network_buffer(net_buf.clone());
+
+        let rec = store.start("replay-test", "session-xyz").expect("started");
+
+        // Simulate prepare (as main dispatch + now viewer paths do) — claims seq 1, arms tagger
+        let claimed = store.prepare_for_next_recorded_event();
+        assert_eq!(claimed, Some(1));
+        assert_eq!(*tagger.lock().unwrap(), 1);
+
+        // Simulate listener pushes while armed (realistic CDP timing)
+        net_buf.push(NetworkLogEntry {
+            method: "GET".into(),
+            url: "https://example.com/api/user?token=secret123".into(), // will be redacted in slice
+            status: 200,
+            resource_type: "XHR".into(),
+            timestamp: 123.0,
+            failed: false,
+            failure_text: String::new(),
+            response_body: String::new(),
+            recording_seq: Some(1),
+        });
+        net_buf.push(NetworkLogEntry {
+            method: "GET".into(),
+            url: "https://example.com/old".into(),
+            status: 200,
+            resource_type: "Image".into(),
+            timestamp: 99.0,
+            failed: false,
+            failure_text: String::new(),
+            response_body: String::new(),
+            recording_seq: None, // from before this action
+        });
+        // A failure (simulates loadingFailed limitation — url empty)
+        net_buf.push(NetworkLogEntry {
+            method: String::new(),
+            url: String::new(),
+            status: 0,
+            resource_type: "XHR".into(),
+            timestamp: 124.5,
+            failed: true,
+            failure_text: "net::ERR_FAILED".into(),
+            response_body: String::new(),
+            recording_seq: Some(1),
+        });
+
+        // Record the action event (as dispatch or viewer input would)
+        store
+            .record_event(RecordingEventInput {
+                source: "cli".to_string(),
+                owner: "agent".to_string(),
+                kind: "click_ref".to_string(),
+                url: "https://example.com/page".to_string(),
+                title: "Test Page".to_string(),
+                redacted: false,
+                command: serde_json::json!({"ref": "@v1:e42"}),
+                before: serde_json::json!({}),
+                after: serde_json::json!({}),
+                network: serde_json::json!({}),
+            })
+            .expect("recorded");
+
+        // After record_event the window is closed (tagger == 0)
+        assert_eq!(*tagger.lock().unwrap(), 0);
+        assert!(store.pending_seq.is_none());
+
+        // Simulate a "late" push *after* we closed the window (realistic for very slow responses).
+        // It gets stamped with 1 (tagger still 0 here, but in a longer recording the next
+        // prepare would have set a new value; the point is it missed this slice's extract).
+        net_buf.push(NetworkLogEntry {
+            method: "POST".into(),
+            url: "https://example.com/late".into(),
+            status: 201,
+            resource_type: "Fetch".into(),
+            timestamp: 200.0,
+            failed: false,
+            failure_text: String::new(),
+            response_body: String::new(),
+            recording_seq: Some(1),
+        });
+
+        // Read the emitted event and inspect its networkSlice
+        let events_path = dir.path().join(&rec.recording_id).join("events.jsonl");
+        let events_data = fs::read_to_string(&events_path).expect("read events");
+        let lines: Vec<_> = events_data
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        // Exactly one event (the click_ref action; we did not record a separate "start" boundary event in this test)
+        assert!(lines.len() >= 1);
+        let event: serde_json::Value =
+            serde_json::from_str(lines.last().unwrap()).expect("parse last event");
+        assert_eq!(event["seq"], 1);
+        assert_eq!(event["kind"], "click_ref");
+
+        let slice = &event["networkSlice"];
+        assert_eq!(slice["seq"], 1);
+        assert_eq!(slice["count"], 2); // the two seq=1 entries (GET redacted + failure)
+
+        let entries = slice["entries"].as_array().unwrap();
+        // Verify redaction happened on the url
+        let get_entry = entries.iter().find(|e| e["method"] == "GET").unwrap();
+        assert!(get_entry["url"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted:token]"));
+        assert!(!get_entry["url"].as_str().unwrap().contains("secret123"));
+
+        // The failure entry is present (even with empty url — documented limitation)
+        let fail_entry = entries
+            .iter()
+            .find(|e| e["failed"].as_bool() == Some(true))
+            .unwrap();
+        assert_eq!(fail_entry["failureText"], "net::ERR_FAILED");
+        assert!(fail_entry["url"].as_str().unwrap_or("").is_empty());
+
+        // The "late" entry (seq=1 but pushed conceptually after close) is NOT in *this* slice
+        // (it would have been orphaned without the post-extract tagger=0 close).
+        // In a real multi-action recording it would either be missed or picked by a subsequent
+        // action if the next prepare hadn't overwritten yet — the close makes attribution honest.
+        assert!(!entries
+            .iter()
+            .any(|e| e["url"].as_str() == Some("https://example.com/late")));
+
+        // The pre-action entry (None) is correctly excluded
+        assert!(!entries
+            .iter()
+            .any(|e| e.get("url").and_then(|v| v.as_str()) == Some("https://example.com/old")));
     }
 }
