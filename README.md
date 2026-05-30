@@ -78,7 +78,7 @@ The installer writes the plugin to `~/plugins/gsd-browser`, updates the personal
 
 The crates.io package (`gsd-browser`) is not published yet. Use GitHub release assets or a source build.
 
-The one-line installer (`curl -fsSL https://install.gsd.build/browser | bash`) also sets up the `gsd-browser-skill/` pack for coding agents and documents the MCP path in its header.
+The one-line installer (`curl -fsSL https://raw.githubusercontent.com/open-gsd/gsd-browser/main/install.sh | bash`) also sets up the `gsd-browser-skill/` pack for coding agents and documents the MCP path in its header.
 
 ## Quick Start
 
