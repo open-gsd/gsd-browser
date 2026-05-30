@@ -460,9 +460,55 @@ install_codex_plugin_files() {
   fi
 
   mkdir -p "$plugin_root/skills"
-  rm -rf "$plugin_root/skills/$CODEX_PLUGIN_NAME"
-  mv "$skill_tmp" "$plugin_root/skills/$CODEX_PLUGIN_NAME"
-  mv -f "$manifest_tmp" "$plugin_root/.codex-plugin/plugin.json"
+  local skill_dest="$plugin_root/skills/$CODEX_PLUGIN_NAME"
+  local manifest_dest="$plugin_root/.codex-plugin/plugin.json"
+  local skill_backup=""
+  local manifest_backup=""
+
+  if [ -e "$skill_dest" ] || [ -L "$skill_dest" ]; then
+    skill_backup="$(mktemp -d "$plugin_root/skills/.${CODEX_PLUGIN_NAME}.backup.XXXXXX")"
+    rmdir "$skill_backup"
+    if ! mv "$skill_dest" "$skill_backup"; then
+      rm -f "$manifest_tmp"
+      rm -rf "$skill_tmp"
+      return 1
+    fi
+  fi
+
+  if [ -e "$manifest_dest" ] || [ -L "$manifest_dest" ]; then
+    manifest_backup="$(mktemp "$plugin_root/.codex-plugin/plugin.json.backup.XXXXXX")"
+    if ! mv -f "$manifest_dest" "$manifest_backup"; then
+      [ -n "$skill_backup" ] && mv "$skill_backup" "$skill_dest"
+      rm -f "$manifest_tmp"
+      rm -rf "$skill_tmp"
+      return 1
+    fi
+  fi
+
+  if ! mv "$skill_tmp" "$skill_dest"; then
+    [ -n "$skill_backup" ] && mv "$skill_backup" "$skill_dest"
+    [ -n "$manifest_backup" ] && mv "$manifest_backup" "$manifest_dest"
+    rm -f "$manifest_tmp"
+    rm -rf "$skill_tmp"
+    return 1
+  fi
+
+  if ! mv -f "$manifest_tmp" "$manifest_dest"; then
+    rm -rf "$skill_dest"
+    [ -n "$skill_backup" ] && mv "$skill_backup" "$skill_dest"
+    [ -n "$manifest_backup" ] && mv "$manifest_backup" "$manifest_dest"
+    rm -f "$manifest_tmp"
+    rm -rf "$skill_tmp"
+    return 1
+  fi
+
+  if [ -n "$skill_backup" ]; then
+    rm -rf "$skill_backup"
+  fi
+  if [ -n "$manifest_backup" ]; then
+    rm -f "$manifest_backup"
+  fi
+  return 0
 }
 
 codex_marketplace_updater_available() {
@@ -471,9 +517,12 @@ codex_marketplace_updater_available() {
 
 update_codex_marketplace() {
   local marketplace_path="$1"
+  local default_marketplace_name="${2:-personal}"
+  local default_display_name="${3:-Personal}"
+  local python_status=127
 
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$marketplace_path" "$CODEX_PLUGIN_NAME" <<'PY'
+    if python3 - "$marketplace_path" "$CODEX_PLUGIN_NAME" "$default_marketplace_name" "$default_display_name" <<'PY'
 import json
 import os
 import sys
@@ -482,6 +531,8 @@ from pathlib import Path
 
 path = Path(sys.argv[1]).expanduser()
 plugin_name = sys.argv[2]
+default_name = sys.argv[3]
+default_display_name = sys.argv[4]
 entry = {
     "name": plugin_name,
     "source": {"source": "local", "path": f"./plugins/{plugin_name}"},
@@ -499,19 +550,22 @@ if path.exists():
         print(f"{path} must contain a JSON object", file=sys.stderr)
         raise SystemExit(2)
 else:
-    payload = {"name": "personal", "interface": {"displayName": "Personal"}, "plugins": []}
+    payload = {"name": default_name, "interface": {"displayName": default_display_name}, "plugins": []}
 
 name = payload.get("name")
-if not isinstance(name, str) or not name.strip():
-    name = "personal"
+name_changed = False
+if not isinstance(name, str) or not name.strip() or (default_name != "personal" and name == "personal"):
+    name = default_name
     payload["name"] = name
+    name_changed = True
 
 interface = payload.get("interface")
 if not isinstance(interface, dict):
     interface = {}
     payload["interface"] = interface
-if not isinstance(interface.get("displayName"), str) or not interface["displayName"].strip():
-    interface["displayName"] = "Personal" if name == "personal" else name
+display_name = interface.get("displayName")
+if not isinstance(display_name, str) or not display_name.strip() or (name_changed and display_name == "Personal"):
+    interface["displayName"] = default_display_name if name == default_name else name
 
 plugins = payload.get("plugins")
 if plugins is None:
@@ -542,16 +596,21 @@ finally:
         os.unlink(tmp_name)
 print(name)
 PY
-    return $?
+    then
+      return 0
+    fi
+    python_status=$?
   fi
 
   if command -v node >/dev/null 2>&1; then
-    node - "$marketplace_path" "$CODEX_PLUGIN_NAME" <<'JS'
+    node - "$marketplace_path" "$CODEX_PLUGIN_NAME" "$default_marketplace_name" "$default_display_name" <<'JS'
 const fs = require("fs");
 const path = require("path");
 
 const marketplacePath = process.argv[2];
 const pluginName = process.argv[3];
+const defaultName = process.argv[4];
+const defaultDisplayName = process.argv[5];
 const entry = {
   name: pluginName,
   source: { source: "local", path: `./plugins/${pluginName}` },
@@ -572,17 +631,23 @@ if (fs.existsSync(marketplacePath)) {
     process.exit(2);
   }
 } else {
-  payload = { name: "personal", interface: { displayName: "Personal" }, plugins: [] };
+  payload = { name: defaultName, interface: { displayName: defaultDisplayName }, plugins: [] };
 }
 
-if (typeof payload.name !== "string" || payload.name.trim() === "") {
-  payload.name = "personal";
+let nameChanged = false;
+if (typeof payload.name !== "string" || payload.name.trim() === "" || (defaultName !== "personal" && payload.name === "personal")) {
+  payload.name = defaultName;
+  nameChanged = true;
 }
 if (!payload.interface || Array.isArray(payload.interface) || typeof payload.interface !== "object") {
   payload.interface = {};
 }
-if (typeof payload.interface.displayName !== "string" || payload.interface.displayName.trim() === "") {
-  payload.interface.displayName = payload.name === "personal" ? "Personal" : payload.name;
+if (
+  typeof payload.interface.displayName !== "string" ||
+  payload.interface.displayName.trim() === "" ||
+  (nameChanged && payload.interface.displayName === "Personal")
+) {
+  payload.interface.displayName = payload.name === defaultName ? defaultDisplayName : payload.name;
 }
 if (payload.plugins == null) {
   payload.plugins = [];
@@ -627,6 +692,9 @@ JS
     return $?
   fi
 
+  if [ "$python_status" -ne 127 ]; then
+    return "$python_status"
+  fi
   printf "Python 3 or Node.js is required to update Codex marketplace.json automatically\n" >&2
   return 1
 }
@@ -634,6 +702,8 @@ JS
 install_codex_plugin() {
   local plugin_root="${1:-$CODEX_PLUGIN_ROOT}"
   local marketplace_path="${2:-$CODEX_MARKETPLACE_PATH}"
+  local default_marketplace_name="personal"
+  local default_display_name="Personal"
 
   info "Installing Codex Plugin → $plugin_root"
   if ! codex_marketplace_updater_available; then
@@ -646,19 +716,43 @@ install_codex_plugin() {
   fi
   ok "Codex Plugin files installed: $plugin_root"
 
+  if [ "$marketplace_path" != "$CODEX_MARKETPLACE_PATH" ]; then
+    default_marketplace_name="$CODEX_PLUGIN_NAME-local"
+    default_display_name="gsd-browser Local"
+  fi
+
   local marketplace_name
-  if ! marketplace_name="$(update_codex_marketplace "$marketplace_path")"; then
+  if ! marketplace_name="$(update_codex_marketplace "$marketplace_path" "$default_marketplace_name" "$default_display_name")"; then
     warn "Codex Plugin files were installed, but marketplace update failed"
     return 1
   fi
   ok "Codex marketplace updated: $marketplace_path"
 
   if command -v codex >/dev/null 2>&1; then
-    if codex plugin add "$CODEX_PLUGIN_NAME@$marketplace_name" >/dev/null 2>&1; then
-      ok "Codex Plugin installed: $CODEX_PLUGIN_NAME@$marketplace_name"
-    else
-      warn "Marketplace updated, but 'codex plugin add $CODEX_PLUGIN_NAME@$marketplace_name' failed"
-      warn "Open the Codex plugin UI or run that command after Codex is available"
+    local can_add_plugin=1
+    if [ "$marketplace_path" != "$CODEX_MARKETPLACE_PATH" ]; then
+      local marketplace_root="$marketplace_path"
+      case "$marketplace_path" in
+        */.agents/plugins/marketplace.json)
+          marketplace_root="${marketplace_path%/.agents/plugins/marketplace.json}"
+          ;;
+      esac
+      if codex plugin marketplace add "$marketplace_root" >/dev/null 2>&1; then
+        ok "Codex marketplace registered: $marketplace_root"
+      else
+        can_add_plugin=0
+        warn "Marketplace updated, but 'codex plugin marketplace add $marketplace_root' failed"
+        warn "Open the Codex plugin UI or run that command after Codex is available"
+      fi
+    fi
+
+    if [ "$can_add_plugin" -eq 1 ]; then
+      if codex plugin add "$CODEX_PLUGIN_NAME@$marketplace_name" >/dev/null 2>&1; then
+        ok "Codex Plugin installed: $CODEX_PLUGIN_NAME@$marketplace_name"
+      else
+        warn "Marketplace updated, but 'codex plugin add $CODEX_PLUGIN_NAME@$marketplace_name' failed"
+        warn "Open the Codex plugin UI or run that command after Codex is available"
+      fi
     fi
   else
     info "Codex CLI not found; install from the Codex plugin UI when Codex is available"
@@ -748,13 +842,7 @@ install_skill() {
   fi
 
   # Ask scope
-  local needs_scope=0
-  for tool in "${selected[@]}"; do
-    if [ "$tool" != "codex-plugin" ]; then
-      needs_scope=1
-      break
-    fi
-  done
+  local needs_scope=1
 
   local scope="g"
   if [ "$needs_scope" -eq 1 ]; then
