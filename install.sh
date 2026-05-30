@@ -450,9 +450,23 @@ install_codex_plugin_files() {
     warn "Failed to download Codex plugin manifest — check network or repo access"
     return 1
   fi
-  mv -f "$manifest_tmp" "$plugin_root/.codex-plugin/plugin.json"
 
-  install_skill_to "$plugin_root/skills/$CODEX_PLUGIN_NAME"
+  local skill_tmp
+  skill_tmp="$(mktemp -d "$plugin_root/.skill.XXXXXX")"
+  if ! install_skill_to "$skill_tmp"; then
+    rm -f "$manifest_tmp"
+    rm -rf "$skill_tmp"
+    return 1
+  fi
+
+  mkdir -p "$plugin_root/skills"
+  rm -rf "$plugin_root/skills/$CODEX_PLUGIN_NAME"
+  mv "$skill_tmp" "$plugin_root/skills/$CODEX_PLUGIN_NAME"
+  mv -f "$manifest_tmp" "$plugin_root/.codex-plugin/plugin.json"
+}
+
+codex_marketplace_updater_available() {
+  command -v python3 >/dev/null 2>&1 || command -v node >/dev/null 2>&1
 }
 
 update_codex_marketplace() {
@@ -461,7 +475,9 @@ update_codex_marketplace() {
   if command -v python3 >/dev/null 2>&1; then
     python3 - "$marketplace_path" "$CODEX_PLUGIN_NAME" <<'PY'
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 path = Path(sys.argv[1]).expanduser()
@@ -513,7 +529,17 @@ else:
     plugins.append(entry)
 
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+data = json.dumps(payload, indent=2) + "\n"
+fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+        tmp_file.write(data)
+        tmp_file.flush()
+        os.fsync(tmp_file.fileno())
+    os.replace(tmp_name, path)
+finally:
+    if os.path.exists(tmp_name):
+        os.unlink(tmp_name)
 print(name)
 PY
     return $?
@@ -573,8 +599,29 @@ if (existing >= 0) {
   payload.plugins.push(entry);
 }
 
-fs.mkdirSync(path.dirname(marketplacePath), { recursive: true });
-fs.writeFileSync(marketplacePath, `${JSON.stringify(payload, null, 2)}\n`);
+const marketplaceDir = path.dirname(marketplacePath);
+const marketplaceTmp = path.join(
+  marketplaceDir,
+  `.${path.basename(marketplacePath)}.${process.pid}.${Date.now()}.tmp`,
+);
+fs.mkdirSync(marketplaceDir, { recursive: true });
+try {
+  const fd = fs.openSync(marketplaceTmp, "w");
+  try {
+    fs.writeFileSync(fd, `${JSON.stringify(payload, null, 2)}\n`);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(marketplaceTmp, marketplacePath);
+} catch (error) {
+  try {
+    fs.unlinkSync(marketplaceTmp);
+  } catch (_) {
+    // Best effort cleanup; preserve the original marketplace on failure.
+  }
+  throw error;
+}
 console.log(payload.name);
 JS
     return $?
@@ -585,10 +632,15 @@ JS
 }
 
 install_codex_plugin() {
-  local plugin_root="$CODEX_PLUGIN_ROOT"
-  local marketplace_path="$CODEX_MARKETPLACE_PATH"
+  local plugin_root="${1:-$CODEX_PLUGIN_ROOT}"
+  local marketplace_path="${2:-$CODEX_MARKETPLACE_PATH}"
 
   info "Installing Codex Plugin → $plugin_root"
+  if ! codex_marketplace_updater_available; then
+    printf "Python 3 or Node.js is required to update Codex marketplace.json automatically\n" >&2
+    return 1
+  fi
+
   if ! install_codex_plugin_files "$plugin_root"; then
     return 1
   fi
@@ -614,13 +666,13 @@ install_codex_plugin() {
 }
 
 install_skill() {
-  if [ "$SKIP_SKILL" = "1" ]; then
-    info "Skipping skill installation"
+  if [ "$INSTALL_CODEX_PLUGIN" = "1" ]; then
+    install_codex_plugin
     return
   fi
 
-  if [ "$INSTALL_CODEX_PLUGIN" = "1" ]; then
-    install_codex_plugin
+  if [ "$SKIP_SKILL" = "1" ]; then
+    info "Skipping skill installation"
     return
   fi
 
@@ -733,7 +785,11 @@ install_skill() {
         fi
         ;;
       codex-plugin)
-        install_codex_plugin
+        if [ "$scope" = "l" ] || [ "$scope" = "L" ]; then
+          install_codex_plugin "$PWD/plugins/$CODEX_PLUGIN_NAME" "$PWD/.agents/plugins/marketplace.json"
+        else
+          install_codex_plugin
+        fi
         continue
         ;;
       gemini)
@@ -767,6 +823,9 @@ main() {
 
   if [ "$INSTALL_MODE" = "update" ]; then
     verify
+    if [ "$INSTALL_CODEX_PLUGIN" = "1" ]; then
+      install_codex_plugin
+    fi
     echo ""
     printf "  ${green}${bold}Update complete!${reset}\n"
     echo ""
