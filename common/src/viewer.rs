@@ -4,6 +4,10 @@ pub const VIEWER_COMMAND_SCHEMA: &str = "ViewerCommandV1";
 pub const USER_INPUT_SCHEMA: &str = "UserInputEventV1";
 pub const ANNOTATION_SCHEMA: &str = "AnnotationV1";
 pub const RECORDING_EVENT_SCHEMA: &str = "RecordingEventV1";
+/// Note: the wire format used in events.jsonl (and thus for all replayable bundles)
+/// has always been "BrowserEventV1" / "BrowserEventV2" (see BROWSER_EVENT_*_SCHEMA below).
+/// RECORDING_EVENT_SCHEMA is a legacy const retained for docs / older references
+/// but is not emitted or used in deserialization paths. This divergence is historical.
 pub const BROWSER_ARTIFACT_BUNDLE_SCHEMA: &str = "BrowserArtifactBundleV1";
 
 /// PR-3 / evolvability: declare the current event schema explicitly (was previously only a literal).
