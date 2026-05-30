@@ -789,6 +789,18 @@ async fn dispatch(
         None
     };
 
+    // Early (pre-dispatch_inner) session meta capture — paired with recording_before.
+    // This ensures the "before" side of the session object in the recording event
+    // reflects true pre-action state (cookies + storage counts/hash), even for
+    // mutating actions (login, token writes, etc.). The late capture (below) serves "after".
+    // Reuses the exact same lightweight helper (CDP + JS patterns from save-state).
+    // Minimal change to deliver precise before/after session for replayable evidence.
+    let recording_session_before: Option<serde_json::Value> = if record_timeline {
+        Some(capture_basic_session_meta(page).await)
+    } else {
+        None
+    };
+
     // Also store before-state in DiffState for navigate/click/etc.
     if matches!(
         req.method.as_str(),
@@ -899,21 +911,25 @@ async fn dispatch(
             serde_json::json!({ "recent": snaps, "tagging": "per-action-for-replayable-evidence" })
         };
 
-        // Capture lightweight session state summary at emission time (wires save-state patterns:
-        // cookie counts via CDP + storage key counts via JS). Produces real sessionStateHash +
-        // counts embedded under before/after for replay fidelity. Basic but functional for PR-1
-        // (no full content to keep events small; full snapshot remains via explicit save-state).
-        let session_meta = capture_basic_session_meta(page).await;
+        // Late (post-dispatch_inner) session meta capture — serves the "after" side.
+        // Paired with the early recording_session_before (captured pre-dispatch_inner)
+        // so that before/after session objects are correctly timed for mutating actions.
+        // This resolves the asymmetry for precise replayable before/after comparisons
+        // (login flows, auth handoff, storage writes, etc.).
+        let session_meta_after = capture_basic_session_meta(page).await;
 
-        // Merge session info into the before/after objects for the event (evolvable; supports
-        // future full sessionState object + Playwright output).
+        // Merge correctly-timed session info (evolvable under before/after).
         let mut before_val = before_val;
         let mut after_val = after_val;
         if let serde_json::Value::Object(m) = &mut before_val {
-            m.insert("session".to_string(), session_meta.clone());
+            if let Some(early) = &recording_session_before {
+                m.insert("session".to_string(), early.clone());
+            } else {
+                m.insert("session".to_string(), session_meta_after.clone());
+            }
         }
         if let serde_json::Value::Object(m) = &mut after_val {
-            m.insert("session".to_string(), session_meta);
+            m.insert("session".to_string(), session_meta_after);
         }
 
         let mut recordings = state.recordings.lock().await;
