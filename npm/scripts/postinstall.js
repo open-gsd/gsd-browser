@@ -6,7 +6,7 @@ const path = require("path");
 const https = require("https");
 const { execSync } = require("child_process");
 
-const REPO = "gsd-build/gsd-browser";
+const REPO = "open-gsd/gsd-browser";
 
 const PLATFORM_MAP = {
   "darwin-arm64": "gsd-browser-darwin-arm64",
@@ -107,7 +107,7 @@ async function main() {
         `    git clone https://github.com/${REPO}.git\n` +
         `    cd gsd-browser\n` +
         `    cargo install --path cli\n` +
-        `  Or use the installer: curl -fsSL https://install.gsd.build/browser | bash`
+        `  Or use the installer: curl -fsSL https://raw.githubusercontent.com/open-gsd/gsd-browser/main/install.sh | bash`
       );
       process.exit(1);
     }

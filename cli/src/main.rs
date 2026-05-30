@@ -7,7 +7,7 @@ use gsd_browser_common::config::Config;
 use gsd_browser_common::validate_session_name;
 use std::process::Command;
 
-const INSTALLER_URL: &str = "https://install.gsd.build/browser";
+const INSTALLER_URL: &str = "https://raw.githubusercontent.com/open-gsd/gsd-browser/main/install.sh";
 
 #[derive(Parser)]
 #[command(
