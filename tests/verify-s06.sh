@@ -111,8 +111,8 @@ echo "=== npm Package Structure ==="
 test -f "$PROJECT_DIR/npm/package.json"
 check "npm/package.json exists" $?
 
-node -e "const p=require('$PROJECT_DIR/npm/package.json'); if(p.name !== '@open-gsd/gsd-browser') process.exit(1)" 2>/dev/null
-check "npm package name is @open-gsd/gsd-browser" $?
+node -e "const p=require('$PROJECT_DIR/npm/package.json'); if(p.name !== '@opengsd/gsd-browser') process.exit(1)" 2>/dev/null
+check "npm package name is @opengsd/gsd-browser" $?
 
 test -f "$PROJECT_DIR/npm/scripts/postinstall.js"
 check "npm/scripts/postinstall.js exists" $?
