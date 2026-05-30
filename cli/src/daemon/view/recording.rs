@@ -129,19 +129,66 @@ impl RecordingStore {
     }
 
     pub fn pause(&mut self, recording_id: &str) -> Result<RecordingSession, String> {
+        // First, capture ids under immutable borrow for the potential marker emission (Issue 11)
+        let (rec_id, sess_id) = {
+            let a = self.active.as_ref().ok_or("no active recording")?;
+            if a.recording_id != recording_id {
+                return Err(format!("recording not active: {recording_id}"));
+            }
+            (a.recording_id.clone(), a.session_id.clone())
+        };
+
         let active = self.active.as_mut().ok_or("no active recording")?;
-        if active.recording_id != recording_id {
-            return Err(format!("recording not active: {recording_id}"));
-        }
         active.paused = true;
         if let Some(t) = &self.current_recording_seq {
             *t.lock().unwrap() = 0;
         }
-        // pending_seq (if any) stays "spent" — seq was already advanced at prepare time.
-        // The prepared action's networks (if any) received the tag before pause; no future
-        // action will reuse the number. Slice for that seq may be partial/empty.
-        self.pending_seq = None;
-        Ok(active.clone())
+
+        let result_session = active.clone();
+
+        // PR-2 / Issue 11: If a seq was prepared for an action and pause is now called before
+        // that action's record_event, emit an explicit "recording.action-skipped" marker into
+        // events.jsonl *right now*. This makes the bundle fully self-describing for seq gaps.
+        if let Some(skipped_seq) = self.pending_seq.take() {
+            let skipped_event = json!({
+                "seq": skipped_seq,
+                "timestampMs": now_ms(),
+                "schema": "BrowserEventV1",
+                "recordingId": rec_id.clone(),
+                "sessionId": sess_id,
+                "source": "system",
+                "owner": "recording",
+                "controlVersion": 0,
+                "frameSeq": 0,
+                "kind": "recording.action-skipped",
+                "url": "",
+                "title": "",
+                "origin": "",
+                "command": json!({ "reason": "paused_before_record_event" }),
+                "before": {},
+                "after": {},
+                "network": {},
+                "networkSlice": json!({
+                    "seq": skipped_seq,
+                    "count": 0,
+                    "entries": [],
+                    "note": "prepared seq abandoned due to pause; no network activity attributed"
+                }),
+                "redaction": { "status": "none" },
+                "artifactRefs": {},
+            });
+            // Best effort (consistent with other recording metadata writes)
+            if let Err(e) = self.append_event_line(&rec_id, &skipped_event) {
+                tracing::warn!(
+                    "[recording] failed to write action-skipped marker for seq {} on pause: {}",
+                    skipped_seq,
+                    e
+                );
+            }
+        }
+
+        // pending cleared (seq already spent at prepare time)
+        Ok(result_session)
     }
 
     pub fn resume(&mut self, recording_id: &str) -> Result<RecordingSession, String> {
@@ -155,18 +202,35 @@ impl RecordingStore {
         Ok(active.clone())
     }
 
+    /// Internal helper to append a pre-built event (or marker) JSON line to events.jsonl.
+    /// Used by the normal record path and by the new "recording.action-skipped" marker
+    /// emission (Issue 11) so the bundle is fully self-describing for seq gaps.
+    fn append_event_line(
+        &self,
+        recording_id: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), String> {
+        let line = serde_json::to_string(value).map_err(|err| err.to_string())?;
+        let path = self.root.join(recording_id).join("events.jsonl");
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(|err| format!("failed to open events.jsonl: {err}"))?;
+        writeln!(file, "{line}").map_err(|err| format!("failed to append event: {err}"))?;
+        Ok(())
+    }
+
     pub fn record_event(&mut self, input: RecordingEventInput) -> Result<(), String> {
         let Some(active) = self.active.as_ref() else {
             return Ok(());
         };
         if active.paused {
-            // PR-2: If a seq was prepared for this action but pause hit before record_event,
-            // the seq was already claimed+advanced in prepare (see prepare_for_next...).
-            // We log for auditability (replay consumers can see the gap) but do not emit an
-            // event for the prepared seq. This prevents reuse pollution (Issue 2).
+            // PR-2: The primary self-describing "recording.action-skipped" marker is now emitted
+            // from pause() at the moment the gap is created (Issue 11). This path is defensive.
             if self.pending_seq.is_some() {
                 tracing::warn!(
-                    "[recording] record_event skipped due to pause for prepared seq {:?} (kind={}) — seq is spent; no reuse possible",
+                    "[recording] record_event while paused still saw pending seq {:?} (kind={}) — cleared",
                     self.pending_seq, input.kind
                 );
                 self.pending_seq = None;
@@ -246,14 +310,7 @@ impl RecordingStore {
             "redaction": { "status": if redacted { "redacted" } else { "none" } },
             "artifactRefs": {},
         });
-        let line = serde_json::to_string(&event).map_err(|err| err.to_string())?;
-        let path = self.root.join(&active.recording_id).join("events.jsonl");
-        use std::io::Write;
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .open(path)
-            .map_err(|err| format!("failed to open events.jsonl: {err}"))?;
-        writeln!(file, "{line}").map_err(|err| format!("failed to append event: {err}"))?;
+        self.append_event_line(&active.recording_id, &event)?;
         Ok(())
     }
 
@@ -950,5 +1007,162 @@ mod tests {
         assert!(!entries
             .iter()
             .any(|e| e.get("url").and_then(|v| v.as_str()) == Some("https://example.com/old")));
+    }
+
+    /// Narrow focused test exercising the new self-describing "recording.action-skipped" marker
+    /// emission path (Issue 11) + realistic pause/resume flow with multiple slices.
+    /// This augments the primary tagging/extraction test with the exact pause-gap scenario
+    /// that the review fixes targeted, ensuring the artifact itself now fully describes seq gaps.
+    #[test]
+    fn network_slice_skipped_marker_and_pause_flow() {
+        use crate::daemon::logs::LogBuffer;
+        use gsd_browser_common::types::NetworkLogEntry;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempdir().expect("tempdir");
+        let mut store = RecordingStore::new(dir.path().to_path_buf());
+
+        let tagger: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+        let net_buf: LogBuffer<NetworkLogEntry> = LogBuffer::new();
+        store.set_network_tagger(tagger.clone());
+        store.set_network_buffer(net_buf.clone());
+
+        let rec = store.start("pause-marker-test", "sess-1").expect("started");
+
+        // Action 1 (seq 1) — normal happy path
+        store.prepare_for_next_recorded_event();
+        net_buf.push(NetworkLogEntry {
+            method: "GET".into(),
+            url: "https://ex.com/a1".into(),
+            status: 200,
+            resource_type: "Document".into(),
+            timestamp: 1.0,
+            failed: false,
+            failure_text: String::new(),
+            response_body: String::new(),
+            recording_seq: Some(1),
+        });
+        store
+            .record_event(RecordingEventInput {
+                source: "cli".into(),
+                owner: "agent".into(),
+                kind: "navigate".into(),
+                url: "https://ex.com".into(),
+                title: "Page".into(),
+                redacted: false,
+                command: json!({}),
+                before: json!({}),
+                after: json!({}),
+                network: json!({}),
+            })
+            .expect("action1");
+
+        // Prepare seq 2, then pause before record_event — this spends seq 2
+        store.prepare_for_next_recorded_event();
+        store.pause(&rec.recording_id).expect("paused");
+
+        // Record while paused — should now emit the explicit "recording.action-skipped" marker
+        // into events.jsonl (the key self-describing improvement for Issue 11)
+        store
+            .record_event(RecordingEventInput {
+                source: "cli".into(),
+                owner: "agent".into(),
+                kind: "click".into(),
+                url: "https://ex.com".into(),
+                title: "Page".into(),
+                redacted: false,
+                command: json!({}),
+                before: json!({}),
+                after: json!({}),
+                network: json!({}),
+            })
+            .expect("paused record (should emit marker)");
+
+        // Resume and do action 3 (next seq)
+        store.resume(&rec.recording_id).expect("resumed");
+        store.prepare_for_next_recorded_event();
+        net_buf.push(NetworkLogEntry {
+            method: "GET".into(),
+            url: "https://ex.com/a3".into(),
+            status: 200,
+            resource_type: "XHR".into(),
+            timestamp: 3.0,
+            failed: false,
+            failure_text: String::new(),
+            response_body: String::new(),
+            recording_seq: Some(3),
+        });
+        store
+            .record_event(RecordingEventInput {
+                source: "cli".into(),
+                owner: "agent".into(),
+                kind: "click_ref".into(),
+                url: "https://ex.com".into(),
+                title: "Page".into(),
+                redacted: false,
+                command: json!({}),
+                before: json!({}),
+                after: json!({}),
+                network: json!({}),
+            })
+            .expect("action3");
+
+        // Inspect the artifact
+        let events_path = dir.path().join(&rec.recording_id).join("events.jsonl");
+        let data = fs::read_to_string(&events_path).expect("read");
+        let lines: Vec<_> = data.lines().filter(|l| !l.trim().is_empty()).collect();
+
+        // We expect: action1, skipped marker (seq 2), action3
+        assert_eq!(lines.len(), 3);
+
+        // Find the events by kind (order is reliable: action1, skipped marker, action3)
+        let ev1 = lines
+            .iter()
+            .find(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                v["kind"] == "navigate"
+            })
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .unwrap();
+
+        let skipped = lines
+            .iter()
+            .find(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                v["kind"] == "recording.action-skipped"
+            })
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .unwrap();
+
+        let ev3 = lines
+            .iter()
+            .find(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                v["kind"] == "click_ref"
+            })
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .unwrap();
+
+        assert_eq!(ev1["seq"], 1);
+        assert_eq!(ev1["networkSlice"]["count"], 1);
+
+        // The new self-describing marker (the main deliverable for Issue 11)
+        assert_eq!(skipped["seq"], 2);
+        assert_eq!(skipped["kind"], "recording.action-skipped");
+        assert_eq!(skipped["command"]["reason"], "paused_before_record_event");
+        let skipped_slice = &skipped["networkSlice"];
+        assert_eq!(skipped_slice["seq"], 2);
+        assert_eq!(skipped_slice["count"], 0);
+        // Note wording may vary slightly between pause() emission and defensive paths; the
+        // presence of the explicit skipped marker with zero slice is the key self-describing artifact (Issue 11)
+        assert!(skipped_slice.get("note").is_some());
+
+        assert_eq!(ev3["seq"], 3);
+        assert_eq!(ev3["kind"], "click_ref");
+        assert_eq!(ev3["networkSlice"]["count"], 1);
+
+        // Seq numbering is monotonic and the gap is explicitly described in the artifact
+        assert!(ev1["seq"].as_u64() < skipped["seq"].as_u64());
+        assert!(skipped["seq"].as_u64() < ev3["seq"].as_u64());
     }
 }
