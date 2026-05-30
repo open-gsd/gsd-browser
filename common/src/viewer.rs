@@ -360,9 +360,14 @@ pub struct RecordingEventV1 {
     pub command: serde_json::Value,
     #[serde(default)]
     pub network: serde_json::Value,
-    /// PR-2: per-action network slice (requests/responses tagged with this event's seq by the
-    /// network listener at capture time, extracted at record_event emission).
-    /// Enables clean replayable evidence bundles (filter network by slice per event).
+    /// PR-2: authoritative per-action network slice.
+    /// - Entries are those whose `recordingSeq` matched this event's `seq` at the moment
+    ///   the CDP listener processed them (armed by prepare before the action, closed after
+    ///   slice extraction in record_event).
+    /// - `network` (retained for PR-1 compat) is a tiny recent-snapshot for debugging.
+    /// - Replay engines, generated Playwright tests, and precise before/after assertions
+    ///   **must prefer `networkSlice`** when present and non-empty. It is the first-class
+    ///   replayable artifact for network activity caused by the action.
     #[serde(default)]
     pub network_slice: serde_json::Value,
 }
