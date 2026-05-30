@@ -1,4 +1,5 @@
-use gsd_browser_common::{manifest_path_for, validate_session_name, DaemonResponse};
+use gsd_browser_common::session::manifest_path_for;
+use gsd_browser_common::{validate_session_name, DaemonResponse};
 use serde_json::{json, Value};
 
 const WINDOWS_DAEMON_UNSUPPORTED: &str =
