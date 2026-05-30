@@ -192,6 +192,10 @@ pub async fn handle_viewer_command(
                 url,
                 title,
                 redacted: false,
+                command: serde_json::json!({}),
+                before: serde_json::json!({}),
+                after: serde_json::json!({}),
+                network: serde_json::json!({}),
             });
             Ok(accepted(
                 cmd.command_id,
@@ -305,8 +309,12 @@ pub async fn handle_viewer_command(
                             owner: "user".to_string(),
                             kind: "recording.start".to_string(),
                             url: String::new(),
-                            title: command.name.unwrap_or_else(|| "viewer-flow".to_string()),
+                            title: command.name.clone().unwrap_or_else(|| "viewer-flow".to_string()),
                             redacted: false,
+                            command: serde_json::json!({ "action": "start", "name": command.name.clone() }),
+                            before: serde_json::json!({}),
+                            after: serde_json::json!({}),
+                            network: serde_json::json!({}),
                         })
                         .map_err(|message| {
                             rejected(
@@ -326,6 +334,10 @@ pub async fn handle_viewer_command(
                                 url: String::new(),
                                 title: String::new(),
                                 redacted: false,
+                                command: serde_json::json!({ "action": "stop" }),
+                                before: serde_json::json!({}),
+                                after: serde_json::json!({}),
+                                network: serde_json::json!({}),
                             })
                             .map_err(|message| {
                                 rejected(

@@ -215,6 +215,10 @@ pub async fn handle_record_start(state: &DaemonState, params: &Value) -> Result<
         url: String::new(),
         title: name.to_string(),
         redacted: false,
+        command: serde_json::json!({ "name": name }),
+        before: serde_json::json!({}),
+        after: serde_json::json!({}),
+        network: serde_json::json!({}),
     })?;
     serde_json::to_value(session).map_err(|err| err.to_string())
 }
@@ -229,6 +233,10 @@ pub async fn handle_record_stop(state: &DaemonState) -> Result<Value, String> {
         url: String::new(),
         title: String::new(),
         redacted: false,
+        command: serde_json::json!({}),
+        before: serde_json::json!({}),
+        after: serde_json::json!({}),
+        network: serde_json::json!({}),
     })?;
     let manifest = store.stop(&id)?;
     serde_json::to_value(manifest).map_err(|err| err.to_string())

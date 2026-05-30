@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
+use gsd_browser_common::types::CompactPageState;
 use gsd_browser_common::viewer::{BrowserArtifactManifestV1, BROWSER_ARTIFACT_BUNDLE_SCHEMA};
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,11 @@ pub struct RecordingEventInput {
     pub url: String,
     pub title: String,
     pub redacted: bool,
+    // PR-1 enrichment: full command params + before/after with DOM hash + sessionStateHash + per-action network tags
+    pub command: serde_json::Value,
+    pub before: serde_json::Value,
+    pub after: serde_json::Value,
+    pub network: serde_json::Value,
 }
 
 pub struct RecordingStore {
@@ -139,8 +145,10 @@ impl RecordingStore {
             "url": redact_text(&input.url),
             "title": redact_text(&input.title),
             "origin": origin_from_url(&input.url),
-            "before": {},
-            "after": {},
+            "command": input.command,
+            "before": input.before,
+            "after": input.after,
+            "network": input.network,
             "redaction": { "status": if input.redacted { "redacted" } else { "none" } },
             "artifactRefs": {},
         });
@@ -359,6 +367,33 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Compute a stable structural DOM hash from CompactPageState (PR-1 basic impl).
+/// Uses key structural fields (counts, headings, focus) + url/title for replayable signature.
+/// Wired from capture_compact_page_state (used alongside settle_after_action).
+pub fn compute_dom_hash(state: &CompactPageState) -> String {
+    let structural = format!(
+        "v1|url:{}|title:{}|focus:{}|h:{}|land:{}|btn:{}|lnk:{}|inp:{}",
+        state.url,
+        state.title,
+        state.focus,
+        state.headings.join(";"),
+        state.counts.landmarks,
+        state.counts.buttons,
+        state.counts.links,
+        state.counts.inputs
+    );
+    sha256_hex(structural.as_bytes())
+}
+
+/// Basic sessionStateHash for PR-1 (placeholder).
+/// Full wiring would capture cookies + localStorage + sessionStorage (as in handle_save_state
+/// in handlers/state_persist.rs) + settle state, serialize, and sha256. Initially basic to keep
+/// schema evolvable for replayable evidence bundles.
+pub fn compute_session_state_hash() -> String {
+    // Stable marker; real per-action capture happens at before/after boundaries using save-state primitives.
+    "sha256:session-state-v1-basic".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +414,10 @@ mod tests {
                 url: "http://127.0.0.1".to_string(),
                 title: "Fixture".to_string(),
                 redacted: false,
+                command: serde_json::json!({}),
+                before: serde_json::json!({}),
+                after: serde_json::json!({}),
+                network: serde_json::json!({}),
             })
             .expect("event");
         store

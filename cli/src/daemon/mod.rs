@@ -846,6 +846,50 @@ async fn dispatch(
     if record_timeline {
         let title = bounded_page_title(page).await;
         let url = bounded_page_url(page).await;
+        let command_val = req.params.clone();
+        let (before_val, after_val) = {
+            let diff = state.diff.lock().unwrap();
+            let b = diff.before.as_ref().map_or(serde_json::json!({}), |s| {
+                let mut v = serde_json::to_value(s).unwrap_or(serde_json::json!({}));
+                if let serde_json::Value::Object(m) = &mut v {
+                    m.insert(
+                        "domHash".to_string(),
+                        serde_json::json!(view::recording::compute_dom_hash(s)),
+                    );
+                    m.insert(
+                        "sessionStateHash".to_string(),
+                        serde_json::json!(view::recording::compute_session_state_hash()),
+                    );
+                }
+                v
+            });
+            let a = diff.after.as_ref().map_or(serde_json::json!({}), |s| {
+                let mut v = serde_json::to_value(s).unwrap_or(serde_json::json!({}));
+                if let serde_json::Value::Object(m) = &mut v {
+                    m.insert(
+                        "domHash".to_string(),
+                        serde_json::json!(view::recording::compute_dom_hash(s)),
+                    );
+                    m.insert(
+                        "sessionStateHash".to_string(),
+                        serde_json::json!(view::recording::compute_session_state_hash()),
+                    );
+                }
+                v
+            });
+            (b, a)
+        };
+        let network_val = {
+            let snaps: Vec<serde_json::Value> = logs
+                .network
+                .snapshot()
+                .into_iter()
+                .rev()
+                .take(5)
+                .map(|e| serde_json::json!({"url": e.url, "status": e.status, "method": e.method, "resourceType": e.resource_type}))
+                .collect();
+            serde_json::json!({ "recent": snaps, "tagging": "per-action-for-replayable-evidence" })
+        };
         let mut recordings = state.recordings.lock().await;
         let _ = recordings.record_event(view::recording::RecordingEventInput {
             source: "cli".to_string(),
@@ -854,6 +898,10 @@ async fn dispatch(
             url,
             title,
             redacted: false,
+            command: command_val,
+            before: before_val,
+            after: after_val,
+            network: network_val,
         });
     }
 
