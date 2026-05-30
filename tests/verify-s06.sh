@@ -96,6 +96,12 @@ check "install.sh has valid bash syntax" $?
 grep -q -- "--codex-plugin" "$PROJECT_DIR/install.sh" 2>/dev/null
 check "installer exposes --codex-plugin option" $?
 
+grep -q 'SOURCE_REPO="${GSD_BROWSER_SOURCE_REPO:-open-gsd/gsd-browser}"' "$PROJECT_DIR/install.sh" 2>/dev/null
+check "installer uses open-gsd as source repo" $?
+
+grep -q 'RELEASE_REPO="${GSD_BROWSER_RELEASE_REPO:-gsd-build/gsd-browser}"' "$PROJECT_DIR/install.sh" 2>/dev/null
+check "installer uses gsd-build as release repo" $?
+
 # ════════════════════════════════════════════
 #  npm Package Structure (4 checks)
 # ════════════════════════════════════════════
@@ -113,6 +119,9 @@ check "npm/scripts/postinstall.js exists" $?
 
 node -c "$PROJECT_DIR/npm/scripts/postinstall.js" 2>/dev/null
 check "postinstall.js has valid JS syntax" $?
+
+node -e "const fs=require('fs'); const s=fs.readFileSync('$PROJECT_DIR/npm/scripts/postinstall.js','utf8'); if(!s.includes('const SOURCE_REPO = \"open-gsd/gsd-browser\"') || !s.includes('const RELEASE_REPO = \"gsd-build/gsd-browser\"')) process.exit(1)" 2>/dev/null
+check "postinstall separates source and release repos" $?
 
 # ════════════════════════════════════════════
 #  Cargo Metadata (3 checks)
