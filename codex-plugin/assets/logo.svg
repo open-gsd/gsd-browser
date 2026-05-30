@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">gsd-browser logo</title>
+  <desc id="desc">A dark Open GSD-inspired browser automation mark with blue accents.</desc>
+  <defs>
+    <linearGradient id="tile" x1="74" y1="46" x2="438" y2="466" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#111315"/>
+      <stop offset="1" stop-color="#070809"/>
+    </linearGradient>
+    <linearGradient id="metal" x1="256" y1="112" x2="256" y2="188" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#303336"/>
+      <stop offset="1" stop-color="#0f1214"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="126" y1="138" x2="386" y2="384" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7495be"/>
+      <stop offset="1" stop-color="#567499"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="142" y1="340" x2="388" y2="176" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7d9688"/>
+      <stop offset=".52" stop-color="#7495be"/>
+      <stop offset="1" stop-color="#847157"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="20" stdDeviation="18" flood-color="#000000" flood-opacity=".42"/>
+    </filter>
+    <clipPath id="windowClip">
+      <rect x="84" y="108" width="344" height="292" rx="44"/>
+    </clipPath>
+  </defs>
+
+  <rect x="18" y="18" width="476" height="476" rx="104" fill="url(#tile)" stroke="#26292c" stroke-width="8"/>
+  <g opacity=".28">
+    <path d="M18 136h476M18 256h476M18 376h476" stroke="#dbdee2" stroke-width="1.5" opacity=".18"/>
+    <path d="M116 18v476M256 18v476M396 18v476" stroke="#dbdee2" stroke-width="1.5" opacity=".12"/>
+    <path d="M-8 442 442 -8M70 520 520 70" stroke="#567499" stroke-width="2" opacity=".2"/>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="84" y="108" width="344" height="292" rx="44" fill="#111315" stroke="#26292c" stroke-width="6"/>
+    <g clip-path="url(#windowClip)">
+      <rect x="84" y="108" width="344" height="78" fill="url(#metal)"/>
+      <path d="M84 186h344" stroke="#26292c" stroke-width="6"/>
+      <circle cx="134" cy="147" r="9" fill="#847157"/>
+      <circle cx="166" cy="147" r="9" fill="#7d9688"/>
+      <circle cx="198" cy="147" r="9" fill="#567499"/>
+      <rect x="226" y="135" width="150" height="24" rx="12" fill="#070809" stroke="#26292c" stroke-width="3"/>
+
+      <path d="M132 326c54-52 96-74 146-73 42 1 71-18 99-56" fill="none" stroke="url(#signal)" stroke-width="9" stroke-linecap="round"/>
+      <path d="M132 326c54-52 96-74 146-73 42 1 71-18 99-56" fill="none" stroke="#dbdee2" stroke-width="2.5" stroke-linecap="round" opacity=".34"/>
+      <circle cx="132" cy="326" r="16" fill="#070809" stroke="#7d9688" stroke-width="7"/>
+      <circle cx="278" cy="253" r="15" fill="#070809" stroke="#7495be" stroke-width="7"/>
+      <circle cx="377" cy="197" r="16" fill="#070809" stroke="#847157" stroke-width="7"/>
+
+      <path d="M144 226h54M144 260h80M144 294h44" stroke="#dbdee2" stroke-width="11" stroke-linecap="round" opacity=".84"/>
+      <path d="M330 300 386 360l-38 7-16 36-55-116 118 51-37 15-16 36" fill="#dbdee2" opacity=".96"/>
+      <path d="M329 300 385 360l-37 7-16 36" fill="none" stroke="#070809" stroke-width="8" stroke-linejoin="round" opacity=".5"/>
+      <path d="M305 340h-50" stroke="#7495be" stroke-width="11" stroke-linecap="round"/>
+      <path d="M248 318 226 340l22 22" fill="none" stroke="#7495be" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+
+  <path d="M122 426h268" stroke="#567499" stroke-width="8" stroke-linecap="round" opacity=".5"/>
+  <path d="M152 444h208" stroke="#dbdee2" stroke-width="3" stroke-linecap="round" opacity=".18"/>
+</svg>

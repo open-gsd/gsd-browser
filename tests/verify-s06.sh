@@ -87,8 +87,11 @@ check "AGENTS.md exists" $?
 test -f "$PROJECT_DIR/codex-plugin/.codex-plugin/plugin.json"
 check "Codex Plugin manifest exists" $?
 
-node -e "const p=require('$PROJECT_DIR/codex-plugin/.codex-plugin/plugin.json'); if(p.name !== 'gsd-browser' || p.skills !== './skills/' || !p.interface?.defaultPrompt) process.exit(1)" 2>/dev/null
+node -e "const p=require('$PROJECT_DIR/codex-plugin/.codex-plugin/plugin.json'); if(p.name !== 'gsd-browser' || p.skills !== './skills/' || p.homepage !== 'https://opengsd.net/' || p.repository !== 'https://github.com/open-gsd/gsd-browser' || p.interface?.websiteURL !== 'https://opengsd.net/' || !p.interface?.longDescription?.includes('https://github.com/open-gsd/gsd-browser') || p.description.includes('Codex') || p.interface?.longDescription?.includes('Codex') || !p.interface?.defaultPrompt || p.interface?.composerIcon !== './assets/icon.png' || p.interface?.logo !== './assets/logo.png') process.exit(1)" 2>/dev/null
 check "Codex Plugin manifest has expected metadata" $?
+
+test -f "$PROJECT_DIR/codex-plugin/assets/icon.png" && test -f "$PROJECT_DIR/codex-plugin/assets/logo.png"
+check "Codex Plugin image assets exist" $?
 
 bash -n "$PROJECT_DIR/install.sh" 2>/dev/null
 check "install.sh has valid bash syntax" $?

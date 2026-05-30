@@ -1,27 +1,32 @@
 {
   "name": "gsd-browser",
   "version": "0.1.27",
-  "description": "Native Chrome/Chromium browser automation for Codex agents.",
+  "description": "Open GSD browser automation for AI agents: inspect pages, drive Chrome/Chromium, verify flows, and capture evidence.",
   "author": {
     "name": "open-gsd",
     "url": "https://github.com/open-gsd"
   },
-  "homepage": "https://github.com/open-gsd/gsd-browser",
+  "homepage": "https://opengsd.net/",
   "repository": "https://github.com/open-gsd/gsd-browser",
   "license": "MIT OR Apache-2.0",
   "keywords": [
     "browser",
     "automation",
     "cdp",
-    "codex",
+    "mcp",
+    "agents",
     "testing",
-    "screenshots"
+    "screenshots",
+    "opengsd",
+    "open-gsd",
+    "verification",
+    "evidence"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "gsd-browser",
-    "shortDescription": "Browser automation for Codex agents.",
-    "longDescription": "Adds the gsd-browser skill to Codex so agents can drive Chrome or Chromium through the native gsd-browser CLI: navigation, clicking, typing, screenshots, snapshots with refs, assertions, extraction, visual diffs, network controls, and live viewer workflows.",
+    "shortDescription": "Inspect, test, debug, and document web apps with Chrome/Chromium.",
+    "longDescription": "Use gsd-browser when an AI agent needs real browser control. Features: navigate pages, click, type, fill forms, take screenshots, capture stable snapshot refs, run assertions and waits, extract structured data, compare visual diffs, inspect console/network behavior, mock or block requests, emulate devices, save auth state, record evidence bundles, and open a live viewer for human handoff. How to use it: ask your agent to inspect a URL or localhost app, verify a user flow before shipping, debug a broken page, capture screenshots, scrape page data, or show you the browser while it works. Open GSD: https://opengsd.net/. GitHub repo and docs: https://github.com/open-gsd/gsd-browser.",
     "developerName": "open-gsd",
     "category": "Coding",
     "capabilities": [
@@ -29,12 +34,15 @@
       "Read",
       "Write"
     ],
-    "websiteURL": "https://github.com/open-gsd/gsd-browser",
+    "websiteURL": "https://opengsd.net/",
     "defaultPrompt": [
-      "Open localhost:3000 and inspect the page",
-      "Test this web app with gsd-browser",
-      "Take a screenshot of the current page"
+      "Inspect localhost:3000 and report issues",
+      "Verify this user flow with evidence",
+      "Open the live browser viewer"
     ],
-    "brandColor": "#2563EB"
+    "brandColor": "#567499",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png",
+    "screenshots": []
   }
 }
