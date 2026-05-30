@@ -1,15 +1,17 @@
 ---
 name: gsd-browser
 description: >
-  Native Rust browser automation CLI for AI agents. Use when the user needs to
-  interact with websites, navigate pages, fill forms, click buttons, take
-  screenshots, share a live browser view, narrate browser actions, extract
-  structured data, run assertions, test web apps, mock network requests, or
-  automate any browser task. Triggers include "open a website", "fill out a
-  form", "take a screenshot", "show me the browser", "share the screen",
-  "pause the browser", "step through this", "scrape data", "test this web app",
-  "login to a site", "visual regression test", or any task requiring
-  programmatic web interaction.
+  Open GSD native browser automation for AI agents. Use gsd-browser when the
+  user needs real Chrome/Chromium control: navigate pages, inspect localhost,
+  click, type, fill forms, take screenshots, capture stable snapshot refs, run
+  assertions and waits, extract structured data, compare visual diffs, inspect
+  console/network behavior, mock or block requests, emulate devices, save auth
+  state, record evidence bundles, or share a live browser viewer for human
+  handoff. Good prompts include "inspect this URL", "verify this user flow",
+  "debug this page", "capture evidence", "scrape this table", "show me the
+  browser", "pause/step through this", "login to a site", or "run a visual
+  regression test". Learn more at https://opengsd.net/ and
+  https://github.com/open-gsd/gsd-browser.
 allowed-tools: Bash(gsd-browser:*), Bash(gsd-browser *)
 ---
 

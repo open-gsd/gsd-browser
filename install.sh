@@ -417,6 +417,10 @@ CODEX_PLUGIN_NAME="gsd-browser"
 CODEX_PLUGIN_REPO_BASE="https://raw.githubusercontent.com/$REPO/main/codex-plugin"
 CODEX_PLUGIN_ROOT="$HOME/plugins/$CODEX_PLUGIN_NAME"
 CODEX_MARKETPLACE_PATH="$HOME/.agents/plugins/marketplace.json"
+CODEX_PLUGIN_ASSET_FILES=(
+  "icon.png"
+  "logo.png"
+)
 
 install_skill_to() {
   local dest="$1"
@@ -460,10 +464,28 @@ install_codex_plugin_files() {
     return 1
   fi
 
+  local assets_tmp
+  assets_tmp="$(mktemp -d "$plugin_root/.assets.XXXXXX")"
+  local asset_failed=0
+  for file in "${CODEX_PLUGIN_ASSET_FILES[@]}"; do
+    if ! curl -fsSL -o "$assets_tmp/$file" "$CODEX_PLUGIN_REPO_BASE/assets/$file" 2>/dev/null; then
+      asset_failed=1
+      break
+    fi
+  done
+  if [ "$asset_failed" -eq 1 ]; then
+    rm -f "$manifest_tmp"
+    rm -rf "$skill_tmp" "$assets_tmp"
+    warn "Failed to download Codex plugin assets — check network or repo access"
+    return 1
+  fi
+
   mkdir -p "$plugin_root/skills"
   local skill_dest="$plugin_root/skills/$CODEX_PLUGIN_NAME"
+  local assets_dest="$plugin_root/assets"
   local manifest_dest="$plugin_root/.codex-plugin/plugin.json"
   local skill_backup=""
+  local assets_backup=""
   local manifest_backup=""
 
   if [ -e "$skill_dest" ] || [ -L "$skill_dest" ]; then
@@ -481,30 +503,58 @@ install_codex_plugin_files() {
     if ! mv -f "$manifest_dest" "$manifest_backup"; then
       [ -n "$skill_backup" ] && mv "$skill_backup" "$skill_dest"
       rm -f "$manifest_tmp"
-      rm -rf "$skill_tmp"
+      rm -rf "$skill_tmp" "$assets_tmp"
+      return 1
+    fi
+  fi
+
+  if [ -e "$assets_dest" ] || [ -L "$assets_dest" ]; then
+    assets_backup="$(mktemp -d "$plugin_root/.assets.backup.XXXXXX")"
+    rmdir "$assets_backup"
+    if ! mv "$assets_dest" "$assets_backup"; then
+      [ -n "$skill_backup" ] && mv "$skill_backup" "$skill_dest"
+      [ -n "$manifest_backup" ] && mv "$manifest_backup" "$manifest_dest"
+      rm -f "$manifest_tmp"
+      rm -rf "$skill_tmp" "$assets_tmp"
       return 1
     fi
   fi
 
   if ! mv "$skill_tmp" "$skill_dest"; then
     [ -n "$skill_backup" ] && mv "$skill_backup" "$skill_dest"
+    [ -n "$assets_backup" ] && mv "$assets_backup" "$assets_dest"
     [ -n "$manifest_backup" ] && mv "$manifest_backup" "$manifest_dest"
     rm -f "$manifest_tmp"
-    rm -rf "$skill_tmp"
+    rm -rf "$skill_tmp" "$assets_tmp"
+    return 1
+  fi
+
+  if ! mv "$assets_tmp" "$assets_dest"; then
+    rm -rf "$skill_dest"
+    [ -n "$skill_backup" ] && mv "$skill_backup" "$skill_dest"
+    [ -n "$assets_backup" ] && mv "$assets_backup" "$assets_dest"
+    [ -n "$manifest_backup" ] && mv "$manifest_backup" "$manifest_dest"
+    rm -f "$manifest_tmp"
+    rm -rf "$skill_tmp" "$assets_tmp"
     return 1
   fi
 
   if ! mv -f "$manifest_tmp" "$manifest_dest"; then
     rm -rf "$skill_dest"
     [ -n "$skill_backup" ] && mv "$skill_backup" "$skill_dest"
+    rm -rf "$assets_dest"
+    [ -n "$assets_backup" ] && mv "$assets_backup" "$assets_dest"
     [ -n "$manifest_backup" ] && mv "$manifest_backup" "$manifest_dest"
     rm -f "$manifest_tmp"
-    rm -rf "$skill_tmp"
+    rm -rf "$skill_tmp" "$assets_tmp"
     return 1
   fi
 
   if [ -n "$skill_backup" ]; then
     rm -rf "$skill_backup"
+  fi
+  if [ -n "$assets_backup" ]; then
+    rm -rf "$assets_backup"
   fi
   if [ -n "$manifest_backup" ]; then
     rm -f "$manifest_backup"

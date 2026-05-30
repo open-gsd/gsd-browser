@@ -54,6 +54,34 @@ SH
   chmod +x "$bin_dir/curl"
 }
 
+run_with_pty() {
+  local command="$1"
+  if script --version 2>/dev/null | grep -qi "util-linux"; then
+    printf '1\nl\n' | script -qfec "$command" /dev/null
+  elif command -v expect >/dev/null 2>&1; then
+    INSTALL_COMMAND="$command" expect <<'EXPECT'
+log_user 0
+set timeout 10
+spawn bash -c $env(INSTALL_COMMAND)
+expect {
+  -re "Install support for which agent" { send "1\r" }
+  timeout { exit 1 }
+  eof { exit 1 }
+}
+expect {
+  -re "Scope\\?" { send "l\r" }
+  timeout { exit 1 }
+  eof { exit 1 }
+}
+expect eof
+set result [wait]
+exit [lindex $result 3]
+EXPECT
+  else
+    printf '1\nl\n' | script -q /dev/null bash -c "$command"
+  fi
+}
+
 test_interactive_codex_plugin_can_install_locally() {
   local load_file="$TMP_ROOT/install-functions.sh"
   local bin_dir="$TMP_ROOT/bin-interactive"
@@ -63,9 +91,11 @@ test_interactive_codex_plugin_can_install_locally() {
   load_installer_functions "$load_file"
   write_fake_curl "$bin_dir"
 
-  printf '1\nl\n' | HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" script -qfec "cd '$project_dir' && source '$load_file' && install_skill" /dev/null >/dev/null
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" run_with_pty "cd '$project_dir' && source '$load_file' && install_skill" >/dev/null
 
   [ -f "$project_dir/plugins/gsd-browser/.codex-plugin/plugin.json" ] || fail "interactive Codex-only install did not create a local plugin"
+  [ -f "$project_dir/plugins/gsd-browser/assets/icon.png" ] || fail "interactive Codex-only install did not create plugin icon"
+  [ -f "$project_dir/plugins/gsd-browser/assets/logo.png" ] || fail "interactive Codex-only install did not create plugin logo"
   [ -f "$project_dir/.agents/plugins/marketplace.json" ] || fail "interactive Codex-only install did not create a local marketplace"
 }
 
@@ -84,7 +114,7 @@ test_noninteractive_default_all_skips_codex_plugin() {
     install_codex_plugin() {
       fail "non-interactive default all installed the Codex plugin"
     }
-    install_skill
+    install_skill 2>/dev/null
   ) >/dev/null
 }
 
