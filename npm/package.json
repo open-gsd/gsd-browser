@@ -1,11 +1,11 @@
 {
-  "name": "@open-gsd/gsd-browser",
+  "name": "@opengsd/gsd-browser",
   "version": "0.1.27",
   "description": "Browser automation CLI powered by Chrome DevTools Protocol — 92 commands for navigation, interaction, live viewing, annotations, recording bundles, screenshots, accessibility, network mocking, visual diffing, and more.",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/open-gsd/gsd-browser.git"
+    "url": "git+https://github.com/open-gsd/gsd-browser.git"
   },
   "homepage": "https://github.com/open-gsd/gsd-browser",
   "bugs": {
@@ -23,7 +23,7 @@
     "cli"
   ],
   "bin": {
-    "gsd-browser": "./bin/gsd-browser"
+    "gsd-browser": "bin/gsd-browser"
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.js"

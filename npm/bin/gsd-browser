@@ -11,7 +11,7 @@ const binaryPath = path.join(__dirname, binaryName);
 if (!fs.existsSync(binaryPath)) {
   console.error(
     `gsd-browser: native binary is missing at ${binaryPath}.\n` +
-    "Try reinstalling @open-gsd/gsd-browser."
+    "Try reinstalling @opengsd/gsd-browser."
   );
   process.exit(1);
 }
