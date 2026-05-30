@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # gsd-browser installer
-# Usage: curl -fsSL https://install.gsd.build/browser | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/open-gsd/gsd-browser/main/install.sh | bash
 #
 # For AI agents (recommended 2026+ path): After install, run `gsd-browser mcp` as your MCP server.
 #   - Tailored quickstart: $INSTALL_DIR/scripts/mcp-quickstart.sh cursor (or claude/vscode/generic)
@@ -19,7 +19,7 @@ set -euo pipefail
 #   GSD_BROWSER_SKIP_SKILL    - skip AI agent skill installation when set to 1
 
 VERSION="${GSD_BROWSER_VERSION:-latest}"
-REPO="gsd-build/gsd-browser"
+REPO="open-gsd/gsd-browser"
 INSTALL_DIR="${GSD_BROWSER_DIR:-$HOME/.gsd-browser}"
 BIN_DIR="$INSTALL_DIR/bin"
 CHROMIUM_DIR="$INSTALL_DIR/chromium"

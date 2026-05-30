@@ -31,7 +31,7 @@ See:
 ### Installation
 
 ```bash
-curl -fsSL https://install.gsd.build/browser | bash
+curl -fsSL https://raw.githubusercontent.com/open-gsd/gsd-browser/main/install.sh | bash
 
 # or from a repo checkout
 cargo install --path cli

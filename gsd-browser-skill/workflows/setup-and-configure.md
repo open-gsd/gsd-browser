@@ -11,10 +11,10 @@
 
 ```bash
 # One-liner (macOS / Linux)
-curl -fsSL https://install.gsd.build/browser | bash
+curl -fsSL https://raw.githubusercontent.com/open-gsd/gsd-browser/main/install.sh | bash
 
 # Or from a repo checkout
-git clone https://github.com/gsd-build/gsd-browser.git
+git clone https://github.com/open-gsd/gsd-browser.git
 cd gsd-browser
 cargo install --path cli
 
