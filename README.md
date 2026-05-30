@@ -38,6 +38,12 @@ Run `gsd-browser mcp` and unleash one of the most powerful browser surfaces avai
 
 ## Install
 
+### npm
+
+```bash
+npm install -g @gsd-build/gsd-browser
+```
+
 ### Pre-built binaries
 
 Download from [GitHub Releases](https://github.com/open-gsd/gsd-browser/releases):
@@ -56,6 +62,16 @@ git clone https://github.com/open-gsd/gsd-browser.git
 cd gsd-browser
 cargo install --path cli
 ```
+
+### Codex Plugin
+
+Install the CLI and register the Codex Plugin in one pass:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/open-gsd/gsd-browser/main/install.sh | bash -s -- --codex-plugin
+```
+
+The installer writes the plugin to `~/plugins/gsd-browser`, updates the personal Codex marketplace at `~/.agents/plugins/marketplace.json`, and runs `codex plugin add gsd-browser@<marketplace>` when the Codex CLI is available. Without `--codex-plugin`, the interactive installer offers `OpenAI Codex Plugin` alongside the agent skill options.
 
 ### crates.io
 

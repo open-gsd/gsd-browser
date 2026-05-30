@@ -83,6 +83,19 @@ check "SKILL.md has >= 300 lines (got $SKILL_LINES)" $?
 test -f "$PROJECT_DIR/AGENTS.md"
 check "AGENTS.md exists" $?
 
+# Codex Plugin metadata
+test -f "$PROJECT_DIR/codex-plugin/.codex-plugin/plugin.json"
+check "Codex Plugin manifest exists" $?
+
+node -e "const p=require('$PROJECT_DIR/codex-plugin/.codex-plugin/plugin.json'); if(p.name !== 'gsd-browser' || p.skills !== './skills/' || !p.interface?.defaultPrompt) process.exit(1)" 2>/dev/null
+check "Codex Plugin manifest has expected metadata" $?
+
+bash -n "$PROJECT_DIR/install.sh" 2>/dev/null
+check "install.sh has valid bash syntax" $?
+
+grep -q -- "--codex-plugin" "$PROJECT_DIR/install.sh" 2>/dev/null
+check "installer exposes --codex-plugin option" $?
+
 # ════════════════════════════════════════════
 #  npm Package Structure (4 checks)
 # ════════════════════════════════════════════
