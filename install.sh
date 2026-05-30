@@ -813,7 +813,11 @@ install_skill() {
   echo ""
 
   local choice
-  read -rp "  Install support for which agent(s)? [a]: " choice < /dev/tty || choice="a"
+  local prompted=1
+  read -rp "  Install support for which agent(s)? [a]: " choice < /dev/tty || {
+    choice="a"
+    prompted=0
+  }
   choice="${choice:-a}"
 
   if [ "$choice" = "s" ] || [ "$choice" = "S" ]; then
@@ -824,7 +828,12 @@ install_skill() {
   # Build list of selected tools
   local selected=()
   if [ "$choice" = "a" ] || [ "$choice" = "A" ]; then
-    selected=("${available[@]}")
+    for tool in "${available[@]}"; do
+      if [ "$prompted" -eq 0 ] && [ "$tool" = "codex-plugin" ]; then
+        continue
+      fi
+      selected+=("$tool")
+    done
   else
     # Parse comma-separated or single number
     IFS=',' read -ra nums <<< "$choice"

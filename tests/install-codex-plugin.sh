@@ -69,6 +69,25 @@ test_interactive_codex_plugin_can_install_locally() {
   [ -f "$project_dir/.agents/plugins/marketplace.json" ] || fail "interactive Codex-only install did not create a local marketplace"
 }
 
+test_noninteractive_default_all_skips_codex_plugin() {
+  local load_file="$TMP_ROOT/install-functions.sh"
+  local bin_dir="$TMP_ROOT/bin-noninteractive"
+  local home_dir="$TMP_ROOT/home-noninteractive"
+  mkdir -p "$bin_dir" "$home_dir/.agents"
+  load_installer_functions "$load_file"
+
+  (
+    HOME="$home_dir"
+    PATH="$bin_dir"
+    source "$load_file"
+    read() { return 1; }
+    install_codex_plugin() {
+      fail "non-interactive default all installed the Codex plugin"
+    }
+    install_skill
+  ) >/dev/null
+}
+
 test_marketplace_update_falls_back_to_node() {
   [ -n "$REAL_NODE" ] || fail "node is required for fallback test"
 
@@ -162,6 +181,7 @@ test_plugin_file_replacement_rolls_back_on_failure() {
 }
 
 test_interactive_codex_plugin_can_install_locally
+test_noninteractive_default_all_skips_codex_plugin
 test_marketplace_update_falls_back_to_node
 test_local_plugin_registers_local_marketplace
 test_plugin_file_replacement_rolls_back_on_failure
