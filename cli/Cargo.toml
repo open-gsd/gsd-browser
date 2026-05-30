@@ -1,6 +1,6 @@
 [package]
 name = "gsd-browser"
-version = "0.1.26"
+version = "0.1.27"
 edition = "2021"
 description = "Browser automation CLI powered by Chrome DevTools Protocol"
 license = "MIT OR Apache-2.0"
@@ -24,8 +24,6 @@ rustenium = { workspace = true, optional = true }
 rustenium_macros = { package = "rustenium-macros", version = "1.0", optional = true }
 dirs = { workspace = true }
 futures = { workspace = true }
-libc = { workspace = true }
-nix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["signal"] }
@@ -47,6 +45,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [features]
 bidi = ["dep:rustenium", "dep:rustenium_macros"]
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+nix = { workspace = true }
 
 [dev-dependencies]
 futures-util = "0.3"

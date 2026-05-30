@@ -13,6 +13,7 @@ const PLATFORM_MAP = {
   "darwin-x64": "gsd-browser-darwin-x64",
   "linux-arm64": "gsd-browser-linux-arm64",
   "linux-x64": "gsd-browser-linux-x64",
+  "win32-x64": "gsd-browser-windows-x64.exe",
 };
 
 function fetchJSON(url) {
@@ -68,11 +69,15 @@ async function main() {
   fs.mkdirSync(binDir, { recursive: true });
 
   const isWindows = platform === "win32";
-  const targetName = isWindows ? "gsd-browser.exe" : "gsd-browser";
+  const targetName = isWindows ? "gsd-browser.exe" : "gsd-browser-bin";
   const targetPath = path.join(binDir, targetName);
+  const launcherPath = path.join(binDir, "gsd-browser");
 
   // Check if binary already exists (e.g., bundled in package)
   if (fs.existsSync(targetPath)) {
+    if (fs.existsSync(launcherPath)) {
+      fs.chmodSync(launcherPath, 0o755);
+    }
     console.log(`gsd-browser: binary already present at ${targetPath}`);
     return;
   }
@@ -115,6 +120,9 @@ async function main() {
 
   if (!isWindows) {
     fs.chmodSync(targetPath, 0o755);
+  }
+  if (fs.existsSync(launcherPath)) {
+    fs.chmodSync(launcherPath, 0o755);
   }
 
   console.log(`gsd-browser: installed ${binaryName} (${version}) to ${targetPath}`);

@@ -1,4 +1,17 @@
+#[path = "daemon/handlers/cloud_methods.rs"]
+mod cloud_methods;
+mod cloud_manifest;
+
+#[cfg(unix)]
 mod daemon;
+#[cfg(not(unix))]
+#[path = "daemon_windows.rs"]
+mod daemon;
+
+#[cfg(unix)]
+mod daemon_client;
+#[cfg(not(unix))]
+#[path = "daemon_client_windows.rs"]
 mod daemon_client;
 mod mcp;
 mod output;
@@ -1269,7 +1282,7 @@ async fn main() {
 type CmdResult = Result<(), Box<dyn std::error::Error>>;
 
 fn cmd_cloud_methods(cli: &Cli) -> CmdResult {
-    let manifest = daemon::handlers::cloud_manifest::build_cloud_methods_manifest();
+    let manifest = cloud_manifest::build_cloud_methods_manifest();
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&manifest)?);
         return Ok(());

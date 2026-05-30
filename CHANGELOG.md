@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.27] - 2026-05-30
+
+### Added
+
+- Windows x64 release asset: `gsd-browser-windows-x64.exe`.
+- npm install support for `win32-x64`, including a Windows launcher shim.
+
+### Changed
+
+- Release builds now include `windows-latest` in the GitHub Actions matrix.
+
+### Known Limitations
+
+- The native Windows binary currently guards daemon-backed browser automation with a clear unsupported-runtime error; use WSL, macOS, or Linux for full automation while native Windows IPC support is added.
+
 ## [0.1.26] - 2026-05-30
 
 ### Agent Testing

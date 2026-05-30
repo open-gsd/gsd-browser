@@ -1,6 +1,6 @@
 {
   "name": "@open-gsd/gsd-browser",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "description": "Browser automation CLI powered by Chrome DevTools Protocol — 92 commands for navigation, interaction, live viewing, annotations, recording bundles, screenshots, accessibility, network mocking, visual diffing, and more.",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -30,7 +30,8 @@
   },
   "os": [
     "darwin",
-    "linux"
+    "linux",
+    "win32"
   ],
   "cpu": [
     "arm64",
