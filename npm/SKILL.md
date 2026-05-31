@@ -533,6 +533,8 @@ The daemon auto-starts on browser commands. These are for explicit lifecycle con
 gsd-browser daemon stop                            # Stop daemon (idempotent — safe on dead processes)
 gsd-browser daemon health                          # Health check (read-only, does not auto-start)
 gsd-browser daemon start                           # Explicit start (pre-warm browser before commands)
+gsd-browser mcp                                    # Run MCP server over stdio
+gsd-browser cloud-methods                          # Print the cloud browser method manifest
 gsd-browser update                                 # Install the current release
 ```
 

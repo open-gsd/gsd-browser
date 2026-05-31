@@ -167,6 +167,7 @@ gsd-browser recording-validate <id-or-path> --json
 | Auth vault | `vault-save`, `vault-login`, `vault-list` |
 | Recording & traces | `generate-test`, `har-export`, `trace-start`, `trace-stop` |
 | Safety, caching & daemon management | `action-cache`, `check-injection`, `daemon` |
+| MCP, cloud & updates | `mcp`, `cloud-methods`, `update` |
 
 ## Highlights
 
