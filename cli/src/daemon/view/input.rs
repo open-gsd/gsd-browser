@@ -185,14 +185,22 @@ pub async fn handle_viewer_command(
                 })?;
             let (url, title) = page_metadata(&page).await;
             let mut recordings = state.daemon_state.recordings.lock().await;
-            let _ = recordings.record_event(crate::daemon::view::recording::RecordingEventInput {
-                source: "viewer".to_string(),
-                owner: "user".to_string(),
-                kind: format!("{:?}", input.kind).to_lowercase(),
-                url,
-                title,
-                redacted: false,
-            });
+            if let Err(e) =
+                recordings.record_event(crate::daemon::view::recording::RecordingEventInput {
+                    source: "viewer".to_string(),
+                    owner: "user".to_string(),
+                    kind: format!("{:?}", input.kind).to_lowercase(),
+                    url,
+                    title,
+                    redacted: false,
+                    command: serde_json::json!({}),
+                    before: serde_json::json!({}),
+                    after: serde_json::json!({}),
+                    network: serde_json::json!({}),
+                })
+            {
+                tracing::error!("[viewer-input] record_event failed: {e}");
+            }
             Ok(accepted(
                 cmd.command_id,
                 control.control_version,
@@ -305,8 +313,12 @@ pub async fn handle_viewer_command(
                             owner: "user".to_string(),
                             kind: "recording.start".to_string(),
                             url: String::new(),
-                            title: command.name.unwrap_or_else(|| "viewer-flow".to_string()),
+                            title: command.name.clone().unwrap_or_else(|| "viewer-flow".to_string()),
                             redacted: false,
+                            command: serde_json::json!({ "action": "start", "name": command.name.clone() }),
+                            before: serde_json::json!({}),
+                            after: serde_json::json!({}),
+                            network: serde_json::json!({}),
                         })
                         .map_err(|message| {
                             rejected(
@@ -326,6 +338,10 @@ pub async fn handle_viewer_command(
                                 url: String::new(),
                                 title: String::new(),
                                 redacted: false,
+                                command: serde_json::json!({ "action": "stop" }),
+                                before: serde_json::json!({}),
+                                after: serde_json::json!({}),
+                                network: serde_json::json!({}),
                             })
                             .map_err(|message| {
                                 rejected(
