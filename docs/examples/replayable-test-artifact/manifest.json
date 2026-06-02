@@ -15,16 +15,15 @@
   "originScopes": ["https://app.example.com"],
   "excludedBoundaryEvents": [],
   "redaction": {
-    "applied": true,
+    "policy": "default-sensitive",
     "hitCount": 7,
-    "policy": "sensitive-cookie-names + high-entropy-values + token patterns (via redact_browser_state + redact_text in recording.rs)",
-    "markers": ["[REDACTED:sensitive]", "[redacted:email]", "bearer [redacted:token]", "[redacted:token]"]
+    "classes": ["email", "query_token", "bearer_token", "data_token"]
   },
   "artifacts": {
     "events": "events.jsonl",
     "states": "states/",
     "playwrightStates": "states/*.pwstate.json (redacted)",
-    "frames": "frames/ (or screenshots/ in some captures)"
+    "frames": "frames/"
   },
   "hashes": {
     "manifestSha256": "demo-illustrative-hash",
@@ -34,7 +33,6 @@
   "replayable": true,
   "replayFormatVersion": "playwright-2",
   "entryPointCommand": {
-    "kind": "navigate",
     "url": "https://app.example.com/login"
   },
   "expectedFinalState": {

@@ -1,1 +1,1 @@
-frames/ (and/or screenshots/) populated by real gsd-browser recording export + viewer capture. Omitted here (repo size). See generator logic in codegen.rs:969+ for enumeration.
+frames/ is populated by real gsd-browser recording export + viewer capture. Omitted here (repo size). See generator logic in codegen.rs:969+ for enumeration.

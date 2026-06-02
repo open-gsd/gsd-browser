@@ -17,7 +17,7 @@
 //     stateRestorationHints exact keys, redaction markers like [REDACTED:sensitive])
 //   - cli/src/daemon/handlers/codegen.rs (exact headers, REF-BASED blocks with
 //     "manual locator mapping REQUIRED", "gsd ref: @vN:eM (ephemeral...)", TODO no-op,
-//     path.join + __dirname polyfill, emit_rich_dom_assertions producing commented
+//     path.join + fileURLToPath bundleDir helper, emit_rich_dom_assertions producing commented
 //     counts + executable heading + // expectedAfterDOM JSON, frames/ enumeration)
 //
 // Always generate fresh artifacts from a live recording + export for production use.
@@ -39,9 +39,10 @@ import { test, expect } from '@playwright/test';
 // ============================================================
 
 import * as path from 'path';
-const __dirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(new URL(import.meta.url).pathname);
+import { fileURLToPath } from 'url';
+const bundleDir = path.dirname(fileURLToPath(import.meta.url));
 
-test.use({ storageState: path.join(__dirname, 'states/post-login.pwstate.json') });
+test.use({ storageState: path.join(bundleDir, 'states/post-login.pwstate.json') });
 // NOTE: states/*.pwstate.json are REDACTED (see bundle manifest statesRedaction). Some logins may still need vault or re-auth.
 // States discovered in bundle:
 //   states/post-login.pwstate.json
@@ -91,7 +92,7 @@ test.describe('example-login-regression', () => {
 
     // === Screenshot references from evidence bundle (first-class artifact) ===
     // (Real exports populate frames/ with jpgs captured around actions; generator enumerates them here.)
-    //   frames/ (or screenshots/ in some viewer captures) — omitted in this pedagogical skeleton to keep repo size small.
+    //   frames/ — omitted in this pedagogical skeleton to keep repo size small.
     //   In a live bundle you would see e.g. frame-0001.jpg, frame-0004.jpg corresponding to the click_ref etc.
   });
 });

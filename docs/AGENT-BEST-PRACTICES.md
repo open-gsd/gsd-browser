@@ -119,7 +119,7 @@ This is the **core vision delivered across PR 1-6**: any exploratory, repro, or 
 
 2. **Export the bundle** (triggers full enrichment + safety):
    - `browser_recording_export({recordingId, outputPath: "./evidence/checkout-bug"})` (or pass the ID directly to generator in step 4).
-   - Export redacts sensitive state (cookies/tokens matching patterns like session/auth/jwt + high-entropy), writes `manifest.json` (with `replayable: true`, `replayFormatVersion`, `redaction` policy, `stateRestorationHints`, `networkSliceManifest`), `events.jsonl` (enriched with before/after DOM snapshots + full per-action network slices), `screenshots/`, `states/*.pwstate.json` (redacted), optional HAR subset.
+   - Export redacts sensitive state (cookies/tokens matching patterns like session/auth/jwt + high-entropy), writes `manifest.json` (with `replayable: true`, `replayFormatVersion`, `redaction` policy, `stateRestorationHints`, `networkSliceManifest`), `events.jsonl` (enriched with before/after DOM snapshots + full per-action network slices), `frames/`, `states/*.pwstate.json` (redacted), optional HAR subset.
    - The bundle is now a durable, shareable, CI-friendly artifact.
 
 3. **Validate** (recommended before generating test or archiving):
