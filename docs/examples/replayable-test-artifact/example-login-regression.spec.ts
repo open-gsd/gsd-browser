@@ -7,7 +7,7 @@
 // BrowserArtifactManifestV1 / RecordingEventV1 shapes (common/src/viewer.rs,
 // camelCase via serde(rename_all = "camelCase")).
 //
-// It is NOT byte-for-byte output from a live `gsd-browser generate-replayable-test`
+// It is NOT byte-for-byte output from a live `browser_generate_replayable_test`
 // run against a real exported bundle. Real output will vary with actual events,
 // captured CompactPageState in "after", pwstate filenames, frame jpgs, etc.
 //
@@ -103,4 +103,4 @@ test.describe('example-login-regression', () => {
 // - Ref actions are intentionally emitted as safe commented no-ops (see codegen.rs:734+).
 // - Always review + replace locators + adjust any redacted auth steps before committing as CI guard.
 // - Bundle source (illustrative): docs/examples/replayable-test-artifact/ (manifest + events + redacted states).
-// - Run the real generator: gsd-browser generate-replayable-test --bundle <real-export-dir> ...
+// - Run the real generator: browser_generate_replayable_test({ "bundlePath": "<real-export-dir>", ... })

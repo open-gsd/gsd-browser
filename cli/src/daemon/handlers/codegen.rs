@@ -167,19 +167,30 @@ pub fn handle_generate_test(state: &DaemonState, params: &Value) -> Result<Value
                             ));
                         }
                         _ => {
-                            lines.push(format!("    // wait_for {condition}: {value}"));
+                            lines.push(format!(
+                                "    // wait_for {}: {}",
+                                escape_js_line_comment(&condition),
+                                escape_js_line_comment(&value)
+                            ));
                         }
                     }
                 }
             }
             "assert" => {
                 if include_assertions {
-                    lines.push(format!("    // assertion: {}", truncate(params_str, 80)));
+                    lines.push(format!(
+                        "    // assertion: {}",
+                        escape_js_line_comment(&truncate(params_str, 80))
+                    ));
                 }
             }
             _ => {
                 // Other tools: emit as comment
-                lines.push(format!("    // {tool}: {}", truncate(params_str, 60)));
+                lines.push(format!(
+                    "    // {}: {}",
+                    escape_js_line_comment(tool),
+                    escape_js_line_comment(&truncate(params_str, 60))
+                ));
             }
         }
     }
@@ -253,12 +264,28 @@ fn escape_js(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
             // Other ASCII controls and DEL -> unicode escape to be safe
             '\u{0000}'..='\u{001F}' | '\u{007F}' => {
                 out.push_str(&format!("\\u{:04x}", ch as u32));
             }
             // " is safe inside single quotes, but we escape it defensively
             '"' => out.push_str("\\\""),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn escape_js_line_comment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
             _ => out.push(ch),
         }
     }
@@ -392,6 +419,67 @@ fn ensure_parent_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn relative_path_between(from_dir: &Path, to_dir: &Path) -> Option<std::path::PathBuf> {
+    let from_components: Vec<_> = from_dir.components().collect();
+    let to_components: Vec<_> = to_dir.components().collect();
+    if from_components.first() != to_components.first() {
+        return None;
+    }
+
+    let mut common = 0;
+    while common < from_components.len()
+        && common < to_components.len()
+        && from_components[common] == to_components[common]
+    {
+        common += 1;
+    }
+
+    let mut path = std::path::PathBuf::new();
+    for _ in common..from_components.len() {
+        path.push("..");
+    }
+    for component in &to_components[common..] {
+        path.push(component.as_os_str());
+    }
+    if path.as_os_str().is_empty() {
+        path.push(".");
+    }
+    Some(path)
+}
+
+fn bundle_dir_js_expression(bundle_dir: &Path, output_file_path: Option<&Path>) -> String {
+    let bundle_abs = fs::canonicalize(bundle_dir).unwrap_or_else(|_| bundle_dir.to_path_buf());
+    if let Some(output_path) = output_file_path {
+        if let Some(output_dir) = output_path.parent() {
+            let output_abs =
+                fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.to_path_buf());
+            if let Some(relative) = relative_path_between(&output_abs, &bundle_abs) {
+                return format!(
+                    "path.resolve(path.dirname(fileURLToPath(import.meta.url)), '{}')",
+                    escape_js(&relative.to_string_lossy())
+                );
+            }
+        }
+    }
+
+    format!("'{}'", escape_js(&bundle_abs.to_string_lossy()))
+}
+
+fn parse_checked_value(cmd: &serde_json::Value) -> bool {
+    cmd.get("checked")
+        .and_then(|v| {
+            v.as_bool().or_else(|| {
+                v.as_str()
+                    .and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
+                        "true" => Some(true),
+                        "false" => Some(false),
+                        _ => None,
+                    })
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// PR5: Emit rich DOM assertions + expected/actual diff comment for a step's "after" state.
 /// Safe no-op if no usable after DOM data. Uses counts for stable structural guards,
 /// first heading + body prefix for text presence, and dumps the full signature for diffs.
@@ -457,7 +545,10 @@ fn emit_rich_dom_assertions(lines: &mut Vec<String>, event: &serde_json::Value, 
     lines.push(format!(
         "    // expectedAfterDOM (step {} for expected-vs-actual diff): {}",
         step,
-        truncate(&serde_json::to_string(&dom_sig).unwrap_or_default(), 300)
+        escape_js_line_comment(&truncate(
+            &serde_json::to_string(&dom_sig).unwrap_or_default(),
+            300
+        ))
     ));
     if !emitted_any {
         // still surfaced the diff material even if no executable count/text this step
@@ -545,6 +636,7 @@ fn collect_network_for_har(events_str: &str) -> Vec<serde_json::Value> {
 fn generate_playwright_from_bundle(
     bundle_dir: &std::path::Path,
     test_name: &str,
+    output_file_path: Option<&Path>,
 ) -> Result<(String, usize, usize, String, Option<String>), String> {
     let events_path = bundle_dir.join("events.jsonl");
     let manifest_path = bundle_dir.join("manifest.json");
@@ -582,7 +674,10 @@ fn generate_playwright_from_bundle(
     lines.push(String::new());
     lines.push("// ============================================================".to_string());
     lines.push("// Generated by gsd-browser replayable test generator (PR 5)".to_string());
-    lines.push(format!("// Source: {}", bundle_desc));
+    lines.push(format!(
+        "// Source: {}",
+        escape_js_line_comment(&bundle_desc)
+    ));
     lines.push(
         "// Enriched events (PR1/3) + full per-action network slices (PR5) + state snapshots"
             .to_string(),
@@ -636,9 +731,10 @@ fn generate_playwright_from_bundle(
                 lines.push(String::new());
                 lines.push("import * as path from 'path';".to_string());
                 lines.push("import { fileURLToPath } from 'url';".to_string());
-                lines.push(
-                    "const bundleDir = path.dirname(fileURLToPath(import.meta.url));".to_string(),
-                );
+                lines.push(format!(
+                    "const bundleDir = {};",
+                    bundle_dir_js_expression(bundle_dir, output_file_path)
+                ));
                 lines.push(String::new());
 
                 for pwf in pwstate_files.iter().take(1) {
@@ -667,7 +763,7 @@ fn generate_playwright_from_bundle(
             // Always document what was found (for audit / manual fallback)
             lines.push("// States discovered in bundle:".to_string());
             for sf in state_files.iter().take(3) {
-                lines.push(format!("//   states/{}", sf));
+                lines.push(format!("//   states/{}", escape_js_line_comment(sf)));
             }
             if state_files.len() > 3 {
                 lines.push(format!("//   ... +{} more", state_files.len() - 3));
@@ -765,7 +861,7 @@ fn generate_playwright_from_bundle(
                     lines.push("    // === REF-BASED ACTION (manual locator mapping REQUIRED for reliable regression) ===".to_string());
                     lines.push(format!(
                         "    // gsd ref: {}  (ephemeral by design — never stable across runs)",
-                        r
+                        escape_js_line_comment(&r)
                     ));
                     lines.push("    // Best evidence: the matching frame-*.jpg in this bundle (visual + DOM context)".to_string());
                     lines.push("    // How to complete: re-snapshot at authoring time or use Playwright's codegen on the same flow.".to_string());
@@ -799,8 +895,8 @@ fn generate_playwright_from_bundle(
                 );
                 lines.push(format!(
                     "    // gsd ref: {}  | value: '{}'",
-                    r,
-                    escape_js(&text)
+                    escape_js_line_comment(&r),
+                    escape_js_line_comment(&escape_js(&text))
                 ));
                 lines.push("    // Evidence: corresponding frame jpg in bundle".to_string());
                 lines.push("    // Safe no-op placeholder:".to_string());
@@ -828,7 +924,7 @@ fn generate_playwright_from_bundle(
                         "    // === REF-BASED HOVER (manual locator mapping REQUIRED) ==="
                             .to_string(),
                     );
-                    lines.push(format!("    // gsd ref: {}", r));
+                    lines.push(format!("    // gsd ref: {}", escape_js_line_comment(&r)));
                     lines.push("    // Safe no-op placeholder:".to_string());
                     lines.push("    // await page.locator('body').first().waitFor({ state: 'visible' }); // TODO: replace".to_string());
                     emitted = true;
@@ -850,18 +946,7 @@ fn generate_playwright_from_bundle(
             }
             "set_checked" => {
                 let sel = extract_str_from_cmd(&cmd, "selector").unwrap_or_default();
-                let checked = cmd
-                    .get("checked")
-                    .and_then(|v| {
-                        v.as_bool().or_else(|| {
-                            v.as_str().and_then(|s| match s {
-                                "true" => Some(true),
-                                "false" => Some(false),
-                                _ => None,
-                            })
-                        })
-                    })
-                    .unwrap_or(true);
+                let checked = parse_checked_value(&cmd);
                 if !sel.is_empty() {
                     lines.push(format!(
                         "    await page.setChecked('{}', {});",
@@ -898,7 +983,7 @@ fn generate_playwright_from_bundle(
                         _ => {
                             lines.push(format!(
                                 "    await page.waitForTimeout(300); // wait_for {}",
-                                cond
+                                escape_js_line_comment(&cond)
                             ));
                         }
                     }
@@ -907,7 +992,10 @@ fn generate_playwright_from_bundle(
             "assert" => {
                 lines.push(format!(
                     "    // recorded assert: {}",
-                    truncate(&serde_json::to_string(&cmd).unwrap_or_default(), 70)
+                    escape_js_line_comment(&truncate(
+                        &serde_json::to_string(&cmd).unwrap_or_default(),
+                        70
+                    ))
                 ));
             }
             "save_state" => {
@@ -935,8 +1023,11 @@ fn generate_playwright_from_bundle(
                 if !kind.is_empty() {
                     lines.push(format!(
                         "    // {}: {}",
-                        kind,
-                        truncate(&serde_json::to_string(&cmd).unwrap_or_default(), 55)
+                        escape_js_line_comment(kind),
+                        escape_js_line_comment(&truncate(
+                            &serde_json::to_string(&cmd).unwrap_or_default(),
+                            55
+                        ))
                     ));
                 }
             }
@@ -973,7 +1064,10 @@ fn generate_playwright_from_bundle(
         // even when the action itself did not emit runnable steps (better evidence density).
         let nets = get_network_summary(&event);
         for n in nets.iter().take(1) {
-            lines.push(format!("    // network slice: {}", n));
+            lines.push(format!(
+                "    // network slice: {}",
+                escape_js_line_comment(n)
+            ));
             if net_asserts_emitted < 2
                 && (n.contains("POST")
                     || n.contains("PUT")
@@ -1020,7 +1114,7 @@ fn generate_playwright_from_bundle(
     frames.sort();
     if !frames.is_empty() {
         for f in frames.iter().take(6) {
-            lines.push(format!("    //   frames/{}", f));
+            lines.push(format!("    //   frames/{}", escape_js_line_comment(f)));
         }
         if frames.len() > 6 {
             lines.push(format!(
@@ -1058,7 +1152,7 @@ fn generate_playwright_from_bundle(
                 lines.push(String::new());
                 lines.push(format!(
                     "    // PR5 HAR subset (EVIDENCE/SUMMARY ONLY — headers/bodies/timings omitted, see Finding 5 limitations): {}-network-slices.har ({} entries)",
-                    safe, har_entries.len()
+                    escape_js_line_comment(&safe), har_entries.len()
                 ));
             }
         }
@@ -1122,9 +1216,6 @@ pub async fn handle_generate_replayable_test(
         );
     };
 
-    let (script, actions, lines_count, bundle_desc, har_path) =
-        generate_playwright_from_bundle(&bundle_dir, name)?;
-
     let safe_name = sanitize_for_filename(name);
     let file_path = if let Some(p) = output_path {
         p
@@ -1144,6 +1235,8 @@ pub async fn handle_generate_replayable_test(
 
     let file_path_ref = Path::new(&file_path);
     ensure_parent_dir(file_path_ref)?;
+    let (script, actions, lines_count, bundle_desc, har_path) =
+        generate_playwright_from_bundle(&bundle_dir, name, Some(file_path_ref))?;
     fs::write(file_path_ref, &script)
         .map_err(|e| format!("failed to write replayable test: {}", e))?;
 
@@ -1250,8 +1343,10 @@ mod tests {
         )
         .unwrap();
 
+        let output = bundle.join("pr4-checkout.spec.ts");
         let (script, steps, _lines, desc, _har) =
-            generate_playwright_from_bundle(bundle, "pr4-checkout").expect("generate");
+            generate_playwright_from_bundle(bundle, "pr4-checkout", Some(&output))
+                .expect("generate");
 
         assert!(desc.contains("rec_test_pr5"));
         assert!(desc.contains("replayable:true"));
@@ -1279,7 +1374,9 @@ mod tests {
            // PR5 state restoration
         assert!(script.contains("test.use({ storageState:"));
         assert!(script.contains("import { fileURLToPath } from 'url';"));
-        assert!(script.contains("const bundleDir = path.dirname(fileURLToPath(import.meta.url));"));
+        assert!(script.contains(
+            "const bundleDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '.');"
+        ));
         assert!(!script.contains("__dirname"));
         assert!(script.contains("states/post-login.pwstate.json"));
         assert!(
@@ -1304,9 +1401,12 @@ mod tests {
         );
 
         // Test name with special chars must be properly escaped (Finding 2)
-        let (script2, _, _, _, _) =
-            generate_playwright_from_bundle(bundle, "user's checkout \"flow\"\nwith newline")
-                .expect("generate with tricky name");
+        let (script2, _, _, _, _) = generate_playwright_from_bundle(
+            bundle,
+            "user's checkout \"flow\"\nwith newline",
+            Some(&output),
+        )
+        .expect("generate with tricky name");
         assert!(script2.contains("test.describe('user\\'s checkout \\\"flow\\\"\\nwith newline'"));
     }
 
@@ -1326,10 +1426,10 @@ mod tests {
         .unwrap();
 
         let (script, steps, _, _, _) =
-            generate_playwright_from_bundle(bundle, "unicode ✓ flow").expect("generate");
+            generate_playwright_from_bundle(bundle, "unicode ✓ flow", None).expect("generate");
 
         assert_eq!(steps, 1);
-        assert!(script.contains("await page.setChecked('input[type=checkbox]', true);"));
+        assert!(script.contains("await page.setChecked('input[type=checkbox]', false);"));
         assert!(!script.contains("evil.test"));
         assert!(script.contains("network slice: POST https://example.com/api/checkout/"));
     }

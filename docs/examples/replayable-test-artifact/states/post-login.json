@@ -17,12 +17,8 @@
       "path": "/"
     }
   ],
-  "origins": [
-    {
-      "origin": "https://app.example.com",
-      "localStorage": [
-        { "name": "user_pref", "value": "dark" }
-      ]
-    }
-  ]
+  "localStorage": {
+    "user_pref": "dark"
+  },
+  "sessionStorage": {}
 }

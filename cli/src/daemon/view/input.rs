@@ -180,15 +180,21 @@ pub async fn handle_viewer_command(
                 // requests caused by live-viewer clicks/types.
                 let _ = recordings.prepare_for_next_recorded_event();
             }
-            crate::daemon::input_dispatch::dispatch_user_input(&page, &state.daemon_state, &input)
-                .await
-                .map_err(|message| {
-                    rejected(
-                        Some(cmd.command_id.clone()),
-                        ViewerRejectionReason::MalformedCommand,
-                        message,
-                    )
-                })?;
+            if let Err(message) = crate::daemon::input_dispatch::dispatch_user_input(
+                &page,
+                &state.daemon_state,
+                &input,
+            )
+            .await
+            {
+                let mut recordings = state.daemon_state.recordings.lock().await;
+                let _ = recordings.clear_pending_recorded_event();
+                return Err(rejected(
+                    Some(cmd.command_id.clone()),
+                    ViewerRejectionReason::MalformedCommand,
+                    message,
+                ));
+            }
             let (url, title) = page_metadata(&page).await;
             let mut recordings = state.daemon_state.recordings.lock().await;
             if let Err(e) =

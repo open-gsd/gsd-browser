@@ -944,7 +944,10 @@ async fn dispatch(
         timeline.finish_action(id, &after_url, status, error);
     }
 
-    // Store after-state in DiffState for state-mutating methods
+    // Store after-state in DiffState for state-mutating methods. When recording,
+    // reuse the same capture for event enrichment instead of immediately
+    // capturing the identical post-action state again.
+    let mut diff_after_for_recording: Option<CompactPageState> = None;
     if matches!(
         req.method.as_str(),
         "navigate"
@@ -962,6 +965,9 @@ async fn dispatch(
             | "act"
     ) {
         let after_state = capture::capture_compact_page_state(page, false).await;
+        if record_timeline {
+            diff_after_for_recording = Some(after_state.clone());
+        }
         let mut diff = state.diff.lock().unwrap();
         diff.after = Some(after_state);
     }
@@ -969,7 +975,10 @@ async fn dispatch(
     // Dedicated per-dispatch after-state capture for recording (post-dispatch_inner + settle).
     // Paired with recording_before above for consistent event enrichment.
     let recording_after: Option<CompactPageState> = if record_timeline {
-        Some(capture::capture_compact_page_state(page, false).await)
+        match diff_after_for_recording {
+            Some(after_state) => Some(after_state),
+            None => Some(capture::capture_compact_page_state(page, false).await),
+        }
     } else {
         None
     };
@@ -1139,8 +1148,8 @@ async fn capture_basic_session_meta(page: &Page) -> serde_json::Value {
     // Storage key counts via tiny JS (mirrors state_persist but only lengths)
     let (ls_count, ss_count) = {
         let js = r#"(() => {
-            const ls = Object.keys(localStorage || {}).length;
-            const ss = Object.keys(sessionStorage || {}).length;
+            const ls = localStorage ? localStorage.length : 0;
+            const ss = sessionStorage ? sessionStorage.length : 0;
             return {ls, ss};
         })()"#;
         match tokio::time::timeout(

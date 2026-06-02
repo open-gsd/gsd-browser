@@ -41,6 +41,7 @@ struct HttpState {
     cli: Cli,
     auth_token: Option<String>,
     auth_verify_url: Option<String>,
+    http_client: reqwest::Client,
 }
 
 /// Top-level entry point called from the `mcp` subcommand.
@@ -80,6 +81,7 @@ pub async fn run_http_server(cli: &Cli, options: HttpServerOptions) -> crate::Cm
         } else {
             options.auth_verify_url.clone()
         },
+        http_client: reqwest::Client::new(),
     });
 
     let app = Router::new()
@@ -123,6 +125,7 @@ async fn handle_http_mcp(
         &headers,
         state.auth_token.as_deref(),
         state.auth_verify_url.as_deref(),
+        &state.http_client,
         &request,
     )
     .await
@@ -148,6 +151,7 @@ async fn authorize_http_request(
     headers: &HeaderMap,
     auth_token: Option<&str>,
     auth_verify_url: Option<&str>,
+    http_client: &reqwest::Client,
     request: &Value,
 ) -> Result<(), Response> {
     if auth_token.is_none() && auth_verify_url.is_none() {
@@ -178,34 +182,41 @@ async fn authorize_http_request(
         return Err(response);
     };
 
-    verify_remote_bearer(auth_verify_url, provided, request).await
+    verify_remote_bearer(http_client, auth_verify_url, provided, request).await
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim)
+        .and_then(|value| {
+            let mut parts = value.split_whitespace();
+            let scheme = parts.next()?;
+            let token = parts.next()?;
+            if parts.next().is_none() && scheme.eq_ignore_ascii_case("bearer") {
+                Some(token)
+            } else {
+                None
+            }
+        })
         .filter(|value| !value.is_empty())
 }
 
 async fn verify_remote_bearer(
+    http_client: &reqwest::Client,
     auth_verify_url: &str,
     token: &str,
     request: &Value,
 ) -> Result<(), Response> {
-    let response = reqwest::Client::new()
+    let response = http_client
         .post(auth_verify_url)
         .bearer_auth(token)
         .json(&build_auth_verification_body(request))
         .send()
         .await
         .map_err(|err| {
-            json_error(
-                StatusCode::BAD_GATEWAY,
-                format!("auth verifier failed: {err}"),
-            )
+            tracing::warn!("MCP auth verifier request failed: {err}");
+            json_error(StatusCode::BAD_GATEWAY, "auth verifier unavailable")
         })?;
     let status = response.status();
 
@@ -294,7 +305,7 @@ fn validate_http_options(options: &HttpServerOptions) -> Result<(), String> {
         return Ok(());
     }
     Err(
-        "refusing to expose unauthenticated gsd-browser MCP on a non-loopback host; set GSD_BROWSER_MCP_AUTH_TOKEN, pass --auth-token, or explicitly pass --no-auth"
+        "refusing to expose unauthenticated gsd-browser MCP on a non-loopback host; set GSD_BROWSER_MCP_AUTH_TOKEN, pass --auth-token, pass --auth-verify-url/set GSD_BROWSER_MCP_AUTH_VERIFY_URL, or explicitly pass --no-auth"
             .to_string(),
     )
 }
@@ -401,8 +412,9 @@ mod tests {
     #[tokio::test]
     async fn bearer_auth_header_is_required_when_token_configured() {
         let mut headers = HeaderMap::new();
+        let http_client = reqwest::Client::new();
         assert!(
-            authorize_http_request(&headers, Some("secret"), None, &json!({}))
+            authorize_http_request(&headers, Some("secret"), None, &http_client, &json!({}))
                 .await
                 .is_err()
         );
@@ -411,7 +423,7 @@ mod tests {
             header::AUTHORIZATION,
             header::HeaderValue::from_static("Bearer secret"),
         );
-        authorize_http_request(&headers, Some("secret"), None, &json!({}))
+        authorize_http_request(&headers, Some("secret"), None, &http_client, &json!({}))
             .await
             .expect("valid bearer token");
     }
@@ -1548,7 +1560,11 @@ fn build_tool_list() -> Vec<Value> {
                     "bundlePath": { "type": "string", "description": "Filesystem path to exported bundle dir (with manifest.json + events.jsonl)" },
                     "output": { "type": "string", "description": "Output .spec.ts path (defaults co-located with bundle when possible)" },
                     "session": { "type": "string" }
-                }
+                },
+                "anyOf": [
+                    { "required": ["recordingId"] },
+                    { "required": ["bundlePath"] }
+                ]
             }
         }),
         json!({
