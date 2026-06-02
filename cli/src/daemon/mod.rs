@@ -641,9 +641,22 @@ async fn run_daemon(
     ));
     logs::spawn_console_listener(&page, daemon_logs.console.clone()).await;
     logs::spawn_exception_listener(&page, daemon_logs.console.clone()).await;
-    logs::spawn_network_listener(&page, daemon_logs.network.clone()).await;
+    logs::spawn_network_listener(
+        &page,
+        daemon_logs.network.clone(),
+        daemon_logs.current_recording_seq.clone(),
+    )
+    .await;
     logs::spawn_dialog_listener(&page, daemon_logs.dialog.clone()).await;
     info!("[gsd-browser-daemon] event listeners spawned");
+
+    // PR-2 wiring (per-action network slicing): give RecordingStore the tagger (for listener stamping)
+    // and the network buffer (for slice extraction at event emission time in record_event).
+    {
+        let mut rec = daemon_state.recordings.lock().await;
+        rec.set_network_tagger(daemon_logs.current_recording_seq.clone());
+        rec.set_network_buffer(daemon_logs.network.clone());
+    }
 
     // Register initial page in the PageRegistry
     {
@@ -900,6 +913,16 @@ async fn dispatch(
         diff.before = Some(before_state);
     }
 
+    // PR-2: arm the tagger *before* dispatch_inner (and settle) and *claim* the seq.
+    // prepare_for_next_recorded_event now advances next_seq and stores pending_seq.
+    // This tags networks during the action and guarantees monotonic seqs even under pause
+    // interleaving (no reuse/pollution for replay artifacts). Return value captured for
+    // future use / audit (the store's pending_seq is the source of truth).
+    if record_timeline {
+        let mut recs = state.recordings.lock().await;
+        let _claimed_seq = recs.prepare_for_next_recorded_event();
+    }
+
     let response = dispatch_inner(req, page, logs, state, browser).await;
 
     // Finish action in timeline
@@ -985,7 +1008,7 @@ async fn dispatch(
                 .take(5)
                 .map(|e| serde_json::json!({"url": e.url, "status": e.status, "method": e.method, "resourceType": e.resource_type}))
                 .collect();
-            serde_json::json!({ "recent": snaps, "tagging": "per-action-for-replayable-evidence" })
+            serde_json::json!({ "recent": snaps, "tagging": "per-action-for-replayable-evidence", "note": "compat snapshot (PR-1); prefer networkSlice (PR-2) in the emitted event for authoritative per-action tagged requests" })
         };
 
         // Late (post-dispatch_inner) session meta capture — serves the "after" side.

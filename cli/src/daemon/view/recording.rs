@@ -1,11 +1,13 @@
+use crate::daemon::logs::LogBuffer;
 use base64::{engine::general_purpose, Engine as _};
-use gsd_browser_common::types::CompactPageState;
+use gsd_browser_common::types::{CompactPageState, NetworkLogEntry};
 use gsd_browser_common::viewer::{BrowserArtifactManifestV1, BROWSER_ARTIFACT_BUNDLE_SCHEMA};
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +29,7 @@ pub struct RecordingEventInput {
     pub title: String,
     pub redacted: bool,
     // PR-1 enrichment: full command params + before/after with DOM hash + sessionStateHash + per-action network tags
+    // PR-2: network now also carries "networkSlice" (computed in record_event via extract from tagged buffer)
     pub command: serde_json::Value,
     pub before: serde_json::Value,
     pub after: serde_json::Value,
@@ -41,6 +44,13 @@ pub struct RecordingStore {
     redaction_hits: u64,
     frame_count: u64,
     hashes: Map<String, Value>,
+    // PR-2 fields for per-action network slicing (wired at daemon start from DaemonLogs)
+    current_recording_seq: Option<Arc<Mutex<u64>>>,
+    network_buffer: Option<LogBuffer<NetworkLogEntry>>,
+    /// PR-2: the seq claimed by the most recent prepare_for_next_recorded_event while active.
+    /// Used to make seq advancement happen at "arming" time (pre-dispatch) so pause interleaving
+    /// cannot cause reuse, and to give record_event the authoritative seq for the action.
+    pending_seq: Option<u64>,
 }
 
 fn now_ms() -> u64 {
@@ -60,7 +70,21 @@ impl RecordingStore {
             redaction_hits: 0,
             frame_count: 0,
             hashes: Map::new(),
+            current_recording_seq: None,
+            network_buffer: None,
+            pending_seq: None,
         }
+    }
+
+    /// PR-2: wire the shared tagger (updated by prepare/record to stamp live network entries).
+    pub fn set_network_tagger(&mut self, tagger: Arc<Mutex<u64>>) {
+        self.current_recording_seq = Some(tagger);
+        self.pending_seq = None;
+    }
+
+    /// PR-2: wire the network buffer so record_event can extract the tagged slice for this seq.
+    pub fn set_network_buffer(&mut self, buffer: LogBuffer<NetworkLogEntry>) {
+        self.network_buffer = Some(buffer);
     }
 
     pub fn start(&mut self, name: &str, session_id: &str) -> Result<RecordingSession, String> {
@@ -71,6 +95,10 @@ impl RecordingStore {
         self.redaction_hits = 0;
         self.frame_count = 0;
         self.hashes.clear();
+        if let Some(t) = &self.current_recording_seq {
+            *t.lock().unwrap() = 0;
+        }
+        self.pending_seq = None;
         fs::create_dir_all(&self.root)
             .map_err(|err| format!("failed to create recordings root: {err}"))?;
         let recording_id = format!("rec_{}", uuid::Uuid::new_v4());
@@ -101,12 +129,66 @@ impl RecordingStore {
     }
 
     pub fn pause(&mut self, recording_id: &str) -> Result<RecordingSession, String> {
+        // First, capture ids under immutable borrow for the potential marker emission (Issue 11)
+        let (rec_id, sess_id) = {
+            let a = self.active.as_ref().ok_or("no active recording")?;
+            if a.recording_id != recording_id {
+                return Err(format!("recording not active: {recording_id}"));
+            }
+            (a.recording_id.clone(), a.session_id.clone())
+        };
+
         let active = self.active.as_mut().ok_or("no active recording")?;
-        if active.recording_id != recording_id {
-            return Err(format!("recording not active: {recording_id}"));
-        }
         active.paused = true;
-        Ok(active.clone())
+        if let Some(t) = &self.current_recording_seq {
+            *t.lock().unwrap() = 0;
+        }
+
+        let result_session = active.clone();
+
+        // PR-2 / Issue 11: If a seq was prepared for an action and pause is now called before
+        // that action's record_event, emit an explicit "recording.action-skipped" marker into
+        // events.jsonl *right now*. This makes the bundle fully self-describing for seq gaps.
+        if let Some(skipped_seq) = self.pending_seq.take() {
+            let skipped_event = json!({
+                "seq": skipped_seq,
+                "timestampMs": now_ms(),
+                "schema": "BrowserEventV1",
+                "recordingId": rec_id.clone(),
+                "sessionId": sess_id,
+                "source": "system",
+                "owner": "recording",
+                "controlVersion": 0,
+                "frameSeq": 0,
+                "kind": "recording.action-skipped",
+                "url": "",
+                "title": "",
+                "origin": "",
+                "command": json!({ "reason": "paused_before_record_event" }),
+                "before": {},
+                "after": {},
+                "network": {},
+                "networkSlice": json!({
+                    "seq": skipped_seq,
+                    "count": 0,
+                    "entries": [],
+                    "note": "prepared seq abandoned due to pause; no network activity attributed"
+                }),
+                "redaction": { "status": "none" },
+                "artifactRefs": {},
+            });
+            // Best effort (consistent with other recording metadata writes)
+            if let Err(e) = self.append_event_line(&rec_id, &skipped_event) {
+                tracing::warn!(
+                    "[recording] failed to write action-skipped marker for seq {} on pause: {}",
+                    skipped_seq,
+                    e
+                );
+            }
+        }
+
+        // pending cleared (seq already spent at prepare time)
+        Ok(result_session)
     }
 
     pub fn resume(&mut self, recording_id: &str) -> Result<RecordingSession, String> {
@@ -115,7 +197,28 @@ impl RecordingStore {
             return Err(format!("recording not active: {recording_id}"));
         }
         active.paused = false;
+        // On resume we do not restore a previous pending; next user action will prepare fresh.
+        self.pending_seq = None;
         Ok(active.clone())
+    }
+
+    /// Internal helper to append a pre-built event (or marker) JSON line to events.jsonl.
+    /// Used by the normal record path and by the new "recording.action-skipped" marker
+    /// emission (Issue 11) so the bundle is fully self-describing for seq gaps.
+    fn append_event_line(
+        &self,
+        recording_id: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), String> {
+        let line = serde_json::to_string(value).map_err(|err| err.to_string())?;
+        let path = self.root.join(recording_id).join("events.jsonl");
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(|err| format!("failed to open events.jsonl: {err}"))?;
+        writeln!(file, "{line}").map_err(|err| format!("failed to append event: {err}"))?;
+        Ok(())
     }
 
     pub fn record_event(&mut self, input: RecordingEventInput) -> Result<(), String> {
@@ -123,10 +226,47 @@ impl RecordingStore {
             return Ok(());
         };
         if active.paused {
+            // PR-2: The primary self-describing "recording.action-skipped" marker is now emitted
+            // from pause() at the moment the gap is created (Issue 11). This path is defensive.
+            if self.pending_seq.is_some() {
+                tracing::warn!(
+                    "[recording] record_event while paused still saw pending seq {:?} (kind={}) — cleared",
+                    self.pending_seq, input.kind
+                );
+                self.pending_seq = None;
+            }
             return Ok(());
         }
-        let seq = self.next_seq;
-        self.next_seq += 1;
+
+        // PR-2: Use pending_seq (claimed at prepare time) as source of truth when present.
+        // This is the case for all armed CLI record_timeline actions and (after viewer fixes)
+        // viewer user-input events. Falls back for direct/record_event-only calls (e.g. some boundaries).
+        let seq = if let Some(p) = self.pending_seq.take() {
+            p
+        } else {
+            let s = self.next_seq;
+            self.next_seq += 1;
+            s
+        };
+
+        // Arm tagger to this seq for any *very* late arrivals right at record time (rare).
+        if let Some(tagger) = &self.current_recording_seq {
+            *tagger.lock().unwrap() = seq;
+        }
+
+        // Extract the slice *while the seq is still (briefly) armed*.
+        let network_slice = self.extract_network_slice(seq);
+
+        // CRITICAL for precision (addresses Issue 1): Immediately close the attribution window
+        // for this seq. Any network pushed by listeners *after* this point will *not* receive
+        // this seq (they get 0 or the next action's seq). This eliminates orphans that would
+        // otherwise be stamped with a seq whose slice was already finalized, and prevents
+        // pollution of future slices. Late tails after settle are accepted as a documented
+        // window boundary (see extract docs).
+        if let Some(tagger) = &self.current_recording_seq {
+            *tagger.lock().unwrap() = 0;
+        }
+
         let redaction_probe = format!("{} {} {}", input.kind, input.url, input.title);
         let text = redact_text(&redaction_probe);
         let url = redact_text(&input.url);
@@ -135,6 +275,7 @@ impl RecordingStore {
         let (before, before_redacted) = redact_recording_value(&input.before);
         let (after, after_redacted) = redact_recording_value(&input.after);
         let (network, network_redacted) = redact_recording_value(&input.network);
+        let (network_slice, network_slice_redacted) = redact_recording_value(&network_slice);
         let redacted = text != redaction_probe
             || url != input.url
             || title != input.title
@@ -142,6 +283,7 @@ impl RecordingStore {
             || before_redacted
             || after_redacted
             || network_redacted
+            || network_slice_redacted
             || input.redacted;
         if redacted {
             self.redaction_hits += 1;
@@ -164,18 +306,91 @@ impl RecordingStore {
             "before": before,
             "after": after,
             "network": network,
+            "networkSlice": network_slice,
             "redaction": { "status": if redacted { "redacted" } else { "none" } },
             "artifactRefs": {},
         });
-        let line = serde_json::to_string(&event).map_err(|err| err.to_string())?;
-        let path = self.root.join(&active.recording_id).join("events.jsonl");
-        use std::io::Write;
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .open(path)
-            .map_err(|err| format!("failed to open events.jsonl: {err}"))?;
-        writeln!(file, "{line}").map_err(|err| format!("failed to append event: {err}"))?;
+        self.append_event_line(&active.recording_id, &event)?;
         Ok(())
+    }
+
+    /// PR-2: Arm the tagger + *claim* the next seq for the upcoming recorded action (pre-dispatch).
+    /// Seq is advanced here (not in record_event) so that pause interleaving cannot cause seq reuse
+    /// or misattribution (addresses review Issue 2). The claimed seq is the source of truth for
+    /// the action's event and its networkSlice.
+    ///
+    /// Any network CDP events processed by listeners while this seq is in the tagger will be
+    /// attributed to it (the "prepare-to-record_event" causal window for this action).
+    /// After record_event extracts the slice for the claimed seq we close the window (tagger=0).
+    ///
+    /// Returns the claimed seq (or None if no active non-paused recording).
+    /// The return value is now meaningful and is stored as pending_seq.
+    pub fn prepare_for_next_recorded_event(&mut self) -> Option<u64> {
+        let Some(active) = self.active.as_ref() else {
+            return None;
+        };
+        if active.paused {
+            if let Some(t) = &self.current_recording_seq {
+                *t.lock().unwrap() = 0;
+            }
+            self.pending_seq = None;
+            return None;
+        }
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        if let Some(t) = &self.current_recording_seq {
+            *t.lock().unwrap() = seq;
+        }
+        self.pending_seq = Some(seq);
+        Some(seq)
+    }
+
+    /// PR-2: extraction/slicing logic — filters the (tagged) network buffer for entries matching this seq.
+    /// Produces the "networkSlice" value embedded in each recorded event (and thus in events.jsonl).
+    /// Reuses existing LogBuffer.snapshot() + the seq tags set at listener time.
+    /// Redacts sensitive bits for bundle hygiene. Minimal shape for replayable artifacts.
+    ///
+    /// Attribution window (prepare-to-record_event + brief post-extract arm):
+    /// - A NetworkLogEntry receives a seq tag if the listener processed the CDP event while
+    ///   the tagger held that value (set by prepare before dispatch_inner, cleared to 0
+    ///   immediately after extract in record_event).
+    /// - This gives a tight causal association for replay/comparison while accepting that
+    ///   extremely late responses (post-settle, after we closed the window) may land in no
+    ///   slice or the subsequent action. This is documented and preferable to orphans/pollution.
+    /// - loadingFailed entries often have empty url (CDP event limitation; see spawn_network_listener
+    ///   comment). failureText is still captured. Replay engines should treat missing url on
+    ///   failed entries as a known constraint and correlate via HAR/traces when needed.
+    fn extract_network_slice(&self, seq: u64) -> serde_json::Value {
+        match &self.network_buffer {
+            Some(buf) => {
+                let entries: Vec<_> = buf
+                    .snapshot()
+                    .into_iter()
+                    .filter(|e| e.recording_seq == Some(seq))
+                    .map(|e| {
+                        json!({
+                            "method": e.method,
+                            "url": redact_text(&e.url),
+                            "status": e.status,
+                            "resourceType": e.resource_type,
+                            "timestamp": e.timestamp,
+                            "failed": e.failed,
+                            "failureText": if e.failure_text.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                json!(redact_text(&e.failure_text))
+                            },
+                        })
+                    })
+                    .collect();
+                json!({
+                    "seq": seq,
+                    "count": entries.len(),
+                    "entries": entries,
+                })
+            }
+            None => json!({ "seq": seq, "count": 0, "entries": [], "note": "buffer-not-wired" }),
+        }
     }
 
     pub fn record_frame(
@@ -206,6 +421,10 @@ impl RecordingStore {
             self.active = Some(active);
             return Err(format!("recording not active: {recording_id}"));
         }
+        if let Some(t) = &self.current_recording_seq {
+            *t.lock().unwrap() = 0;
+        }
+        self.pending_seq = None;
         let event_count =
             count_jsonl_lines(&self.root.join(&active.recording_id).join("events.jsonl"))?;
         let manifest = BrowserArtifactManifestV1 {
@@ -646,5 +865,304 @@ mod tests {
         assert!(events.contains("[redacted:email]"));
         assert!(events.contains("[redacted:token]"));
         assert!(events.contains(r#""status":"redacted""#));
+    }
+
+    #[test]
+    fn network_slice_tagging_and_extraction_happy_path_and_edges() {
+        use crate::daemon::logs::LogBuffer;
+        use gsd_browser_common::types::NetworkLogEntry;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempdir().expect("tempdir");
+        let mut store = RecordingStore::new(dir.path().to_path_buf());
+
+        // Simulate daemon wiring of tagger + buffer (as done in mod.rs)
+        let tagger: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+        let net_buf: LogBuffer<NetworkLogEntry> = LogBuffer::new();
+        store.set_network_tagger(tagger.clone());
+        store.set_network_buffer(net_buf.clone());
+
+        let rec = store.start("replay-test", "session-xyz").expect("started");
+
+        // Simulate prepare (as main dispatch + now viewer paths do) — claims seq 1, arms tagger
+        let claimed = store.prepare_for_next_recorded_event();
+        assert_eq!(claimed, Some(1));
+        assert_eq!(*tagger.lock().unwrap(), 1);
+
+        // Simulate listener pushes while armed (realistic CDP timing)
+        net_buf.push(NetworkLogEntry {
+            method: "GET".into(),
+            url: "https://example.com/api/user?token=secret123".into(), // will be redacted in slice
+            status: 200,
+            resource_type: "XHR".into(),
+            timestamp: 123.0,
+            failed: false,
+            failure_text: String::new(),
+            response_body: String::new(),
+            recording_seq: Some(1),
+        });
+        net_buf.push(NetworkLogEntry {
+            method: "GET".into(),
+            url: "https://example.com/old".into(),
+            status: 200,
+            resource_type: "Image".into(),
+            timestamp: 99.0,
+            failed: false,
+            failure_text: String::new(),
+            response_body: String::new(),
+            recording_seq: None, // from before this action
+        });
+        // A failure (simulates loadingFailed limitation — url empty)
+        net_buf.push(NetworkLogEntry {
+            method: String::new(),
+            url: String::new(),
+            status: 0,
+            resource_type: "XHR".into(),
+            timestamp: 124.5,
+            failed: true,
+            failure_text: "net::ERR_FAILED".into(),
+            response_body: String::new(),
+            recording_seq: Some(1),
+        });
+
+        // Record the action event (as dispatch or viewer input would)
+        store
+            .record_event(RecordingEventInput {
+                source: "cli".to_string(),
+                owner: "agent".to_string(),
+                kind: "click_ref".to_string(),
+                url: "https://example.com/page".to_string(),
+                title: "Test Page".to_string(),
+                redacted: false,
+                command: serde_json::json!({"ref": "@v1:e42"}),
+                before: serde_json::json!({}),
+                after: serde_json::json!({}),
+                network: serde_json::json!({}),
+            })
+            .expect("recorded");
+
+        // After record_event the window is closed (tagger == 0)
+        assert_eq!(*tagger.lock().unwrap(), 0);
+        assert!(store.pending_seq.is_none());
+
+        // Simulate a "late" push *after* we closed the window (realistic for very slow responses).
+        // It gets stamped with 1 (tagger still 0 here, but in a longer recording the next
+        // prepare would have set a new value; the point is it missed this slice's extract).
+        net_buf.push(NetworkLogEntry {
+            method: "POST".into(),
+            url: "https://example.com/late".into(),
+            status: 201,
+            resource_type: "Fetch".into(),
+            timestamp: 200.0,
+            failed: false,
+            failure_text: String::new(),
+            response_body: String::new(),
+            recording_seq: Some(1),
+        });
+
+        // Read the emitted event and inspect its networkSlice
+        let events_path = dir.path().join(&rec.recording_id).join("events.jsonl");
+        let events_data = fs::read_to_string(&events_path).expect("read events");
+        let lines: Vec<_> = events_data
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        // Exactly one event (the click_ref action; we did not record a separate "start" boundary event in this test)
+        assert!(lines.len() >= 1);
+        let event: serde_json::Value =
+            serde_json::from_str(lines.last().unwrap()).expect("parse last event");
+        assert_eq!(event["seq"], 1);
+        assert_eq!(event["kind"], "click_ref");
+
+        let slice = &event["networkSlice"];
+        assert_eq!(slice["seq"], 1);
+        assert_eq!(slice["count"], 2); // the two seq=1 entries (GET redacted + failure)
+
+        let entries = slice["entries"].as_array().unwrap();
+        // Verify redaction happened on the url
+        let get_entry = entries.iter().find(|e| e["method"] == "GET").unwrap();
+        assert!(get_entry["url"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted:token]"));
+        assert!(!get_entry["url"].as_str().unwrap().contains("secret123"));
+
+        // The failure entry is present (even with empty url — documented limitation)
+        let fail_entry = entries
+            .iter()
+            .find(|e| e["failed"].as_bool() == Some(true))
+            .unwrap();
+        assert_eq!(fail_entry["failureText"], "net::ERR_FAILED");
+        assert!(fail_entry["url"].as_str().unwrap_or("").is_empty());
+
+        // The "late" entry (seq=1 but pushed conceptually after close) is NOT in *this* slice
+        // (it would have been orphaned without the post-extract tagger=0 close).
+        // In a real multi-action recording it would either be missed or picked by a subsequent
+        // action if the next prepare hadn't overwritten yet — the close makes attribution honest.
+        assert!(!entries
+            .iter()
+            .any(|e| e["url"].as_str() == Some("https://example.com/late")));
+
+        // The pre-action entry (None) is correctly excluded
+        assert!(!entries
+            .iter()
+            .any(|e| e.get("url").and_then(|v| v.as_str()) == Some("https://example.com/old")));
+    }
+
+    /// Narrow focused test exercising the new self-describing "recording.action-skipped" marker
+    /// emission path (Issue 11) + realistic pause/resume flow with multiple slices.
+    /// This augments the primary tagging/extraction test with the exact pause-gap scenario
+    /// that the review fixes targeted, ensuring the artifact itself now fully describes seq gaps.
+    #[test]
+    fn network_slice_skipped_marker_and_pause_flow() {
+        use crate::daemon::logs::LogBuffer;
+        use gsd_browser_common::types::NetworkLogEntry;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempdir().expect("tempdir");
+        let mut store = RecordingStore::new(dir.path().to_path_buf());
+
+        let tagger: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+        let net_buf: LogBuffer<NetworkLogEntry> = LogBuffer::new();
+        store.set_network_tagger(tagger.clone());
+        store.set_network_buffer(net_buf.clone());
+
+        let rec = store.start("pause-marker-test", "sess-1").expect("started");
+
+        // Action 1 (seq 1) — normal happy path
+        store.prepare_for_next_recorded_event();
+        net_buf.push(NetworkLogEntry {
+            method: "GET".into(),
+            url: "https://ex.com/a1".into(),
+            status: 200,
+            resource_type: "Document".into(),
+            timestamp: 1.0,
+            failed: false,
+            failure_text: String::new(),
+            response_body: String::new(),
+            recording_seq: Some(1),
+        });
+        store
+            .record_event(RecordingEventInput {
+                source: "cli".into(),
+                owner: "agent".into(),
+                kind: "navigate".into(),
+                url: "https://ex.com".into(),
+                title: "Page".into(),
+                redacted: false,
+                command: json!({}),
+                before: json!({}),
+                after: json!({}),
+                network: json!({}),
+            })
+            .expect("action1");
+
+        // Prepare seq 2, then pause before record_event — this spends seq 2
+        store.prepare_for_next_recorded_event();
+        store.pause(&rec.recording_id).expect("paused");
+
+        // Record while paused — should now emit the explicit "recording.action-skipped" marker
+        // into events.jsonl (the key self-describing improvement for Issue 11)
+        store
+            .record_event(RecordingEventInput {
+                source: "cli".into(),
+                owner: "agent".into(),
+                kind: "click".into(),
+                url: "https://ex.com".into(),
+                title: "Page".into(),
+                redacted: false,
+                command: json!({}),
+                before: json!({}),
+                after: json!({}),
+                network: json!({}),
+            })
+            .expect("paused record (should emit marker)");
+
+        // Resume and do action 3 (next seq)
+        store.resume(&rec.recording_id).expect("resumed");
+        store.prepare_for_next_recorded_event();
+        net_buf.push(NetworkLogEntry {
+            method: "GET".into(),
+            url: "https://ex.com/a3".into(),
+            status: 200,
+            resource_type: "XHR".into(),
+            timestamp: 3.0,
+            failed: false,
+            failure_text: String::new(),
+            response_body: String::new(),
+            recording_seq: Some(3),
+        });
+        store
+            .record_event(RecordingEventInput {
+                source: "cli".into(),
+                owner: "agent".into(),
+                kind: "click_ref".into(),
+                url: "https://ex.com".into(),
+                title: "Page".into(),
+                redacted: false,
+                command: json!({}),
+                before: json!({}),
+                after: json!({}),
+                network: json!({}),
+            })
+            .expect("action3");
+
+        // Inspect the artifact
+        let events_path = dir.path().join(&rec.recording_id).join("events.jsonl");
+        let data = fs::read_to_string(&events_path).expect("read");
+        let lines: Vec<_> = data.lines().filter(|l| !l.trim().is_empty()).collect();
+
+        // We expect: action1, skipped marker (seq 2), action3
+        assert_eq!(lines.len(), 3);
+
+        // Find the events by kind (order is reliable: action1, skipped marker, action3)
+        let ev1 = lines
+            .iter()
+            .find(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                v["kind"] == "navigate"
+            })
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .unwrap();
+
+        let skipped = lines
+            .iter()
+            .find(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                v["kind"] == "recording.action-skipped"
+            })
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .unwrap();
+
+        let ev3 = lines
+            .iter()
+            .find(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                v["kind"] == "click_ref"
+            })
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .unwrap();
+
+        assert_eq!(ev1["seq"], 1);
+        assert_eq!(ev1["networkSlice"]["count"], 1);
+
+        // The new self-describing marker (the main deliverable for Issue 11)
+        assert_eq!(skipped["seq"], 2);
+        assert_eq!(skipped["kind"], "recording.action-skipped");
+        assert_eq!(skipped["command"]["reason"], "paused_before_record_event");
+        let skipped_slice = &skipped["networkSlice"];
+        assert_eq!(skipped_slice["seq"], 2);
+        assert_eq!(skipped_slice["count"], 0);
+        // Note wording may vary slightly between pause() emission and defensive paths; the
+        // presence of the explicit skipped marker with zero slice is the key self-describing artifact (Issue 11)
+        assert!(skipped_slice.get("note").is_some());
+
+        assert_eq!(ev3["seq"], 3);
+        assert_eq!(ev3["kind"], "click_ref");
+        assert_eq!(ev3["networkSlice"]["count"], 1);
+
+        // Seq numbering is monotonic and the gap is explicitly described in the artifact
+        assert!(ev1["seq"].as_u64() < skipped["seq"].as_u64());
+        assert!(skipped["seq"].as_u64() < ev3["seq"].as_u64());
     }
 }

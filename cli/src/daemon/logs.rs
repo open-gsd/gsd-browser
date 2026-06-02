@@ -66,6 +66,9 @@ pub struct DaemonLogs {
     pub console: LogBuffer<ConsoleLogEntry>,
     pub network: LogBuffer<NetworkLogEntry>,
     pub dialog: LogBuffer<DialogLogEntry>,
+    /// PR-2: current recording seq (set by RecordingStore on prepare/record_event).
+    /// Network listener reads it (under lock) to tag pushed entries for per-action slicing.
+    pub current_recording_seq: Arc<Mutex<u64>>,
 }
 
 impl DaemonLogs {
@@ -74,6 +77,7 @@ impl DaemonLogs {
             console: LogBuffer::new(),
             network: LogBuffer::new(),
             dialog: LogBuffer::new(),
+            current_recording_seq: Arc::new(Mutex::new(0)),
         }
     }
 }
@@ -168,9 +172,14 @@ pub async fn spawn_exception_listener(page: &Page, buffer: LogBuffer<ConsoleLogE
 
 /// Spawn background tasks that listen for `Network.responseReceived` and
 /// `Network.loadingFailed` events.
-pub async fn spawn_network_listener(page: &Page, buffer: LogBuffer<NetworkLogEntry>) {
+pub async fn spawn_network_listener(
+    page: &Page,
+    buffer: LogBuffer<NetworkLogEntry>,
+    current_recording_seq: Arc<Mutex<u64>>,
+) {
     // Listener for successful responses
     let buffer_resp = buffer.clone();
+    let tagger_resp = current_recording_seq.clone();
     let mut resp_stream = match page.event_listener::<EventResponseReceived>().await {
         Ok(s) => s,
         Err(e) => {
@@ -199,6 +208,17 @@ pub async fn spawn_network_listener(page: &Page, buffer: LogBuffer<NetworkLogEnt
                 })
                 .unwrap_or_else(|| "GET".to_string());
 
+            let recording_seq = {
+                // unwrap safe: follows exact LogBuffer precedent (push/snapshot/drain);
+                // critical section is a few instructions, never held across await or in
+                // re-entrant code. Poison would be fatal to the listener task anyway.
+                let s = *tagger_resp.lock().unwrap();
+                if s > 0 {
+                    Some(s)
+                } else {
+                    None
+                }
+            };
             let entry = NetworkLogEntry {
                 method,
                 url: response.url.clone(),
@@ -208,6 +228,7 @@ pub async fn spawn_network_listener(page: &Page, buffer: LogBuffer<NetworkLogEnt
                 failed: status >= 400,
                 failure_text: String::new(),
                 response_body: String::new(),
+                recording_seq,
             };
             buffer_resp.push(entry);
         }
@@ -216,6 +237,7 @@ pub async fn spawn_network_listener(page: &Page, buffer: LogBuffer<NetworkLogEnt
 
     // Listener for failed requests
     let buffer_fail = buffer.clone();
+    let tagger_fail = current_recording_seq.clone();
     let mut fail_stream = match page.event_listener::<EventLoadingFailed>().await {
         Ok(s) => s,
         Err(e) => {
@@ -230,15 +252,30 @@ pub async fn spawn_network_listener(page: &Page, buffer: LogBuffer<NetworkLogEnt
         while let Some(event) = fail_stream.next().await {
             let resource_type = format!("{:?}", event.r#type);
 
+            let recording_seq = {
+                // unwrap safe: follows exact LogBuffer precedent (push/snapshot/drain);
+                // critical section is a few instructions, never held across await or in
+                // re-entrant code. Poison would be fatal to the listener task anyway.
+                let s = *tagger_fail.lock().unwrap();
+                if s > 0 {
+                    Some(s)
+                } else {
+                    None
+                }
+            };
             let entry = NetworkLogEntry {
                 method: String::new(),
-                url: String::new(), // loadingFailed doesn't include URL, only requestId
+                url: String::new(), // loadingFailed doesn't include URL (or requestId in this event shape).
+                // This is a pre-existing CDP limitation. Slices will contain
+                // failureText + resourceType + timestamp + recording_seq for such
+                // entries; url will be empty. See extract_network_slice docs.
                 status: 0,
                 resource_type,
                 timestamp: *event.timestamp.inner(),
                 failed: true,
                 failure_text: event.error_text.clone(),
                 response_body: String::new(),
+                recording_seq,
             };
             buffer_fail.push(entry);
         }

@@ -174,6 +174,12 @@ pub async fn handle_viewer_command(
                     message,
                 )
             })?;
+            {
+                let mut recordings = state.daemon_state.recordings.lock().await;
+                // Arm after authorization but before page input so networkSlice captures
+                // requests caused by live-viewer clicks/types.
+                let _ = recordings.prepare_for_next_recorded_event();
+            }
             crate::daemon::input_dispatch::dispatch_user_input(&page, &state.daemon_state, &input)
                 .await
                 .map_err(|message| {
