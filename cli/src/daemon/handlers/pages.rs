@@ -6,7 +6,7 @@
 
 use crate::daemon::state::DaemonState;
 use chromiumoxide::cdp::browser_protocol::target::{
-    EventTargetCreated, EventTargetDestroyed, EventTargetInfoChanged, GetTargetsParams,
+    EventTargetCreated, EventTargetDestroyed, EventTargetInfoChanged,
 };
 use chromiumoxide::Browser;
 use chromiumoxide::Page;
@@ -276,24 +276,30 @@ pub async fn spawn_core_target_tracker(browser: Arc<Mutex<Browser>>, state: Arc<
         .await
         .ok();
 
-    // One-shot discovery of targets that already exist at daemon startup
-    // (especially important for --cdp-url / attached mode where the user may have
-    // many tabs already open). We register what we can attach to.
-    if let Ok(resp) = browser
-        .lock()
-        .await
-        .execute(GetTargetsParams::default())
-        .await
-    {
-        for ti in resp.result.target_infos {
-            if ti.r#type != "page" {
+    // One-shot discovery of pages already initialized by daemon startup. Do
+    // not call fetch_targets() here: attached-mode startup uses it to populate
+    // chromiumoxide's target registry, and fetching the same external target a
+    // second time can replace the target behind the active Page handle.
+    if let Ok(existing_pages) = browser.lock().await.pages().await {
+        for page in existing_pages {
+            let current_url = match page.url().await {
+                Ok(Some(url)) if !url.is_empty() => url,
+                Ok(_) => {
+                    debug!(
+                        "[pages] tracker skipped pre-existing page with empty URL: {}",
+                        page.target_id().as_ref()
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    warn!("[pages] tracker skipped pre-existing page with unreadable URL: {e}");
+                    continue;
+                }
+            };
+            if current_url.starts_with("chrome://") || current_url.starts_with("devtools://") {
                 continue;
             }
-            let url = ti.url.as_str();
-            if url.starts_with("chrome://") || url.starts_with("devtools://") {
-                continue;
-            }
-            let target_id = ti.target_id.as_ref().to_string();
+            let target_id = page.target_id().as_ref().to_string();
 
             if state
                 .pages
@@ -305,43 +311,34 @@ pub async fn spawn_core_target_tracker(browser: Arc<Mutex<Browser>>, state: Arc<
                 continue;
             }
 
-            // Best-effort attach for pre-existing targets
-            if let Ok(page) = browser.lock().await.get_page(ti.target_id.clone()).await {
-                crate::daemon::set_default_viewport(&page).await;
-                crate::daemon::helpers::inject_helpers(&page).await;
-                crate::daemon::settle::ensure_mutation_counter(&page).await;
+            crate::daemon::set_default_viewport(&page).await;
+            crate::daemon::helpers::inject_helpers(&page).await;
+            crate::daemon::settle::ensure_mutation_counter(&page).await;
 
-                let current_url = page
-                    .url()
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| url.to_string());
-                let title = page
-                    .evaluate("document.title")
-                    .await
-                    .ok()
-                    .and_then(|v| v.into_value::<String>().ok())
-                    .unwrap_or_default();
+            let title = page
+                .evaluate("document.title")
+                .await
+                .ok()
+                .and_then(|v| v.into_value::<String>().ok())
+                .unwrap_or_default();
 
-                let page_arc = Arc::new(page);
-                let assigned = {
-                    let mut reg = state.pages.lock().unwrap();
-                    if reg.find_by_target_id(&target_id).is_some() {
-                        None
-                    } else {
-                        let id = reg.register(page_arc.clone(), title.clone(), current_url.clone());
-                        // During initial discovery we register everything we can see so list-pages
-                        // is complete, but we deliberately do NOT steal the active page from the
-                        // one the daemon just created/attached as its primary control surface.
-                        // Agents can use switch_page or the new tab will become active on future
-                        // targetCreated events if desired.
-                        Some(id)
-                    }
-                };
-                if let Some(id) = assigned {
-                    info!("[pages] tracker discovered pre-existing page {id}: {current_url}");
+            let page_arc = Arc::new(page);
+            let assigned = {
+                let mut reg = state.pages.lock().unwrap();
+                if reg.find_by_target_id(&target_id).is_some() {
+                    None
+                } else {
+                    let id = reg.register(page_arc.clone(), title.clone(), current_url.clone());
+                    // During initial discovery we register everything we can see so list-pages
+                    // is complete, but we deliberately do NOT steal the active page from the
+                    // one the daemon just created/attached as its primary control surface.
+                    // Agents can use switch_page or the new tab will become active on future
+                    // targetCreated events if desired.
+                    Some(id)
                 }
+            };
+            if let Some(id) = assigned {
+                info!("[pages] tracker discovered pre-existing page {id}: {current_url}");
             }
         }
     }

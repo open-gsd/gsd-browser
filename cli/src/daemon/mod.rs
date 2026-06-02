@@ -250,6 +250,29 @@ async fn apply_stealth_patches(page: &Page, _config: &Config) {
     info!("[gsd-browser-daemon] stealth patches complete (realistic UA/hardware/locale + CDP signals)");
 }
 
+fn is_agent_usable_page_url(url: &str) -> bool {
+    !(url.is_empty() || url.starts_with("chrome://") || url.starts_with("devtools://"))
+}
+
+async fn select_existing_attached_page(pages: Vec<Page>) -> Option<Page> {
+    let mut blank_fallback = None;
+
+    for page in pages {
+        let url = page.url().await.ok().flatten().unwrap_or_default();
+        if !is_agent_usable_page_url(&url) {
+            continue;
+        }
+        if url != "about:blank" {
+            return Some(page);
+        }
+        if blank_fallback.is_none() {
+            blank_fallback = Some(page);
+        }
+    }
+
+    blank_fallback
+}
+
 async fn run_daemon(
     browser_path_arg: Option<String>,
     session_arg: Option<String>,
@@ -506,10 +529,52 @@ async fn run_daemon(
     });
     let browser = Arc::new(tokio::sync::Mutex::new(browser));
 
-    // Create initial page
-    let page = browser.lock().await.new_page("about:blank").await?;
+    // Create or adopt the initial page. In attached mode, prefer a page that
+    // already exists in the remote browser; opening an unconditional
+    // about:blank tab hides the actual page from external-browser clients.
+    let attached_mode = effective_cdp_url.is_some();
+    let mut existing_page = None;
+    if attached_mode {
+        match browser.lock().await.fetch_targets().await {
+            Ok(targets) => {
+                debug!(
+                    "[gsd-browser-daemon] fetched {} existing CDP targets in attached mode",
+                    targets.len()
+                );
+            }
+            Err(e) => {
+                warn!("[gsd-browser-daemon] failed to fetch existing CDP targets: {e}");
+            }
+        }
+
+        for attempt in 0..15 {
+            let pages = match browser.lock().await.pages().await {
+                Ok(pages) => pages,
+                Err(e) => {
+                    warn!(
+                        "[gsd-browser-daemon] failed to list existing CDP pages in attached mode (attempt {}): {e}",
+                        attempt + 1
+                    );
+                    Vec::new()
+                }
+            };
+            existing_page = select_existing_attached_page(pages).await;
+            if existing_page.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+    }
+
+    let page = if let Some(page) = existing_page {
+        info!("[gsd-browser-daemon] attached to existing browser page");
+        page
+    } else {
+        let page = browser.lock().await.new_page("about:blank").await?;
+        info!("[gsd-browser-daemon] initial page created");
+        page
+    };
     set_default_viewport(&page).await;
-    info!("[gsd-browser-daemon] initial page created");
 
     // Inject browser-side helpers and install mutation counter
     helpers::inject_helpers(&page).await;
@@ -580,9 +645,21 @@ async fn run_daemon(
 
     // Register initial page in the PageRegistry
     {
+        let initial_url = page
+            .url()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "about:blank".to_string());
+        let initial_title = page
+            .evaluate("document.title")
+            .await
+            .ok()
+            .and_then(|v| v.into_value::<String>().ok())
+            .unwrap_or_default();
         let page_arc = Arc::new(page);
         let mut pages = daemon_state.pages.lock().unwrap();
-        pages.register(page_arc, String::new(), "about:blank".to_string());
+        pages.register(page_arc, initial_title, initial_url);
     }
 
     // Spawn the always-on target lifecycle tracker.
