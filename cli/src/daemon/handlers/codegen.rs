@@ -4,6 +4,7 @@ use crate::daemon::state::DaemonState;
 use gsd_browser_common::state_dir;
 use serde_json::{json, Value};
 use std::fs;
+use std::path::Path;
 
 /// Generate a Playwright test script from the action timeline.
 pub fn handle_generate_test(state: &DaemonState, params: &Value) -> Result<Value, String> {
@@ -258,11 +259,11 @@ fn escape_js(s: &str) -> String {
     out
 }
 
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() > max {
-        &s[..max]
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() > max {
+        s.chars().take(max).collect()
     } else {
-        s
+        s.to_string()
     }
 }
 
@@ -311,17 +312,29 @@ fn extract_str_from_cmd(cmd: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 fn short_url(u: &str) -> String {
-    if u.len() > 55 {
-        format!("{}...", &u[..52])
+    if u.chars().count() > 55 {
+        format!("{}...", u.chars().take(52).collect::<String>())
     } else {
         u.to_string()
     }
 }
 
+fn network_entries(event: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    event
+        .get("networkSlice")
+        .and_then(|s| s.get("entries"))
+        .and_then(|e| e.as_array())
+        .or_else(|| {
+            event
+                .get("network")
+                .and_then(|n| n.get("recent"))
+                .and_then(|e| e.as_array())
+        })
+}
+
 fn get_network_summary(event: &serde_json::Value) -> Vec<String> {
-    let net = event.get("network").unwrap_or(&serde_json::Value::Null);
-    if let Some(recent) = net.get("recent").and_then(|r| r.as_array()) {
-        recent
+    if let Some(entries) = network_entries(event) {
+        entries
             .iter()
             .filter_map(|e| {
                 let method = e.get("method").and_then(|m| m.as_str()).unwrap_or("?");
@@ -345,6 +358,16 @@ fn get_network_summary(event: &serde_json::Value) -> Vec<String> {
     } else {
         vec![]
     }
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create output directory: {}", e))?;
+        }
+    }
+    Ok(())
 }
 
 /// Core generator: read bundle manifest + events.jsonl, emit high quality PW test.
@@ -570,8 +593,18 @@ fn generate_playwright_from_bundle(
             }
             "set_checked" => {
                 let sel = extract_str_from_cmd(&cmd, "selector").unwrap_or_default();
-                let checked =
-                    extract_str_from_cmd(&cmd, "checked").unwrap_or_else(|| "true".to_string());
+                let checked = cmd
+                    .get("checked")
+                    .and_then(|v| {
+                        v.as_bool().or_else(|| {
+                            v.as_str().and_then(|s| match s {
+                                "true" => Some(true),
+                                "false" => Some(false),
+                                _ => None,
+                            })
+                        })
+                    })
+                    .unwrap_or(true);
                 if !sel.is_empty() {
                     lines.push(format!(
                         "    await page.setChecked('{}', {});",
@@ -796,7 +829,9 @@ pub async fn handle_generate_replayable_test(
         }
     };
 
-    fs::write(&file_path, &script)
+    let file_path_ref = Path::new(&file_path);
+    ensure_parent_dir(file_path_ref)?;
+    fs::write(file_path_ref, &script)
         .map_err(|e| format!("failed to write replayable test: {}", e))?;
 
     Ok(serde_json::json!({
@@ -875,9 +910,9 @@ mod tests {
         )
         .unwrap();
 
-        // enriched events.jsonl (mix of nav + ref action + network)
-        let events = r#"{"seq":1,"kind":"navigate","url":"https://example.com/start","command":{"url":"https://example.com/start"},"network":{"recent":[{"method":"GET","url":"https://example.com/api/boot","status":200}]}}
-{"seq":2,"kind":"click_ref","url":"https://example.com/cart","command":{"ref":"@v1:e7"},"network":{"recent":[{"method":"POST","url":"https://example.com/api/cart","status":201}]}}
+        // enriched events.jsonl (mix of nav + ref action + authoritative networkSlice)
+        let events = r#"{"seq":1,"kind":"navigate","url":"https://example.com/start","command":{"url":"https://example.com/start"},"network":{"recent":[]},"networkSlice":{"entries":[{"method":"GET","url":"https://example.com/api/boot","status":200}]}}
+{"seq":2,"kind":"click_ref","url":"https://example.com/cart","command":{"ref":"@v1:e7"},"network":{"recent":[]},"networkSlice":{"entries":[{"method":"POST","url":"https://example.com/api/cart","status":201}]}}
 {"seq":3,"kind":"navigate","url":"https://example.com/success","command":{"url":"https://example.com/success"},"network":{"recent":[]}}
 "#;
         fs::write(bundle.join("events.jsonl"), events).unwrap();
@@ -918,5 +953,59 @@ mod tests {
             generate_playwright_from_bundle(bundle, "user's checkout \"flow\"\nwith newline")
                 .expect("generate with tricky name");
         assert!(script2.contains("test.describe('user\\'s checkout \\\"flow\\\"\\nwith newline'"));
+    }
+
+    #[test]
+    fn replayable_generator_handles_unicode_and_checked_values() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir for unicode bundle");
+        let bundle = dir.path();
+        fs::write(
+            bundle.join("events.jsonl"),
+            r#"{"seq":1,"kind":"set_checked","url":"https://example.com/✓","command":{"selector":"input[type=checkbox]","checked":"false); await page.goto('https://evil.test') //"},"networkSlice":{"entries":[{"method":"POST","url":"https://example.com/api/checkout/✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓","status":204}]}}
+{"seq":2,"kind":"assert","url":"https://example.com/✓","command":{"message":"unicode ✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓"}}
+"#,
+        )
+        .unwrap();
+
+        let (script, steps, _, _) =
+            generate_playwright_from_bundle(bundle, "unicode ✓ flow").expect("generate");
+
+        assert_eq!(steps, 1);
+        assert!(script.contains("await page.setChecked('input[type=checkbox]', true);"));
+        assert!(!script.contains("evil.test"));
+        assert!(script.contains("network slice: POST https://example.com/api/checkout/"));
+    }
+
+    #[tokio::test]
+    async fn replayable_generator_creates_output_parent_dirs() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir for output parent");
+        let bundle = dir.path().join("bundle");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(
+            bundle.join("events.jsonl"),
+            r#"{"seq":1,"kind":"navigate","url":"https://example.com","command":{"url":"https://example.com"}}"#,
+        )
+        .unwrap();
+
+        let state = DaemonState::new();
+        let output = dir.path().join("new").join("nested").join("flow.spec.ts");
+        let result = handle_generate_replayable_test(
+            &state,
+            &json!({
+                "bundlePath": bundle.to_string_lossy(),
+                "outputPath": output.to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("generate replayable test");
+
+        assert_eq!(result["path"], output.to_string_lossy().to_string());
+        assert!(output.exists());
     }
 }
