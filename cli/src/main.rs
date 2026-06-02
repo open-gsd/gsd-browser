@@ -1,6 +1,6 @@
+mod cloud_manifest;
 #[path = "daemon/handlers/cloud_methods.rs"]
 mod cloud_methods;
-mod cloud_manifest;
 
 #[cfg(unix)]
 mod daemon;
@@ -24,7 +24,8 @@ use gsd_browser_common::config::Config;
 use gsd_browser_common::validate_session_name;
 use std::process::Command;
 
-const INSTALLER_URL: &str = "https://raw.githubusercontent.com/open-gsd/gsd-browser/main/install.sh";
+const INSTALLER_URL: &str =
+    "https://raw.githubusercontent.com/open-gsd/gsd-browser/main/install.sh";
 
 #[derive(Parser, Clone)]
 #[command(
@@ -772,8 +773,27 @@ enum Commands {
     CloudMethods,
     /// Update gsd-browser using the release installer
     Update,
-    /// Run as an MCP server over stdio (primary path for AI agents)
-    Mcp,
+    /// Run as an MCP server over stdio or Streamable HTTP
+    Mcp {
+        /// Serve MCP over HTTP instead of stdio
+        #[arg(long)]
+        http: bool,
+        /// HTTP bind host when --http is set
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// HTTP bind port when --http is set
+        #[arg(long, default_value_t = 8788)]
+        port: u16,
+        /// Bearer token for HTTP MCP clients. Also read from GSD_BROWSER_MCP_AUTH_TOKEN.
+        #[arg(long)]
+        auth_token: Option<String>,
+        /// Remote bearer-token verification endpoint. Also read from GSD_BROWSER_MCP_AUTH_VERIFY_URL.
+        #[arg(long)]
+        auth_verify_url: Option<String>,
+        /// Allow unauthenticated HTTP MCP. Refused by default for non-loopback hosts.
+        #[arg(long)]
+        no_auth: bool,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -894,7 +914,25 @@ async fn main() {
         },
         Commands::CloudMethods => cmd_cloud_methods(&cli),
         Commands::Update => cmd_update(&cli),
-        Commands::Mcp => cmd_mcp(&cli).await,
+        Commands::Mcp {
+            http,
+            host,
+            port,
+            auth_token,
+            auth_verify_url,
+            no_auth,
+        } => {
+            cmd_mcp(
+                &cli,
+                *http,
+                host,
+                *port,
+                auth_token.clone(),
+                auth_verify_url.clone(),
+                *no_auth,
+            )
+            .await
+        }
         Commands::Navigate { url, .. } => cmd_navigate(&cli, url).await,
         Commands::Back => cmd_back(&cli).await,
         Commands::Forward => cmd_forward(&cli).await,
@@ -1323,10 +1361,34 @@ fn cmd_update(cli: &Cli) -> CmdResult {
     Ok(())
 }
 
-async fn cmd_mcp(cli: &Cli) -> CmdResult {
-    // Delegate to the MCP module. This starts the stdio MCP server that re-uses
-    // the existing daemon client for all real browser work (auto-start, sessions,
-    // --json behavior, error handling, etc.).
+async fn cmd_mcp(
+    cli: &Cli,
+    http: bool,
+    host: &str,
+    port: u16,
+    auth_token: Option<String>,
+    auth_verify_url: Option<String>,
+    no_auth: bool,
+) -> CmdResult {
+    // Delegate to the MCP module. Both transports re-use the existing daemon
+    // client for all real browser work (auto-start, sessions, --json behavior,
+    // error handling, etc.).
+    if http {
+        let auth_token = auth_token.or_else(|| std::env::var("GSD_BROWSER_MCP_AUTH_TOKEN").ok());
+        let auth_verify_url =
+            auth_verify_url.or_else(|| std::env::var("GSD_BROWSER_MCP_AUTH_VERIFY_URL").ok());
+        return mcp::run_http_server(
+            cli,
+            mcp::HttpServerOptions {
+                host: host.to_string(),
+                port,
+                auth_token,
+                auth_verify_url,
+                allow_no_auth: no_auth,
+            },
+        )
+        .await;
+    }
     mcp::run_stdio_server(cli).await
 }
 

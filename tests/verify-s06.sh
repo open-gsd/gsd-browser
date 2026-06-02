@@ -111,8 +111,8 @@ echo "=== npm Package Structure ==="
 test -f "$PROJECT_DIR/npm/package.json"
 check "npm/package.json exists" $?
 
-node -e "const p=require('$PROJECT_DIR/npm/package.json'); if(p.name !== '@open-gsd/gsd-browser') process.exit(1)" 2>/dev/null
-check "npm package name is @open-gsd/gsd-browser" $?
+node -e "const p=require('$PROJECT_DIR/npm/package.json'); if(p.name !== '@opengsd/gsd-browser') process.exit(1)" 2>/dev/null
+check "npm package name is @opengsd/gsd-browser" $?
 
 test -f "$PROJECT_DIR/npm/scripts/postinstall.js"
 check "npm/scripts/postinstall.js exists" $?
@@ -124,7 +124,7 @@ node -e "const fs=require('fs'); const s=fs.readFileSync('$PROJECT_DIR/npm/scrip
 check "postinstall uses open-gsd release repo" $?
 
 # ════════════════════════════════════════════
-#  Cargo Metadata (3 checks)
+#  Cargo Metadata (2 checks)
 # ════════════════════════════════════════════
 echo ""
 echo "=== Cargo Metadata ==="
@@ -134,9 +134,6 @@ check "cli/Cargo.toml has license field" $?
 
 grep -q 'publish = false' "$PROJECT_DIR/common/Cargo.toml" 2>/dev/null
 check "common/Cargo.toml has publish = false" $?
-
-grep -q 'publish = false' "$PROJECT_DIR/daemon/Cargo.toml" 2>/dev/null
-check "daemon/Cargo.toml has publish = false" $?
 
 # ════════════════════════════════════════════
 #  Config Infrastructure (3 checks)

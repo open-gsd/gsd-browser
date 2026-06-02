@@ -11,8 +11,37 @@
 //! - Make the most valuable commands available as tools on day one.
 
 use crate::Cli;
+use axum::{
+    extract::State,
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json as AxumJson, Router,
+};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::net::IpAddr;
+use std::sync::Arc;
+
+const LATEST_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// Options for hosting the MCP server over HTTP.
+#[derive(Clone, Debug)]
+pub struct HttpServerOptions {
+    pub host: String,
+    pub port: u16,
+    pub auth_token: Option<String>,
+    pub auth_verify_url: Option<String>,
+    pub allow_no_auth: bool,
+}
+
+#[derive(Clone)]
+struct HttpState {
+    cli: Cli,
+    auth_token: Option<String>,
+    auth_verify_url: Option<String>,
+}
 
 /// Top-level entry point called from the `mcp` subcommand.
 pub async fn run_stdio_server(cli: &Cli) -> crate::CmdResult {
@@ -29,6 +58,439 @@ pub async fn run_stdio_server(cli: &Cli) -> crate::CmdResult {
     // the process is killed). The main thread just waits.
     let _ = handle.join();
     Ok(())
+}
+
+/// Host the MCP server as a stateless Streamable HTTP endpoint.
+///
+/// POST JSON-RPC requests to `/mcp`. For public binds, require a bearer token
+/// unless the operator explicitly passes `--no-auth`.
+pub async fn run_http_server(cli: &Cli, options: HttpServerOptions) -> crate::CmdResult {
+    validate_http_options(&options).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+
+    let bind_addr = format_bind_address(&options.host, options.port);
+    let state = Arc::new(HttpState {
+        cli: cli.clone(),
+        auth_token: if options.allow_no_auth {
+            None
+        } else {
+            options.auth_token.clone()
+        },
+        auth_verify_url: if options.allow_no_auth {
+            None
+        } else {
+            options.auth_verify_url.clone()
+        },
+    });
+
+    let app = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/mcp", post(handle_http_mcp))
+        .with_state(state);
+
+    eprintln!(
+        "gsd-browser MCP HTTP listening on http://{bind_addr}/mcp{}",
+        if options.allow_no_auth {
+            ""
+        } else if options.auth_verify_url.is_some() {
+            " (remote bearer auth required)"
+        } else if options.auth_token.is_some() {
+            " (bearer auth required)"
+        } else {
+            ""
+        }
+    );
+
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn healthz() -> impl IntoResponse {
+    AxumJson(json!({
+        "ok": true,
+        "server": "gsd-browser",
+        "transport": "streamable-http",
+        "mcpPath": "/mcp"
+    }))
+}
+
+async fn handle_http_mcp(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    AxumJson(request): AxumJson<Value>,
+) -> Response {
+    if let Err(response) = authorize_http_request(
+        &headers,
+        state.auth_token.as_deref(),
+        state.auth_verify_url.as_deref(),
+        &request,
+    )
+    .await
+    {
+        return response;
+    }
+
+    if is_json_rpc_notification(&request) {
+        return StatusCode::ACCEPTED.into_response();
+    }
+
+    let cli = state.cli.clone();
+    match tokio::task::spawn_blocking(move || handle_request(&request, &cli)).await {
+        Ok(response) => (StatusCode::OK, AxumJson(response)).into_response(),
+        Err(err) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("MCP request task failed: {err}"),
+        ),
+    }
+}
+
+async fn authorize_http_request(
+    headers: &HeaderMap,
+    auth_token: Option<&str>,
+    auth_verify_url: Option<&str>,
+    request: &Value,
+) -> Result<(), Response> {
+    if auth_token.is_none() && auth_verify_url.is_none() {
+        return Ok(());
+    }
+
+    let provided = bearer_token(headers);
+
+    if auth_token.is_some_and(|expected| provided == Some(expected)) {
+        return Ok(());
+    }
+
+    let Some(auth_verify_url) = auth_verify_url else {
+        let mut response = json_error(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            header::HeaderValue::from_static("Bearer"),
+        );
+        return Err(response);
+    };
+
+    let Some(provided) = provided else {
+        let mut response = json_error(StatusCode::UNAUTHORIZED, "missing bearer token");
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            header::HeaderValue::from_static("Bearer"),
+        );
+        return Err(response);
+    };
+
+    verify_remote_bearer(auth_verify_url, provided, request).await
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+async fn verify_remote_bearer(
+    auth_verify_url: &str,
+    token: &str,
+    request: &Value,
+) -> Result<(), Response> {
+    let response = reqwest::Client::new()
+        .post(auth_verify_url)
+        .bearer_auth(token)
+        .json(&build_auth_verification_body(request))
+        .send()
+        .await
+        .map_err(|err| {
+            json_error(
+                StatusCode::BAD_GATEWAY,
+                format!("auth verifier failed: {err}"),
+            )
+        })?;
+    let status = response.status();
+
+    if status.is_success() {
+        let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+        if body.get("ok").and_then(|value| value.as_bool()) == Some(true) {
+            return Ok(());
+        }
+
+        return Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "auth verifier rejected bearer token",
+        ));
+    }
+
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let message = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .unwrap_or("auth verifier rejected bearer token");
+    let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+
+    Err(json_error(status, message))
+}
+
+fn build_auth_verification_body(request: &Value) -> Value {
+    let method = request
+        .get("method")
+        .and_then(|value| value.as_str())
+        .unwrap_or("mcp");
+    let is_tool_call = method == "tools/call";
+    let tool_name = if is_tool_call {
+        request
+            .get("params")
+            .and_then(|params| params.get("name"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("tools/call")
+    } else {
+        method
+    };
+    let request_id = request
+        .get("id")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string())
+        })
+        .unwrap_or_else(|| "null".to_string());
+
+    json!({
+        "billable": is_tool_call,
+        "recordUsage": is_tool_call,
+        "requestId": request_id,
+        "runtime": "gsd-browser",
+        "toolName": tool_name
+    })
+}
+
+fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        AxumJson(json!({
+            "error": {
+                "message": message.into()
+            }
+        })),
+    )
+        .into_response()
+}
+
+fn validate_http_options(options: &HttpServerOptions) -> Result<(), String> {
+    if options.allow_no_auth
+        || options
+            .auth_token
+            .as_deref()
+            .is_some_and(|token| !token.is_empty())
+        || options
+            .auth_verify_url
+            .as_deref()
+            .is_some_and(|url| !url.is_empty())
+    {
+        return Ok(());
+    }
+    if is_loopback_bind_host(&options.host) {
+        return Ok(());
+    }
+    Err(
+        "refusing to expose unauthenticated gsd-browser MCP on a non-loopback host; set GSD_BROWSER_MCP_AUTH_TOKEN, pass --auth-token, or explicitly pass --no-auth"
+            .to_string(),
+    )
+}
+
+fn is_loopback_bind_host(host: &str) -> bool {
+    let trimmed = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if trimmed.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    trimmed
+        .parse::<IpAddr>()
+        .map(|addr| addr.is_loopback())
+        .unwrap_or(false)
+}
+
+fn format_bind_address(host: &str, port: u16) -> String {
+    let trimmed = host.trim();
+    if trimmed.starts_with('[') || !trimmed.contains(':') {
+        format!("{trimmed}:{port}")
+    } else {
+        format!("[{trimmed}]:{port}")
+    }
+}
+
+fn is_json_rpc_notification(request: &Value) -> bool {
+    request.get("id").is_none()
+        && request
+            .get("method")
+            .and_then(|method| method.as_str())
+            .is_some()
+}
+
+fn negotiated_protocol_version(request: &Value) -> &'static str {
+    let requested = request
+        .get("params")
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(|value| value.as_str());
+
+    requested
+        .and_then(|version| {
+            SUPPORTED_MCP_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|supported| *supported == version)
+        })
+        .unwrap_or(LATEST_MCP_PROTOCOL_VERSION)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn public_http_bind_requires_auth_by_default() {
+        let err = validate_http_options(&HttpServerOptions {
+            host: "0.0.0.0".to_string(),
+            port: 8788,
+            auth_token: None,
+            auth_verify_url: None,
+            allow_no_auth: false,
+        })
+        .expect_err("public unauthenticated bind should fail");
+
+        assert!(err.contains("refusing to expose unauthenticated"));
+    }
+
+    #[test]
+    fn loopback_http_bind_can_run_without_auth() {
+        validate_http_options(&HttpServerOptions {
+            host: "127.0.0.1".to_string(),
+            port: 8788,
+            auth_token: None,
+            auth_verify_url: None,
+            allow_no_auth: false,
+        })
+        .expect("loopback dev bind should be allowed");
+    }
+
+    #[test]
+    fn public_http_bind_accepts_auth_token() {
+        validate_http_options(&HttpServerOptions {
+            host: "0.0.0.0".to_string(),
+            port: 8788,
+            auth_token: Some("secret".to_string()),
+            auth_verify_url: None,
+            allow_no_auth: false,
+        })
+        .expect("bearer token should allow public bind");
+    }
+
+    #[test]
+    fn public_http_bind_accepts_remote_auth_verifier() {
+        validate_http_options(&HttpServerOptions {
+            host: "0.0.0.0".to_string(),
+            port: 8788,
+            auth_token: None,
+            auth_verify_url: Some("https://mcp.opengsd.dev/api/mcp/tokens/verify".to_string()),
+            allow_no_auth: false,
+        })
+        .expect("remote auth verifier should allow public bind");
+    }
+
+    #[tokio::test]
+    async fn bearer_auth_header_is_required_when_token_configured() {
+        let mut headers = HeaderMap::new();
+        assert!(
+            authorize_http_request(&headers, Some("secret"), None, &json!({}))
+                .await
+                .is_err()
+        );
+
+        headers.insert(
+            header::AUTHORIZATION,
+            header::HeaderValue::from_static("Bearer secret"),
+        );
+        authorize_http_request(&headers, Some("secret"), None, &json!({}))
+            .await
+            .expect("valid bearer token");
+    }
+
+    #[test]
+    fn auth_verification_body_bills_tool_calls_only() {
+        let body = build_auth_verification_body(&json!({
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "browser_navigate"
+            }
+        }));
+
+        assert_eq!(body["billable"], true);
+        assert_eq!(body["recordUsage"], true);
+        assert_eq!(body["runtime"], "gsd-browser");
+        assert_eq!(body["toolName"], "browser_navigate");
+
+        let body = build_auth_verification_body(&json!({
+            "id": 8,
+            "method": "tools/list"
+        }));
+
+        assert_eq!(body["billable"], false);
+        assert_eq!(body["recordUsage"], false);
+        assert_eq!(body["toolName"], "tools/list");
+    }
+
+    #[test]
+    fn ipv6_bind_addresses_are_bracketed() {
+        assert_eq!(format_bind_address("::1", 8788), "[::1]:8788");
+        assert_eq!(format_bind_address("[::1]", 8788), "[::1]:8788");
+    }
+
+    #[test]
+    fn initialize_negotiates_supported_protocol_versions() {
+        let cli = Cli::parse_from(["gsd-browser", "mcp"]);
+
+        let latest = handle_request(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18"
+                }
+            }),
+            &cli,
+        );
+        assert_eq!(latest["result"]["protocolVersion"], "2025-06-18");
+
+        let fallback = handle_request(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "1999-01-01"
+                }
+            }),
+            &cli,
+        );
+        assert_eq!(fallback["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[test]
+    fn notifications_are_detected_without_requiring_response() {
+        assert!(is_json_rpc_notification(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        })));
+
+        assert!(!is_json_rpc_notification(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        })));
+    }
 }
 
 /// The actual line-oriented JSON-RPC loop over stdin/stdout.
@@ -67,6 +529,10 @@ fn run_stdio_loop(cli: &Cli) -> crate::CmdResult {
             }
         };
 
+        if is_json_rpc_notification(&request) {
+            continue;
+        }
+
         let response = handle_request(&request, cli);
 
         let response_str = serde_json::to_string(&response).unwrap();
@@ -88,16 +554,18 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
                 "jsonrpc": jsonrpc,
                 "id": id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": negotiated_protocol_version(request),
                     "capabilities": {
-                        "tools": {},
-                        "resources": {},
-                        "prompts": {}
+                        "tools": { "listChanged": false },
+                        "resources": { "listChanged": false },
+                        "prompts": { "listChanged": false }
                     },
                     "serverInfo": {
                         "name": "gsd-browser",
+                        "title": "gsd-browser",
                         "version": env!("CARGO_PKG_VERSION")
-                    }
+                    },
+                    "instructions": "Use tools/list, resources/list, and prompts/list to discover the live gsd-browser surface. Prefer browser_snapshot or gsd-browser://latest-snapshot before ref-based actions."
                 }
             })
         }
