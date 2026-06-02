@@ -174,6 +174,12 @@ pub async fn handle_viewer_command(
                     message,
                 )
             })?;
+            {
+                let mut recordings = state.daemon_state.recordings.lock().await;
+                // Arm after authorization but before page input so networkSlice captures
+                // requests caused by live-viewer clicks/types.
+                let _ = recordings.prepare_for_next_recorded_event();
+            }
             crate::daemon::input_dispatch::dispatch_user_input(&page, &state.daemon_state, &input)
                 .await
                 .map_err(|message| {
@@ -185,11 +191,6 @@ pub async fn handle_viewer_command(
                 })?;
             let (url, title) = page_metadata(&page).await;
             let mut recordings = state.daemon_state.recordings.lock().await;
-            // PR-2: arm/claim seq for this viewer-driven user action (click, type, etc.).
-            // Brings viewer paths into the per-action tagging protocol so networkSlice is
-            // populated for live-viewer-created evidence bundles (addresses review Issue 3).
-            // recording.start/stop boundaries intentionally skip this (meta events).
-            let _ = recordings.prepare_for_next_recorded_event();
             if let Err(e) =
                 recordings.record_event(crate::daemon::view::recording::RecordingEventInput {
                     source: "viewer".to_string(),
