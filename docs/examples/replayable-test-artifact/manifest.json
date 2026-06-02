@@ -1,0 +1,68 @@
+{
+  "schema": "BrowserArtifactBundleV1",
+  "recordingId": "rec_example_login_20260529",
+  "sessionId": "sess_demo_abc",
+  "name": "example-login-regression",
+  "startedAtMs": 1717000000000,
+  "stoppedAtMs": 1717000060000,
+  "startSeq": 1,
+  "stopSeq": 5,
+  "eventCount": 5,
+  "frameCount": 12,
+  "annotationCount": 0,
+  "consoleErrorCount": 0,
+  "failedRequestCount": 0,
+  "originScopes": ["https://app.example.com"],
+  "excludedBoundaryEvents": [],
+  "redaction": {
+    "policy": "default-sensitive",
+    "hitCount": 7,
+    "classes": ["email", "query_token", "bearer_token", "data_token"]
+  },
+  "artifacts": {
+    "events": "events.jsonl",
+    "states": "states/",
+    "playwrightStates": "states/*.pwstate.json (redacted)",
+    "frames": "frames/"
+  },
+  "hashes": {
+    "manifestSha256": "demo-illustrative-hash",
+    "eventsSha256": "demo-illustrative-hash"
+  },
+
+  "replayable": true,
+  "replayFormatVersion": "playwright-2",
+  "entryPointCommand": {
+    "url": "https://app.example.com/login"
+  },
+  "expectedFinalState": {
+    "url": "https://app.example.com/dashboard",
+    "title": "Dashboard",
+    "domHash": "demo-after-hash",
+    "sessionStateHash": "demo-state-hash",
+    "ref": "events.jsonl:last"
+  },
+  "networkSliceManifest": {
+    "derivedFrom": "per-action-network-in-events",
+    "format": "full-slice-v1",
+    "sliceFields": ["method", "url", "status", "resourceType", "timestamp", "failed"],
+    "note": "Full per-action slices in events.jsonl; optional HAR subset supported in replayable test generator (PR5)."
+  },
+  "stateRestorationHints": {
+    "synthetic": false,
+    "strategy": "save-state-snapshots-in-bundle/states/",
+    "stateFiles": ["states/post-login.json"],
+    "playwrightStorageStateFiles": ["states/post-login.pwstate.json"],
+    "usePerEventSession": true,
+    "cookiesFrom": "bundle/states/*.json (redacted at export)",
+    "storageFrom": "bundle/states/*.pwstate.json (redacted)",
+    "authVault": "required for any redacted secrets; see gsd-browser auth-vault",
+    "warning": "PR5 SAFETY: states/ snapshots are BEST-EFFORT and REDACTED (sensitive cookie values + high-entropy tokens replaced). Full auth fidelity for replay usually requires auth-vault or re-auth + fresh save_state before export. See statesRedaction below.",
+    "howToUseInGeneratedTest": "See header of generated .spec.ts (runnable test.use when pwstate present).",
+    "statesRedaction": {
+      "applied": true,
+      "policy": "sensitive-cookie-names + high-entropy-values + token patterns (via redact_browser_state + redact_text)",
+      "effectOnRestoration": "Cookie values replaced with [REDACTED:sensitive]. Generated tests using pwstate will often require re-auth or explicit vault injection for full fidelity."
+    }
+  }
+}

@@ -389,7 +389,17 @@ gsd-browser recording-discard <id>
 gsd-browser recording-validate <id-or-path> --json
 ```
 
-Viewer annotations and recording bundles are local daemon artifacts. Recording manifests use `BrowserArtifactBundleV1`, ordered JSONL events, redaction metadata, and local artifact directories under the browser state path.
+**Replayable evidence bundles as first-class test artifacts (PR 1-6):** After `record-stop` (or during viewer Record mode), use `recording-export` (or pass recordingId directly) to produce a portable bundle containing enriched events (before/after DOM, full network slices PR5), redacted state snapshots, manifest with replayable:true. Then turn it into a high-quality, commit-table Playwright regression test:
+
+```bash
+gsd-browser generate-replayable-test --recording-id rec_abc123 --name "checkout-regression" --output tests/checkout.spec.ts
+# or from exported bundle dir:
+gsd-browser generate-replayable-test --bundle ./evidence/checkout-bug-2026-05 --output tests/checkout.spec.ts
+```
+
+The generated test includes: command replay, rich per-step DOM assertions (counts/text/structural with expected-vs-actual diffs), save_state restoration (redacted *.pwstate.json ready for storageState), full slice network assertions + optional HAR subset. **Safety:** states are redacted on export (sensitive cookies/tokens -> [REDACTED:...]); manifest records redaction policy. **MVP limits:** locators based on ephemeral refs need human review/refinement for robustness; DOM counts are tolerant smoke checks (use the diff comments). Prefer this over legacy `generate-test` for any flow you want as a durable regression artifact.
+
+Viewer annotations and recording bundles are local daemon artifacts. Recording manifests use `BrowserArtifactBundleV1`, ordered JSONL events, redaction metadata, and local artifact directories under the browser state path. Use `recording-validate` on exported bundles to confirm replayable status for CI/audit.
 
 Use `--no-narration-delay` for fast agent-only runs that keep narration events/history without lead-time sleeps:
 
@@ -501,8 +511,12 @@ gsd-browser trace-stop --name "checkout.json"      # Custom output filename
 gsd-browser har-export                             # Export network as HAR 1.2 JSON
 gsd-browser har-export --filename "session.har"    # Custom output path
 
-gsd-browser generate-test                          # Generate Playwright test from timeline
+# Legacy (timeline only — limited assertions):
 gsd-browser generate-test --name "login-flow" --output tests/login.spec.ts
+
+# Recommended (PR5+): full replayable evidence bundle workflow for rich, safe, stateful regression tests
+# (record flow → export/validate → generate-replayable-test). See "Recording bundles" section above and AGENT-BEST-PRACTICES.md.
+gsd-browser generate-replayable-test --bundle ./my-evidence-bundle --name "login-regression" --output tests/login.spec.ts
 ```
 
 ### Security
@@ -835,6 +849,7 @@ gsd-browser --session agent2 daemon stop
 
 - **MCP-first experience**: `docs/mcp.md`, `docs/AGENT-BEST-PRACTICES.md`, `./scripts/mcp-quickstart.sh`
 - **Curated skill pack for coding agents**: `gsd-browser-skill/SKILL.md` + `references/` + `workflows/` (install via the main installer)
+- **Illustrative replayable test artifact examples** (pedagogical approximations only): `docs/examples/replayable-test-artifact/` (manifest.json, events.jsonl, redacted pwstate, generated .spec.ts) — see file banners + AGENT-BEST-PRACTICES.md for ground-truth pointers to viewer.rs + codegen.rs. Produce live bundles for real use.
 - **AGENTS.md** (repo root) — high-level pointer
 - **README.md** — highlights and install instructions
 
