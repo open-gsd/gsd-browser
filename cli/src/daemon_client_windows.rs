@@ -31,9 +31,7 @@ pub fn stop_daemon(session: Option<&str>) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-pub async fn collect_health(
-    session: Option<&str>,
-) -> Result<Value, Box<dyn std::error::Error>> {
+pub async fn collect_health(session: Option<&str>) -> Result<Value, Box<dyn std::error::Error>> {
     let session = validate_session_name(session)?;
 
     Ok(json!({

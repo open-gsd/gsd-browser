@@ -23,6 +23,9 @@ use std::io::{self, BufRead, Write};
 use std::net::IpAddr;
 use std::sync::Arc;
 
+const LATEST_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
 /// Options for hosting the MCP server over HTTP.
 #[derive(Clone, Debug)]
 pub struct HttpServerOptions {
@@ -125,6 +128,10 @@ async fn handle_http_mcp(
     .await
     {
         return response;
+    }
+
+    if is_json_rpc_notification(&request) {
+        return StatusCode::ACCEPTED.into_response();
     }
 
     let cli = state.cli.clone();
@@ -312,9 +319,34 @@ fn format_bind_address(host: &str, port: u16) -> String {
     }
 }
 
+fn is_json_rpc_notification(request: &Value) -> bool {
+    request.get("id").is_none()
+        && request
+            .get("method")
+            .and_then(|method| method.as_str())
+            .is_some()
+}
+
+fn negotiated_protocol_version(request: &Value) -> &'static str {
+    let requested = request
+        .get("params")
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(|value| value.as_str());
+
+    requested
+        .and_then(|version| {
+            SUPPORTED_MCP_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|supported| *supported == version)
+        })
+        .unwrap_or(LATEST_MCP_PROTOCOL_VERSION)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn public_http_bind_requires_auth_by_default() {
@@ -414,6 +446,51 @@ mod tests {
         assert_eq!(format_bind_address("::1", 8788), "[::1]:8788");
         assert_eq!(format_bind_address("[::1]", 8788), "[::1]:8788");
     }
+
+    #[test]
+    fn initialize_negotiates_supported_protocol_versions() {
+        let cli = Cli::parse_from(["gsd-browser", "mcp"]);
+
+        let latest = handle_request(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18"
+                }
+            }),
+            &cli,
+        );
+        assert_eq!(latest["result"]["protocolVersion"], "2025-06-18");
+
+        let fallback = handle_request(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "1999-01-01"
+                }
+            }),
+            &cli,
+        );
+        assert_eq!(fallback["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[test]
+    fn notifications_are_detected_without_requiring_response() {
+        assert!(is_json_rpc_notification(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        })));
+
+        assert!(!is_json_rpc_notification(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        })));
+    }
 }
 
 /// The actual line-oriented JSON-RPC loop over stdin/stdout.
@@ -452,6 +529,10 @@ fn run_stdio_loop(cli: &Cli) -> crate::CmdResult {
             }
         };
 
+        if is_json_rpc_notification(&request) {
+            continue;
+        }
+
         let response = handle_request(&request, cli);
 
         let response_str = serde_json::to_string(&response).unwrap();
@@ -473,16 +554,18 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
                 "jsonrpc": jsonrpc,
                 "id": id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": negotiated_protocol_version(request),
                     "capabilities": {
-                        "tools": {},
-                        "resources": {},
-                        "prompts": {}
+                        "tools": { "listChanged": false },
+                        "resources": { "listChanged": false },
+                        "prompts": { "listChanged": false }
                     },
                     "serverInfo": {
                         "name": "gsd-browser",
+                        "title": "gsd-browser",
                         "version": env!("CARGO_PKG_VERSION")
-                    }
+                    },
+                    "instructions": "Use tools/list, resources/list, and prompts/list to discover the live gsd-browser surface. Prefer browser_snapshot or gsd-browser://latest-snapshot before ref-based actions."
                 }
             })
         }

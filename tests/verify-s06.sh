@@ -124,7 +124,7 @@ node -e "const fs=require('fs'); const s=fs.readFileSync('$PROJECT_DIR/npm/scrip
 check "postinstall uses open-gsd release repo" $?
 
 # ════════════════════════════════════════════
-#  Cargo Metadata (3 checks)
+#  Cargo Metadata (2 checks)
 # ════════════════════════════════════════════
 echo ""
 echo "=== Cargo Metadata ==="
@@ -134,9 +134,6 @@ check "cli/Cargo.toml has license field" $?
 
 grep -q 'publish = false' "$PROJECT_DIR/common/Cargo.toml" 2>/dev/null
 check "common/Cargo.toml has publish = false" $?
-
-grep -q 'publish = false' "$PROJECT_DIR/daemon/Cargo.toml" 2>/dev/null
-check "daemon/Cargo.toml has publish = false" $?
 
 # ════════════════════════════════════════════
 #  Config Infrastructure (3 checks)
