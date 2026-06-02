@@ -548,15 +548,26 @@ pub fn export_recording_bundle(
     if !src.exists() {
         return Err(format!("recording not found: {}", recording_id));
     }
+    let src_canon = fs::canonicalize(src)
+        .map_err(|err| format!("failed to resolve source recording dir: {err}"))?;
     fs::create_dir_all(output).map_err(|err| format!("failed to create export dir: {err}"))?;
+    let output_canon =
+        fs::canonicalize(output).map_err(|err| format!("failed to resolve export dir: {err}"))?;
 
-    let dest = output.join(recording_id);
-    fs::create_dir_all(&dest)
-        .map_err(|err| format!("failed to create export bundle dir: {err}"))?;
+    let dest = output_canon.join(recording_id);
+    if dest.starts_with(&src_canon) {
+        return Err("export output must not be inside the source recording bundle".to_string());
+    }
+    let temp_dest = output_canon.join(format!(".{recording_id}.exporting-{}", now_ms()));
+    if temp_dest.exists() {
+        fs::remove_dir_all(&temp_dest)
+            .map_err(|err| format!("failed to remove stale temp export dir: {err}"))?;
+    }
 
     // Partial-export hygiene (MEDIUM finding): on any subsequent failure we
-    // explicitly clean the dest dir so callers never see half-written replayable
-    // artifacts. (Drop guard avoided for borrow/move simplicity in this minimal fix.)
+    // explicitly clean the temp dir so callers never see half-written replayable
+    // artifacts. The final destination is replaced only after the temp bundle is
+    // fully copied and manifest-enriched.
     let cleanup_on_err = |d: &std::path::Path| {
         let _ = fs::remove_dir_all(d);
     };
@@ -564,13 +575,13 @@ pub fn export_recording_bundle(
     // Full tree copy — future-proof for any additional artifacts (traces, HAR slices,
     // per-event screenshots, etc.) that may appear for complete replayable bundles.
     // No longer a closed hardcoded set (addresses MEDIUM evolvability finding).
-    if let Err(e) = copy_dir_recursive(&src, &dest) {
-        cleanup_on_err(&dest);
+    if let Err(e) = copy_dir_recursive(&src_canon, &temp_dest) {
+        cleanup_on_err(&temp_dest);
         return Err(e);
     }
 
     // Load, enrich for replay, and overwrite manifest in the *exported* copy only.
-    let manifest_path = dest.join("manifest.json");
+    let manifest_path = temp_dest.join("manifest.json");
     let mut manifest: BrowserArtifactManifestV1 =
         serde_json::from_str(&fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?)
             .map_err(|e| format!("malformed exported manifest: {e}"))?;
@@ -581,7 +592,7 @@ pub fn export_recording_bundle(
     // Best-effort population of replay fields from the events.jsonl present in the copy.
     // Uses PR-1 enriched command/before/after/network so entry + final state are high fidelity.
     // Optimized single-pass first/last extraction (no full Vec allocation for large files).
-    if let Ok(events_data) = fs::read_to_string(dest.join("events.jsonl")) {
+    if let Ok(events_data) = fs::read_to_string(temp_dest.join("events.jsonl")) {
         let mut first_line: Option<String> = None;
         let mut last_line: Option<String> = None;
         for line in events_data.lines() {
@@ -645,8 +656,22 @@ pub fn export_recording_bundle(
 
     let updated = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     if let Err(e) = fs::write(&manifest_path, updated) {
-        cleanup_on_err(&dest);
+        cleanup_on_err(&temp_dest);
         return Err(format!("failed to write replay-enhanced manifest: {e}"));
+    }
+
+    if dest.exists() {
+        if dest.is_dir() {
+            fs::remove_dir_all(&dest)
+                .map_err(|err| format!("failed to replace existing export dir: {err}"))?;
+        } else {
+            fs::remove_file(&dest)
+                .map_err(|err| format!("failed to replace existing export file: {err}"))?;
+        }
+    }
+    if let Err(err) = fs::rename(&temp_dest, &dest) {
+        cleanup_on_err(&temp_dest);
+        return Err(format!("failed to finalize export bundle: {err}"));
     }
 
     Ok(dest)
@@ -1391,5 +1416,84 @@ mod tests {
 
         // Also prove that validate (which does its own from_str) accepts it.
         // (We can't easily feed a full dir here, but the deserialization path is the core.)
+    }
+
+    #[test]
+    fn export_rejects_output_inside_source_bundle() {
+        let dir = tempdir().expect("tempdir");
+        let mut store = RecordingStore::new(dir.path().join("recordings"));
+        let rec = store.start("nested-export", "session-1").expect("started");
+        store
+            .record_event(RecordingEventInput {
+                source: "cli".to_string(),
+                owner: "agent".to_string(),
+                kind: "snapshot".to_string(),
+                url: "https://example.test".to_string(),
+                title: "Example".to_string(),
+                redacted: false,
+                command: json!({ "name": "snapshot" }),
+                before: json!({}),
+                after: json!({ "url": "https://example.test" }),
+                network: json!({}),
+            })
+            .expect("event");
+        store.stop(&rec.recording_id).expect("stopped");
+
+        let src = store.recording_dir(&rec.recording_id);
+        let err =
+            export_recording_bundle(&src, &src, &rec.recording_id).expect_err("nested output");
+        assert!(err.contains("must not be inside"));
+    }
+
+    #[test]
+    fn export_replaces_existing_bundle_after_enrichment() {
+        let dir = tempdir().expect("tempdir");
+        let export_root = dir.path().join("exports");
+        let mut store = RecordingStore::new(dir.path().join("recordings"));
+        let rec = store.start("reexport", "session-1").expect("started");
+        store
+            .record_event(RecordingEventInput {
+                source: "cli".to_string(),
+                owner: "agent".to_string(),
+                kind: "navigate".to_string(),
+                url: "https://example.test/start".to_string(),
+                title: "Start".to_string(),
+                redacted: false,
+                command: json!({ "url": "https://example.test/start" }),
+                before: json!({}),
+                after: json!({
+                    "url": "https://example.test/start",
+                    "title": "Start",
+                    "domHash": "dom-1",
+                    "sessionStateHash": "session-1"
+                }),
+                network: json!({}),
+            })
+            .expect("event");
+        store.stop(&rec.recording_id).expect("stopped");
+
+        let src = store.recording_dir(&rec.recording_id);
+        let exported =
+            export_recording_bundle(&src, &export_root, &rec.recording_id).expect("first export");
+        fs::write(exported.join("stale.txt"), "stale").expect("stale marker");
+
+        let exported_again =
+            export_recording_bundle(&src, &export_root, &rec.recording_id).expect("second export");
+        assert_eq!(exported, exported_again);
+        assert!(!exported_again.join("stale.txt").exists());
+
+        let manifest: BrowserArtifactManifestV1 = serde_json::from_str(
+            &fs::read_to_string(exported_again.join("manifest.json")).expect("manifest"),
+        )
+        .expect("manifest json");
+        assert!(manifest.replayable);
+        assert_eq!(
+            manifest.replay_format_version.as_deref(),
+            Some("playwright-1")
+        );
+        assert!(manifest.entry_point_command.is_some());
+        assert!(manifest.expected_final_state.is_some());
+        assert!(manifest.network_slice_manifest.is_some());
+        assert!(manifest.state_restoration_hints.is_some());
     }
 }
