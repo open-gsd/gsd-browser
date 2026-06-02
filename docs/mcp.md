@@ -35,6 +35,42 @@ Exposing it via MCP (stdio) makes the entire surface automatically discoverable 
 gsd-browser mcp
 ```
 
+## Public / Remote Hosting
+
+For hosted clients, run the same MCP surface over Streamable HTTP:
+
+```bash
+export GSD_BROWSER_MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
+gsd-browser mcp --http --host 0.0.0.0 --port 8788
+```
+
+Expose the service over HTTPS with your proxy or platform, then point remote MCP clients at:
+
+```text
+https://your-domain.example/mcp
+Authorization: Bearer <GSD_BROWSER_MCP_AUTH_TOKEN>
+```
+
+For OpenGSD-hosted tokens, point the HTTP server at the console verifier:
+
+```bash
+export GSD_BROWSER_MCP_AUTH_VERIFY_URL="https://mcp.opengsd.dev/api/mcp/tokens/verify"
+gsd-browser mcp --http --host 0.0.0.0 --port 8788
+```
+
+The HTTP server calls the verifier for each request. `tools/call` requests are
+recorded as billable MCP usage with `runtime: "gsd-browser"` and the MCP tool
+name; metadata/list/read requests are authenticated without incrementing quota.
+If the console returns `429`, the MCP server forwards the throttle response.
+
+Local development can bind without auth on loopback:
+
+```bash
+gsd-browser mcp --http --host 127.0.0.1 --port 8788
+```
+
+Non-loopback hosts refuse unauthenticated startup by default. To override intentionally, pass `--no-auth`.
+
 For tailored setup instructions and copy-paste config snippets for your client:
 
 ```bash

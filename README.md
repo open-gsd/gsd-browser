@@ -6,7 +6,7 @@ Built for AI agents, CI pipelines, and developers who want deterministic browser
 
 ### MCP Server — Massively Expanded (The Primary Path for AI Agents)
 
-`gsd-browser mcp` is now a first-class, extremely powerful browser automation platform for agents. It exposes **50+ tools**, live resources (real snapshot/refs/state/timeline data), and executable prompts over stdio (Model Context Protocol).
+`gsd-browser mcp` is now a first-class, extremely powerful browser automation platform for agents. It exposes **50+ tools**, live resources (real snapshot/refs/state/timeline data), and executable prompts over local stdio or hosted Streamable HTTP (Model Context Protocol).
 
 **Completed advancements include:**
 - Full coverage of the rich surface: versioned refs + multiple snapshot modes, semantic `act` + `find_best`, advanced forms, robust assertions + waits, `browser_batch` for atomic flows, live viewer + full human collaboration (takeover, annotations, goal banners, step/abort/pause/resume, sensitive mode), first-class recording & evidence bundles, visual regression, HAR/trace/PDF export, network mocking & blocking, device emulation, encrypted auth vault + state save/restore, structured extraction, prompt injection scanning, action cache for long-term self-healing, multi-tab/frame management, rich diagnostics (`debug_bundle` etc.), and more.
@@ -22,6 +22,20 @@ Built for AI agents, CI pipelines, and developers who want deterministic browser
 gsd-browser mcp
 ```
 Point Cursor, Claude Desktop, VS Code + Copilot, or any MCP client at it.
+
+**Host it for remote/cloud clients:**
+```bash
+export GSD_BROWSER_MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
+gsd-browser mcp --http --host 0.0.0.0 --port 8788
+```
+Expose `/mcp` over HTTPS and send `Authorization: Bearer <token>` from the remote MCP client.
+
+To use OpenGSD console tokens and usage tallying:
+```bash
+export GSD_BROWSER_MCP_AUTH_VERIFY_URL="https://mcp.opengsd.dev/api/mcp/tokens/verify"
+gsd-browser mcp --http --host 0.0.0.0 --port 8788
+```
+Each `tools/call` request is validated against the console, counted against the user's free quota, and rejected when the console returns a throttle response.
 
 **Tailored setup + config snippets:**
 ```bash
