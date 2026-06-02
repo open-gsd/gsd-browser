@@ -202,12 +202,18 @@ pub fn handle_generate_test(state: &DaemonState, params: &Value) -> Result<Value
             .to_string()
     };
 
-    fs::write(&file_path, &script).map_err(|e| format!("failed to write test file: {e}"))?;
+    // PR5 review Finding 8: guide users to the much richer replayable bundle generator
+    let mut final_script = script;
+    final_script.push_str("\n\n// NOTE (PR5): This was generated from the legacy timeline path.\n");
+    final_script.push_str("// For rich DOM assertions, state restoration (auto test.use + redacted pwstate), full network slices + HAR subset, and expected-vs-actual support, use browser_generate_replayable_test (recordingId or bundlePath after export) instead.\n");
+
+    fs::write(&file_path, &final_script).map_err(|e| format!("failed to write test file: {e}"))?;
 
     Ok(json!({
         "path": file_path,
         "actions": entries.len(),
-        "lines": script.lines().count(),
+        "lines": final_script.lines().count(),
+        "note": "Legacy timeline generator. Prefer browser_generate_replayable_test for all PR5+ features (state, rich DOM, HAR)."
     }))
 }
 
@@ -288,16 +294,22 @@ fn sanitize_for_filename(name: &str) -> String {
     out
 }
 
-// === PR 4: MVP Replayable Test Generator (Playwright export) ===
-// Consumes full recording bundle (enriched events from PR1/3 + network slices PR2).
-// Produces high-quality, genuinely useful Playwright regression test:
-// - command sequence replay (nav, clicks, fills, refs, waits etc)
-// - URL checks (explicit toHaveURL after nav + on url change)
-// - basic network assertions (comments + 1-2 executable waitForResponse for key XHR)
-// - screenshot references (frames/ jpgs from bundle for baselines / audit)
-// Supports internal recording dirs (pre-export) and exported replayable bundles.
-// Output is clean, runnable skeleton + actionable TODOs for ref->locator mapping.
-// Per Gerald Sterling: makes evidence bundles first-class replayable test artifacts.
+// === PR 5: State restoration, rich DOM assertions, and full slice support ===
+// Builds on PR1-4 foundation. Consumes full replayable evidence bundle (enriched events
+// with before/after CompactPageState DOM + full per-action network slices + optional
+// states/ snapshots from save_state during recording).
+// Produces high-fidelity Playwright regression test artifacts:
+// - command sequence + robust URL guards
+// - rich per-step DOM assertions (element counts, structural headings/text, focus/dialog)
+//   derived directly from bundle "after" state for reliable regression on stateful flows
+// - "expected vs actual" diff support: inline expected snapshots + TODOs for custom matcher
+// - state restoration integration: auto-detects bundle/states/*.pwstate.json (from save_state)
+//   and emits ready-to-use setup blocks + comments for test.use({storageState}) or daemon restore
+// - full network slice usage + optional companion HAR subset export (for mocking / audit)
+// - ref actions remain safe commented (with evidence pointers)
+// Clean, evolvable schema (replayFormatVersion "playwright-2"). High-quality output for
+// auth-heavy and multi-step agent workflows (per Gerald Sterling + plan).
+// Supports recordingId or bundlePath. Prefer for regression over legacy timeline generate_test.
 
 fn extract_str_from_cmd(cmd: &serde_json::Value, key: &str) -> Option<String> {
     cmd.get(key).and_then(|v| {
@@ -340,6 +352,7 @@ fn get_network_summary(event: &serde_json::Value) -> Vec<String> {
                 let method = e.get("method").and_then(|m| m.as_str()).unwrap_or("?");
                 let url = e.get("url").and_then(|u| u.as_str()).unwrap_or("?");
                 let status = e.get("status").and_then(|s| s.as_u64()).unwrap_or(0);
+                let failed = e.get("failed").and_then(|f| f.as_bool()).unwrap_or(false);
                 // Skip assets, data urls, common static
                 if url.starts_with("data:")
                     || url.ends_with(".js")
@@ -352,7 +365,16 @@ fn get_network_summary(event: &serde_json::Value) -> Vec<String> {
                 {
                     return None;
                 }
-                Some(format!("{} {} -> {}", method, short_url(url), status))
+                let mut s = format!("{} {} -> {}", method, short_url(url), status);
+                if failed {
+                    s.push_str(" (failed)");
+                }
+                if let Some(ts) = e.get("timestamp").and_then(|t| t.as_f64()) {
+                    if ts > 0.0 {
+                        s.push_str(&format!(" @t={:.0}", ts));
+                    }
+                }
+                Some(s)
             })
             .collect()
     } else {
@@ -370,11 +392,160 @@ fn ensure_parent_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// PR5: Emit rich DOM assertions + expected/actual diff comment for a step's "after" state.
+/// Safe no-op if no usable after DOM data. Uses counts for stable structural guards,
+/// first heading + body prefix for text presence, and dumps the full signature for diffs.
+fn emit_rich_dom_assertions(lines: &mut Vec<String>, event: &serde_json::Value, step: usize) {
+    let after = event.get("after").unwrap_or(&serde_json::Value::Null);
+    if after.is_null() || after.as_object().map_or(true, |o| o.is_empty()) {
+        return;
+    }
+
+    let mut emitted_any = false;
+
+    // Element count assertions (PR5 review Finding 7: made tolerant / commented for flakiness)
+    // Broad generic selectors + exact counts are smoke checks only. Real UIs (dynamic counts,
+    // banners, responsive, third-party) make them brittle. Users should replace with semantic
+    // locators for production regression suites.
+    if let Some(counts) = after.get("counts").and_then(|c| c.as_object()) {
+        if let Some(n) = counts.get("landmarks").and_then(|v| v.as_u64()) {
+            if n > 0 && n < 50 {
+                lines.push(format!(
+                    "    // await expect(page.locator('main, [role=\"main\"], header, nav, footer')).toHaveCount({}); // PR5 structural (tolerant smoke check; replace for prod)",
+                    n
+                ));
+                emitted_any = true;
+            }
+        }
+        // Only comment the very broad ones to avoid constant test flakiness in generated artifacts
+        if let Some(btn) = counts.get("buttons").and_then(|v| v.as_u64()) {
+            if btn > 0 && btn < 100 {
+                lines.push(format!(
+                    "    // await expect(page.locator('button,[role=\"button\"]')).toHaveCount({}); // PR5 (broad; often flaky — refine)",
+                    btn
+                ));
+            }
+        }
+    }
+
+    // Structural text / heading assertion (first significant heading)
+    if let Some(headings) = after.get("headings").and_then(|h| h.as_array()) {
+        if let Some(first) = headings.first().and_then(|v| v.as_str()) {
+            if !first.is_empty() && first.len() < 120 {
+                let safe = escape_js(first);
+                lines.push(format!(
+                    "    await expect(page.locator('h1,h2,h3').first()).toContainText('{}'); // PR5 structural heading from bundle after-state (step {})",
+                    safe, step
+                ));
+                emitted_any = true;
+            }
+        }
+    }
+
+    // Expected vs actual diff support: full signature comment for this step's observed after DOM.
+    // Consumers can paste the object into a test helper that re-captures analogous compact state
+    // and does expect(actual).toEqual(expected) or a soft diff reporter.
+    let dom_sig = json!({
+        "domHash": after.get("domHash"),
+        "counts": after.get("counts"),
+        "headings": after.get("headings"),
+        "focus": after.get("focus"),
+        "bodyTextPrefix": after.get("bodyText").and_then(|b| b.as_str()).map(|s| truncate(s, 120)),
+        "dialog": after.get("dialog"),
+        "url": event.get("url"),
+    });
+    lines.push(format!(
+        "    // expectedAfterDOM (step {} for expected-vs-actual diff): {}",
+        step,
+        truncate(&serde_json::to_string(&dom_sig).unwrap_or_default(), 300)
+    ));
+    if !emitted_any {
+        // still surfaced the diff material even if no executable count/text this step
+        lines.push("    // (no executable count/text guards for this step — use the expectedAfterDOM comment above for custom diff)".to_string());
+    }
+}
+
+/// PR5: Collect a minimal but useful HAR subset from the richer network slices embedded
+/// in events.jsonl (for the generated companion artifact). Uses available fields; full
+/// headers/timings/body would require deeper network capture (future).
+fn collect_network_for_har(events_str: &str) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for line in events_str.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(ev) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(entries) = network_entries(&ev) {
+                for e in entries {
+                    let url = e.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                    if url.is_empty()
+                        || url.starts_with("data:")
+                        || url.ends_with(".js")
+                        || url.ends_with(".css")
+                        || url.ends_with(".png")
+                        || url.ends_with(".jpg")
+                        || url.ends_with(".svg")
+                    {
+                        continue;
+                    }
+                    out.push(json!({
+                        "startedDateTime": "1970-01-01T00:00:00.000Z",
+                        "time": 0,
+                        "request": {
+                            "method": e.get("method").and_then(|m| m.as_str()).unwrap_or("GET"),
+                            "url": url,
+                            "httpVersion": "HTTP/1.1",
+                            "cookies": [],
+                            "headers": [],
+                            "queryString": [],
+                            "headersSize": -1,
+                            "bodySize": -1
+                        },
+                        "response": {
+                            "status": e.get("status").and_then(|s| s.as_u64()).unwrap_or(0),
+                            "statusText": "",
+                            "httpVersion": "HTTP/1.1",
+                            "cookies": [],
+                            "headers": [],
+                            "content": { "size": -1, "mimeType": "", "text": e.get("failureText").and_then(|f| f.as_str()).unwrap_or("") },
+                            "redirectURL": "",
+                            "headersSize": -1,
+                            "bodySize": -1
+                        },
+                        "cache": {},
+                        "timings": { "send": 0, "wait": 0, "receive": 0 },
+                        "resourceType": e.get("resourceType").and_then(|t| t.as_str()).unwrap_or("other")
+                    }));
+                }
+            }
+        }
+    }
+    // de-dup by url+method for cleanliness (keep first). Defensive .get() to avoid panics (review Finding 6)
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|h| {
+        let req = h.get("request").and_then(|r| r.as_object());
+        let method = req
+            .and_then(|r| r.get("method"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+        let url = req
+            .and_then(|r| r.get("url"))
+            .and_then(|u| u.as_str())
+            .unwrap_or("");
+        if method.is_empty() && url.is_empty() {
+            return false;
+        }
+        let key = format!("{}:{}", method, url);
+        seen.insert(key)
+    });
+    out
+}
+
 /// Core generator: read bundle manifest + events.jsonl, emit high quality PW test.
 fn generate_playwright_from_bundle(
     bundle_dir: &std::path::Path,
     test_name: &str,
-) -> Result<(String, usize, usize, String), String> {
+) -> Result<(String, usize, usize, String, Option<String>), String> {
     let events_path = bundle_dir.join("events.jsonl");
     let manifest_path = bundle_dir.join("manifest.json");
 
@@ -410,14 +581,100 @@ fn generate_playwright_from_bundle(
     lines.push("import { test, expect } from '@playwright/test';".to_string());
     lines.push(String::new());
     lines.push("// ============================================================".to_string());
-    lines.push("// Generated by gsd-browser replayable test generator (PR 4)".to_string());
+    lines.push("// Generated by gsd-browser replayable test generator (PR 5)".to_string());
     lines.push(format!("// Source: {}", bundle_desc));
-    lines.push("// Enriched events (PR1/3) + per-action network slices (PR2)".to_string());
-    lines.push("// Includes: command replay, URL checks, basic network assertions,".to_string());
-    lines.push("// screenshot refs from bundle/frames. First-class test artifact.".to_string());
-    lines.push("// Review/refine ref-based locators (gsd refs are session ephemeral).".to_string());
-    lines.push("// MVP notes: waits are best-effort (networkidle where explicit); malformed JSONL lines are skipped with no hard failure.".to_string());
+    lines.push(
+        "// Enriched events (PR1/3) + full per-action network slices (PR5) + state snapshots"
+            .to_string(),
+    );
+    lines.push("// Includes: command replay, URL checks, RICH per-step DOM assertions (counts/text/structural),".to_string());
+    lines.push("// expected-vs-actual diff comments, state restoration (save_state snapshots -> PW storageState),".to_string());
+    lines.push(
+        "// full slice network assertions + optional HAR subset. First-class test artifact."
+            .to_string(),
+    );
+    lines.push("// Review/refine ref-based locators (gsd refs ephemeral). Refs + frames = visual evidence.".to_string());
+    lines.push("// PR5 SAFETY: states/ snapshots are REDACTED at export (sensitive cookies + tokens). See bundle manifest statesRedaction.".to_string());
+    lines.push("// PR5 DOM: counts are commented tolerant smoke checks only (broad locators are flaky on real UIs); use expectedAfterDOM for diffs.".to_string());
+    lines.push("// state restoration: auto test.use({storageState}) emitted when redacted pwstate present (runnable, best-effort fidelity).".to_string());
     lines.push("// ============================================================".to_string());
+    lines.push(String::new());
+    // === PR 5: State restoration block (integrated save-state snapshots) ===
+    // If the source bundle contains states/ (populated by export when save_state() was called
+    // during recording), we emit ready-to-adapt setup for reliable replay of auth/stateful flows.
+    // The *.pwstate.json are Playwright-native and can be used directly.
+    {
+        let states_dir = bundle_dir.join("states");
+        let mut state_files: Vec<String> = Vec::new();
+        if states_dir.exists() {
+            if let Ok(rd) = fs::read_dir(&states_dir) {
+                for entry in rd.flatten() {
+                    let p = entry.path();
+                    if let Some(name) = p.file_name() {
+                        let n = name.to_string_lossy();
+                        if n.ends_with(".pwstate.json") || n.ends_with(".json") {
+                            if !n.starts_with('.') {
+                                state_files.push(n.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !state_files.is_empty() {
+            state_files.sort();
+            let pwstate_files: Vec<&String> = state_files
+                .iter()
+                .filter(|f| f.ends_with(".pwstate.json"))
+                .collect();
+
+            if !pwstate_files.is_empty() {
+                // PR5 usability fix (review Finding 4): Emit *runnable* top-level test.use
+                // when real (redacted) pwstate files exist. This is the standard Playwright
+                // pattern and makes the generated test actually restore state with *zero or
+                // minimal* edits for many auth flows (the core value prop of the feature).
+                lines.push(String::new());
+                lines.push("import * as path from 'path';".to_string());
+                lines.push("import { fileURLToPath } from 'url';".to_string());
+                lines.push(
+                    "const bundleDir = path.dirname(fileURLToPath(import.meta.url));".to_string(),
+                );
+                lines.push(String::new());
+
+                for pwf in pwstate_files.iter().take(1) {
+                    // Only wire the first one automatically; user can extend for multi-state flows
+                    lines.push(format!(
+                        "test.use({{ storageState: path.join(bundleDir, 'states/{}') }});",
+                        pwf
+                    ));
+                }
+                if pwstate_files.len() > 1 {
+                    lines.push(format!(
+                        "// Additional pwstates present: {} (extend test.use or use per-test context)",
+                        pwstate_files.len()
+                    ));
+                }
+                lines.push("// NOTE: states/*.pwstate.json are REDACTED (see bundle manifest statesRedaction). Some logins may still need vault or re-auth.".to_string());
+            } else {
+                // Only gsd .json states (no successful pw conversion)
+                lines.push(String::new());
+                lines.push(
+                    "// === PR5 STATE RESTORATION (gsd snapshots only; no runnable pwstate) ==="
+                        .to_string(),
+                );
+            }
+
+            // Always document what was found (for audit / manual fallback)
+            lines.push("// States discovered in bundle:".to_string());
+            for sf in state_files.iter().take(3) {
+                lines.push(format!("//   states/{}", sf));
+            }
+            if state_files.len() > 3 {
+                lines.push(format!("//   ... +{} more", state_files.len() - 3));
+            }
+        }
+    }
+
     lines.push(String::new());
     lines.push(format!(
         "test.describe('{}', () => {{",
@@ -653,6 +910,27 @@ fn generate_playwright_from_bundle(
                     truncate(&serde_json::to_string(&cmd).unwrap_or_default(), 70)
                 ));
             }
+            "save_state" => {
+                let nm =
+                    extract_str_from_cmd(&cmd, "name").unwrap_or_else(|| "default".to_string());
+                lines.push(format!(
+                    "    // save_state('{}') — state snapshot captured into bundle/states/ at export (PR5)",
+                    escape_js(&nm)
+                ));
+                lines.push(
+                    "    // Restoration block emitted at top of test; see header.".to_string(),
+                );
+                emitted = true;
+            }
+            "restore_state" => {
+                let nm =
+                    extract_str_from_cmd(&cmd, "name").unwrap_or_else(|| "default".to_string());
+                lines.push(format!(
+                    "    // restore_state('{}') — in generated test this is typically replaced by storageState at context creation (PR5)",
+                    escape_js(&nm)
+                ));
+                emitted = true;
+            }
             _ => {
                 if !kind.is_empty() {
                     lines.push(format!(
@@ -681,6 +959,14 @@ fn generate_playwright_from_bundle(
                 ));
                 last_url = evt_url.clone();
             }
+
+            // === PR 5: Rich per-step DOM assertions + expected-vs-actual diff support ===
+            // Derived from the "after" CompactPageState captured at action completion (PR1).
+            // Emits executable structural checks (counts + text) that make generated tests
+            // meaningful regression guards on real UIs. Includes full snapshot comment for
+            // manual or custom "expected vs actual" diffing in CI (e.g. deep equal after
+            // re-capturing analogous compact state in test helper).
+            emit_rich_dom_assertions(&mut lines, &event, step_count);
         }
 
         // Basic network assertions (from PR2 enriched slices) — surface as comments
@@ -751,9 +1037,36 @@ fn generate_playwright_from_bundle(
     lines.push("});".to_string());
     lines.push(String::new());
 
+    // PR5: Optional (always-on for bundles with slices) HAR subset export for full slice support.
+    // Built from the richer per-action network in events.jsonl. Companion artifact co-located
+    // with generated spec for easy audit / use with PW HAR replay or route mocking.
+    let mut har_path: Option<String> = None;
+    let har_entries: Vec<serde_json::Value> = collect_network_for_har(&events_str);
+    if !har_entries.is_empty() {
+        let safe = sanitize_for_filename(test_name);
+        let har_file = bundle_dir.join(format!("{}-network-slices.har", safe));
+        let har = json!({
+            "log": {
+                "version": "1.2",
+                "creator": { "name": "gsd-browser-pr5", "version": env!("CARGO_PKG_VERSION") },
+                "entries": har_entries
+            }
+        });
+        if let Ok(hstr) = serde_json::to_string_pretty(&har) {
+            if fs::write(&har_file, &hstr).is_ok() {
+                har_path = Some(har_file.to_string_lossy().to_string());
+                lines.push(String::new());
+                lines.push(format!(
+                    "    // PR5 HAR subset (EVIDENCE/SUMMARY ONLY — headers/bodies/timings omitted, see Finding 5 limitations): {}-network-slices.har ({} entries)",
+                    safe, har_entries.len()
+                ));
+            }
+        }
+    }
+
     let script = lines.join("\n");
     let line_count = script.lines().count();
-    Ok((script, step_count, line_count, bundle_desc))
+    Ok((script, step_count, line_count, bundle_desc, har_path))
 }
 
 pub async fn handle_generate_replayable_test(
@@ -809,7 +1122,7 @@ pub async fn handle_generate_replayable_test(
         );
     };
 
-    let (script, actions, lines_count, bundle_desc) =
+    let (script, actions, lines_count, bundle_desc, har_path) =
         generate_playwright_from_bundle(&bundle_dir, name)?;
 
     let safe_name = sanitize_for_filename(name);
@@ -840,6 +1153,8 @@ pub async fn handle_generate_replayable_test(
         "lines": lines_count,
         "bundle": bundle_desc,
         "sourceBundleDir": bundle_dir.to_string_lossy().to_string(),
+        "harSubset": har_path,
+        "pr5Features": ["stateRestoration", "richDomAssertions", "expectedVsActualDiff", "fullNetworkSlices", "harSubsetExport"]
     }))
 }
 
@@ -896,13 +1211,13 @@ mod tests {
         let dir = tempdir().expect("tempdir for bundle");
         let bundle = dir.path();
 
-        // minimal manifest (replayable after export)
+        // minimal manifest (replayable after export) — PR5
         let manifest = json!({
             "schema": "BrowserArtifactBundleV1",
-            "recordingId": "rec_test_pr4",
+            "recordingId": "rec_test_pr5",
             "replayable": true,
-            "replayFormatVersion": "playwright-1",
-            "eventCount": 3
+            "replayFormatVersion": "playwright-2",
+            "eventCount": 4
         });
         fs::write(
             bundle.join("manifest.json"),
@@ -910,10 +1225,11 @@ mod tests {
         )
         .unwrap();
 
-        // enriched events.jsonl (mix of nav + ref action + authoritative networkSlice)
-        let events = r#"{"seq":1,"kind":"navigate","url":"https://example.com/start","command":{"url":"https://example.com/start"},"network":{"recent":[]},"networkSlice":{"entries":[{"method":"GET","url":"https://example.com/api/boot","status":200}]}}
-{"seq":2,"kind":"click_ref","url":"https://example.com/cart","command":{"ref":"@v1:e7"},"network":{"recent":[]},"networkSlice":{"entries":[{"method":"POST","url":"https://example.com/api/cart","status":201}]}}
-{"seq":3,"kind":"navigate","url":"https://example.com/success","command":{"url":"https://example.com/success"},"network":{"recent":[]}}
+        // enriched events.jsonl (PR5: with after DOM for rich asserts + save_state + full slices)
+        let events = r#"{"seq":1,"kind":"navigate","url":"https://example.com/start","command":{"url":"https://example.com/start"},"after":{"counts":{"buttons":4,"inputs":2,"links":10,"landmarks":3},"headings":["Welcome"],"focus":"","bodyText":"hello world content"},"network":{"recent":[]},"networkSlice":{"entries":[{"method":"GET","url":"https://example.com/api/boot","status":200,"timestamp":123.4,"failed":false}]}}
+{"seq":2,"kind":"click_ref","url":"https://example.com/cart","command":{"ref":"@v1:e7"},"after":{"counts":{"buttons":5,"inputs":1},"headings":["Cart"],"bodyText":"cart page"},"network":{"recent":[]},"networkSlice":{"entries":[{"method":"POST","url":"https://example.com/api/cart","status":201,"failed":false}]}}
+{"seq":3,"kind":"save_state","url":"https://example.com/cart","command":{"name":"post-login"},"after":{},"network":{"recent":[]},"networkSlice":{"entries":[]}}
+{"seq":4,"kind":"navigate","url":"https://example.com/success","command":{"url":"https://example.com/success"},"after":{"counts":{"buttons":2},"headings":["Success"]},"network":{"recent":[]},"networkSlice":{"entries":[]}}
 "#;
         fs::write(bundle.join("events.jsonl"), events).unwrap();
 
@@ -921,12 +1237,28 @@ mod tests {
         fs::create_dir_all(bundle.join("frames")).unwrap();
         fs::write(bundle.join("frames/frame-000001.jpg"), b"fakejpgdata").unwrap();
 
-        let (script, steps, _lines, desc) =
+        // PR5 fake state snapshot (simulates export having copied from save_state during rec)
+        fs::create_dir_all(bundle.join("states")).unwrap();
+        fs::write(
+            bundle.join("states/post-login.json"),
+            b"{\"cookies\":[],\"localStorage\":{},\"sessionStorage\":{}}",
+        )
+        .unwrap();
+        fs::write(
+            bundle.join("states/post-login.pwstate.json"),
+            b"{\"cookies\":[],\"origins\":[]}",
+        )
+        .unwrap();
+
+        let (script, steps, _lines, desc, _har) =
             generate_playwright_from_bundle(bundle, "pr4-checkout").expect("generate");
 
-        assert!(desc.contains("rec_test_pr4"));
+        assert!(desc.contains("rec_test_pr5"));
         assert!(desc.contains("replayable:true"));
-        assert!(steps >= 2, "should count nav + click_ref as steps");
+        assert!(
+            steps >= 3,
+            "should count nav + click_ref + save_state as steps"
+        );
 
         assert!(script.contains("page.goto('https://example.com/start')"));
         assert!(script.contains("toHaveURL"));
@@ -934,8 +1266,31 @@ mod tests {
         assert!(script.contains("network slice:"));
         assert!(script.contains("waitForResponse")); // basic net assert
         assert!(script.contains("frames/frame-000001.jpg")); // screenshot ref
-        assert!(script.contains("PR 4")); // header
+        assert!(script.contains("PR 5")); // header (PR5)
         assert!(script.contains("First-class test artifact"));
+        // PR5 rich DOM (counts are now tolerant commented smoke checks per review)
+        assert!(script.contains("toContainText")); // heading text (executable)
+        assert!(script.contains("expectedAfterDOM")); // diff support comment
+        assert!(
+            script.contains("smoke check")
+                || script.contains("tolerant")
+                || script.contains("broad")
+        ); // Finding 7 honesty
+           // PR5 state restoration
+        assert!(script.contains("test.use({ storageState:"));
+        assert!(script.contains("import { fileURLToPath } from 'url';"));
+        assert!(script.contains("const bundleDir = path.dirname(fileURLToPath(import.meta.url));"));
+        assert!(!script.contains("__dirname"));
+        assert!(script.contains("states/post-login.pwstate.json"));
+        assert!(
+            script.find("test.use({ storageState:").unwrap()
+                < script.find("test.describe(").unwrap(),
+            "state restoration setup must be top-level before test.describe"
+        );
+        assert!(script.contains("REDACTED") || script.contains("redacted")); // safety redaction surfaced
+        assert!(script.contains("save_state('post-login')"));
+        // PR5 HAR
+        assert!(script.contains("network-slices.har") || script.contains("HAR subset"));
 
         // CRITICAL: no unescaped / inside /.../ regex literals for toHaveURL (Finding 1)
         assert!(
@@ -949,7 +1304,7 @@ mod tests {
         );
 
         // Test name with special chars must be properly escaped (Finding 2)
-        let (script2, _, _, _) =
+        let (script2, _, _, _, _) =
             generate_playwright_from_bundle(bundle, "user's checkout \"flow\"\nwith newline")
                 .expect("generate with tricky name");
         assert!(script2.contains("test.describe('user\\'s checkout \\\"flow\\\"\\nwith newline'"));
@@ -970,7 +1325,7 @@ mod tests {
         )
         .unwrap();
 
-        let (script, steps, _, _) =
+        let (script, steps, _, _, _) =
             generate_playwright_from_bundle(bundle, "unicode ✓ flow").expect("generate");
 
         assert_eq!(steps, 1);

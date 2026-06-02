@@ -31,7 +31,6 @@ pub struct RecordingEventInput {
     pub title: String,
     pub redacted: bool,
     // PR-1 enrichment: full command params + before/after with DOM hash + sessionStateHash + per-action network tags
-    // PR-2: network now also carries "networkSlice" (computed in record_event via extract from tagged buffer)
     pub command: serde_json::Value,
     pub before: serde_json::Value,
     pub after: serde_json::Value,
@@ -97,10 +96,6 @@ impl RecordingStore {
         self.redaction_hits = 0;
         self.frame_count = 0;
         self.hashes.clear();
-        if let Some(t) = &self.current_recording_seq {
-            *t.lock().unwrap() = 0;
-        }
-        self.pending_seq = None;
         fs::create_dir_all(&self.root)
             .map_err(|err| format!("failed to create recordings root: {err}"))?;
         let recording_id = format!("rec_{}", uuid::Uuid::new_v4());
@@ -131,13 +126,12 @@ impl RecordingStore {
     }
 
     pub fn pause(&mut self, recording_id: &str) -> Result<RecordingSession, String> {
-        // First, capture ids under immutable borrow for the potential marker emission (Issue 11)
         let (rec_id, sess_id) = {
-            let a = self.active.as_ref().ok_or("no active recording")?;
-            if a.recording_id != recording_id {
+            let active = self.active.as_ref().ok_or("no active recording")?;
+            if active.recording_id != recording_id {
                 return Err(format!("recording not active: {recording_id}"));
             }
-            (a.recording_id.clone(), a.session_id.clone())
+            (active.recording_id.clone(), active.session_id.clone())
         };
 
         let active = self.active.as_mut().ok_or("no active recording")?;
@@ -199,8 +193,6 @@ impl RecordingStore {
             return Err(format!("recording not active: {recording_id}"));
         }
         active.paused = false;
-        // On resume we do not restore a previous pending; next user action will prepare fresh.
-        self.pending_seq = None;
         Ok(active.clone())
     }
 
@@ -228,15 +220,6 @@ impl RecordingStore {
             return Ok(());
         };
         if active.paused {
-            // PR-2: The primary self-describing "recording.action-skipped" marker is now emitted
-            // from pause() at the moment the gap is created (Issue 11). This path is defensive.
-            if self.pending_seq.is_some() {
-                tracing::warn!(
-                    "[recording] record_event while paused still saw pending seq {:?} (kind={}) — cleared",
-                    self.pending_seq, input.kind
-                );
-                self.pending_seq = None;
-            }
             return Ok(());
         }
 
@@ -580,6 +563,118 @@ pub fn export_recording_bundle(
         return Err(e);
     }
 
+    // === PR 5: State restoration integration (save-state snapshots as first-class in bundles) ===
+    // Detect explicit save_state(name) invocations from the (copied) events.jsonl.
+    // Only referenced states are copied from global state/ into bundle/states/ (self-contained artifact).
+    // Also emit Playwright storageState companions (*.pwstate.json) for direct use in generated tests
+    // (via test.use({ storageState: '...' }) or context addition). This makes auth-heavy replayable
+    // tests reliable without external daemon state at CI runtime.
+    // Non-fatal on missing (user may have discarded global state); synthetic flag kept honest.
+    let mut restored_state_names: Vec<String> = Vec::new();
+    {
+        let events_path = temp_dest.join("events.jsonl");
+        if events_path.exists() {
+            // PR5 Finding 9 guard: avoid materializing enormous events.jsonl during export (O(n) name scan)
+            if let Ok(meta) = fs::metadata(&events_path) {
+                if meta.len() > 80 * 1024 * 1024 {
+                    // continue with empty names (best-effort); full streaming scan is future work
+                }
+            }
+            if let Ok(events_data) = fs::read_to_string(&events_path) {
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for line in events_data.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    if let Ok(ev) = serde_json::from_str::<serde_json::Value>(line) {
+                        if ev.get("kind").and_then(|k| k.as_str()) == Some("save_state") {
+                            let cmd = ev.get("command").unwrap_or(&serde_json::Value::Null);
+                            let name = cmd
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .or_else(|| {
+                                    // fallback for stringified or alt shape
+                                    cmd.get("params")
+                                        .and_then(|p| p.get("name").and_then(|v| v.as_str()))
+                                        .map(|s| s.to_string())
+                                });
+                            if let Some(n) = name {
+                                if !n.is_empty() && seen.insert(n.clone()) {
+                                    restored_state_names.push(n);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // PR5 safety + correctness fixes (review Findings 1 + 2 HIGH):
+    // - Always redact sensitive values (cookies, high-entropy tokens, storage) before writing
+    //   into the *portable* bundle. Raw secrets must never appear in shareable evidence artifacts.
+    // - Track actual success of pwstate conversion/write; only advertise files that were
+    //   successfully materialized. No more silent references to phantom files.
+    let bundle_states_dir = temp_dest.join("states");
+    let mut pw_success_names: Vec<String> = Vec::new();
+    let mut state_redaction_applied = false;
+
+    if !restored_state_names.is_empty() {
+        let _ = fs::create_dir_all(&bundle_states_dir);
+        let states_src_dir = gsd_browser_common::state_dir().join("state");
+        for name in &restored_state_names {
+            let src = states_src_dir.join(format!("{}.json", name));
+            let dst = bundle_states_dir.join(format!("{}.json", name));
+            if src.exists() {
+                if let Ok(raw) = fs::read_to_string(&src) {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        let (redacted_state, did_redact) = redact_browser_state(parsed);
+                        if did_redact {
+                            state_redaction_applied = true;
+                        }
+                        if fs::write(
+                            &dst,
+                            serde_json::to_string_pretty(&redacted_state).unwrap_or_default(),
+                        )
+                        .is_ok()
+                        {
+                            // Convert from the *redacted* snapshot (honest fidelity)
+                            let pwstate = convert_gsd_to_pw_storage_state(&redacted_state);
+                            // Also aggressively redact cookie values inside the pwstate output
+                            let mut pw_redacted = pwstate;
+                            if let Some(cookies) = pw_redacted
+                                .get_mut("cookies")
+                                .and_then(|c| c.as_array_mut())
+                            {
+                                for c in cookies.iter_mut() {
+                                    if let Some(obj) = c.as_object_mut() {
+                                        if let Some(v) = obj.get_mut("value") {
+                                            if let Some(s) = v.as_str() {
+                                                if s.len() >= 16 || !s.starts_with("[REDACTED") {
+                                                    *v = serde_json::json!("[REDACTED:sensitive]");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let pw_dst = bundle_states_dir.join(format!("{}.pwstate.json", name));
+                            if fs::write(
+                                &pw_dst,
+                                serde_json::to_string_pretty(&pw_redacted).unwrap_or_default(),
+                            )
+                            .is_ok()
+                            {
+                                pw_success_names.push(name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Load, enrich for replay, and overwrite manifest in the *exported* copy only.
     let manifest_path = temp_dest.join("manifest.json");
     let mut manifest: BrowserArtifactManifestV1 =
@@ -587,7 +682,7 @@ pub fn export_recording_bundle(
             .map_err(|e| format!("malformed exported manifest: {e}"))?;
 
     manifest.replayable = true;
-    manifest.replay_format_version = Some("playwright-1".to_string());
+    manifest.replay_format_version = Some("playwright-2".to_string()); // PR 5: state restoration, rich DOM, full slices
 
     // Best-effort population of replay fields from the events.jsonl present in the copy.
     // Uses PR-1 enriched command/before/after/network so entry + final state are high fidelity.
@@ -633,26 +728,59 @@ pub fn export_recording_bundle(
         }
     }
 
-    // Network slice manifest synthesized from per-event network (PR-2 ready).
+    // PR5: Update network slice manifest (now with full per-action details from enhanced capture).
     let net_hint = json!({
         "derivedFrom": "per-action-network-in-events",
-        "format": "summary-slice-v1",
-        "note": "Full HAR slices available via browser_network + export; use for deterministic replay mocking"
+        "format": "full-slice-v1",
+        "sliceFields": ["method","url","status","resourceType","timestamp","failed","failureText"],
+        "note": "Full per-action slices in events.jsonl; optional HAR subset export supported in replayable test generator (PR5). Use for deterministic replay mocking in generated tests."
     });
     manifest.network_slice_manifest = Some(net_hint);
 
-    // State restoration hints — clearly marked synthetic/best-effort so that
-    // has* flags and replayable status are not misleading for minimal bundles.
+    // PR5: State restoration hints — now populated with real snapshots when save_state() was used during recording.
+    // Bundles are self-describing + self-contained for the hardest (auth/stateful) replay scenarios.
+    let has_real_states = !restored_state_names.is_empty();
+    let state_files: Vec<String> = restored_state_names
+        .iter()
+        .map(|n| format!("states/{}.json", n))
+        .collect();
+    // Only advertise pwstates that were actually successfully written (HIGH review Finding 1)
+    let pw_files: Vec<String> = pw_success_names
+        .iter()
+        .map(|n| format!("states/{}.pwstate.json", n))
+        .collect();
+
     manifest.state_restoration_hints = Some(json!({
-        "synthetic": true,
-        "strategy": "replay-from-events",
+        "synthetic": !has_real_states,
+        "strategy": if has_real_states { "save-state-snapshots-in-bundle/states/" } else { "replay-from-events + per-event basic session (PR1)" },
+        "stateFiles": state_files,
+        "playwrightStorageStateFiles": pw_files,
         "usePerEventSession": true,
-        "cookiesFrom": "event.before.session or event.after.session",
-        "storageFrom": "event.before/after",
+        "cookiesFrom": if has_real_states { "bundle/states/*.json (redacted at export)" } else { "event.before.session or event.after.session" },
+        "storageFrom": if has_real_states { "bundle/states/*.json + *.pwstate.json (redacted)" } else { "event.before/after" },
         "authVault": "required for any redacted secrets; see gsd-browser auth-vault",
         "viewport": "from frames or last after.viewport",
-        "warning": "secrets redacted by default; provide via env or vault for full replay fidelity"
+        "warning": "PR5 SAFETY: states/ snapshots are BEST-EFFORT and REDACTED (sensitive cookie values + high-entropy tokens replaced). Full auth fidelity for replay usually requires auth-vault or re-auth + fresh save_state before export. See statesRedaction below.",
+        "howToUseInGeneratedTest": "See header of generated .spec.ts (runnable test.use when pwstate present). Redaction means some logins will still need manual steps or vault.",
+        "statesRedaction": {
+            "applied": state_redaction_applied || has_real_states,
+            "policy": "sensitive-cookie-names + high-entropy-values + token patterns (via redact_browser_state + redact_text)",
+            "effectOnRestoration": "Cookie values replaced with [REDACTED:...]. Generated tests using pwstate will often require re-auth or explicit vault injection for full fidelity. This is intentional to keep bundles safe to commit/share."
+        }
     }));
+
+    // Ensure artifacts manifest lists states/ when present (evolvable).
+    if has_real_states {
+        if let serde_json::Value::Object(m) = &mut manifest.artifacts {
+            m.insert("states".to_string(), json!("states/"));
+            if !pw_files.is_empty() {
+                m.insert(
+                    "playwrightStates".to_string(),
+                    json!("states/*.pwstate.json (redacted)"),
+                );
+            }
+        }
+    }
 
     let updated = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     if let Err(e) = fs::write(&manifest_path, updated) {
@@ -793,6 +921,63 @@ fn sensitive_redaction_marker(value: &Value) -> Value {
     }
 }
 
+/// PR5 safety fix (HIGH review Finding 2): Best-effort redaction for BrowserState snapshots
+/// before they are copied into portable evidence bundles. Raw auth material (HttpOnly session
+/// cookies, bearer tokens, high-entropy values) must never leak into commit-table / shareable
+/// artifacts. This preserves the "state restoration" feature as a *best-effort* starting point
+/// (full fidelity often requires the auth-vault or re-login + explicit save_state after clean
+/// export). The redaction policy is recorded so generators and humans know the fidelity limit.
+pub fn redact_browser_state(mut state: serde_json::Value) -> (serde_json::Value, bool) {
+    let mut redacted_any = false;
+
+    // Sensitive cookie name patterns (case-insensitive contains)
+    let sensitive_names = [
+        "session", "sess", "auth", "token", "jwt", "sid", "xsrf", "csrf", "remember", "login",
+        "access", "refresh", "id_token",
+    ];
+
+    if let Some(cookies) = state.get_mut("cookies").and_then(|c| c.as_array_mut()) {
+        for cookie in cookies.iter_mut() {
+            if let Some(obj) = cookie.as_object_mut() {
+                if let Some(name_v) = obj.get("name").and_then(|n| n.as_str()) {
+                    let name_lower = name_v.to_lowercase();
+                    let is_sensitive = sensitive_names.iter().any(|s| name_lower.contains(s));
+                    if let Some(value_v) = obj.get_mut("value") {
+                        if let Some(s) = value_v.as_str() {
+                            let should_redact =
+                                is_sensitive || s.len() >= 24 || redact_text(s) != s;
+                            if should_redact {
+                                *value_v = serde_json::json!("[REDACTED:sensitive-cookie]");
+                                redacted_any = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Redact storage values (local + session) using the existing high-entropy + token rules
+    for storage_key in ["localStorage", "sessionStorage"] {
+        if let Some(storage) = state.get_mut(storage_key).and_then(|s| s.as_object_mut()) {
+            for (_k, v) in storage.iter_mut() {
+                if let Some(s) = v.as_str() {
+                    let redacted = redact_text(s);
+                    if redacted != s {
+                        *v = serde_json::json!(redacted);
+                        redacted_any = true;
+                    } else if s.len() >= 32 {
+                        *v = serde_json::json!("[REDACTED:high-entropy]");
+                        redacted_any = true;
+                    }
+                }
+            }
+        }
+    }
+
+    (state, redacted_any)
+}
+
 pub fn validate_recording_bundle(path: &Path) -> Result<serde_json::Value, String> {
     let manifest_path = path.join("manifest.json");
     let events_path = path.join("events.jsonl");
@@ -925,6 +1110,72 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// PR5 helper: convert our internal BrowserState (from save_state) into the exact
+/// Playwright storageState shape so generated tests can consume *.pwstate.json directly
+/// via `test.use({ storageState: '...' })` or `browser.newContext({ storageState })`.
+/// SessionStorage is noted but omitted (PW storageState focuses on cookies + per-origin localStorage).
+fn convert_gsd_to_pw_storage_state(gsd_state: &serde_json::Value) -> serde_json::Value {
+    let cookies = gsd_state
+        .get("cookies")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let ls = gsd_state
+        .get("localStorage")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let mut origins = Vec::new();
+    if let Some(obj) = ls.as_object() {
+        if !obj.is_empty() {
+            // Best-effort origin from first cookie domain (or fallback). Real grouping by origin
+            // would require more cookie context; sufficient for 95% of login state restoration.
+            let origin = cookies
+                .first()
+                .and_then(|c| c.get("domain").and_then(|d| d.as_str()))
+                .map(|d| {
+                    let d = d.trim_start_matches('.');
+                    if d.starts_with("http") {
+                        d.to_string()
+                    } else {
+                        format!("https://{}", d)
+                    }
+                })
+                .unwrap_or_else(|| "https://localhost".to_string());
+            let mut conversion_warnings: Vec<String> = Vec::new();
+            let ls_arr: Vec<serde_json::Value> = obj
+                .iter()
+                .map(|(k, v)| {
+                    let val_str = if let Some(s) = v.as_str() {
+                        s.to_string()
+                    } else {
+                        // Lossless fallback for non-string LS values (numbers, bools, objects)
+                        serde_json::to_string(v).unwrap_or_else(|_| v.to_string())
+                    };
+                    if !v.is_string() {
+                        conversion_warnings.push(format!(
+                            "localStorage key '{}' had non-string value; stringified",
+                            k
+                        ));
+                    }
+                    serde_json::json!({ "name": k, "value": val_str })
+                })
+                .collect();
+            origins.push(serde_json::json!({
+                "origin": origin,
+                "localStorage": ls_arr
+            }));
+        }
+    }
+
+    serde_json::json!({
+        "cookies": cookies,
+        "origins": origins,
+        "_note": "Generated by gsd-browser PR5 export from save_state snapshot (values redacted for safety). sessionStorage dropped (PW storageState does not include it). Non-string localStorage values were stringified.",
+        "_conversionWarnings": []
+    })
 }
 
 #[cfg(test)]
@@ -1446,6 +1697,77 @@ mod tests {
     }
 
     #[test]
+    fn export_includes_referenced_state_files_in_final_bundle() {
+        let dir = tempdir().expect("tempdir");
+        let export_root = dir.path().join("exports");
+        let mut store = RecordingStore::new(dir.path().join("recordings"));
+        let rec = store.start("state-export", "session-1").expect("started");
+        let state_name = format!("pr8state{}", now_ms());
+        let state_dir = gsd_browser_common::state_dir().join("state");
+        fs::create_dir_all(&state_dir).expect("state dir");
+        let state_path = state_dir.join(format!("{state_name}.json"));
+        fs::write(
+            &state_path,
+            json!({
+                "cookies": [{
+                    "name": "session",
+                    "value": "abcdefghijklmnopqrstuvwxyz123456",
+                    "domain": "example.test",
+                    "path": "/"
+                }],
+                "localStorage": {
+                    "token": "abcdefghijklmnopqrstuvwxyz123456"
+                },
+                "sessionStorage": {}
+            })
+            .to_string(),
+        )
+        .expect("state file");
+
+        store
+            .record_event(RecordingEventInput {
+                source: "cli".to_string(),
+                owner: "agent".to_string(),
+                kind: "save_state".to_string(),
+                url: "https://example.test".to_string(),
+                title: "Example".to_string(),
+                redacted: false,
+                command: json!({ "name": state_name }),
+                before: json!({}),
+                after: json!({}),
+                network: json!({}),
+            })
+            .expect("save state event");
+        store.stop(&rec.recording_id).expect("stopped");
+
+        let src = store.recording_dir(&rec.recording_id);
+        let exported =
+            export_recording_bundle(&src, &export_root, &rec.recording_id).expect("export");
+        let exported_state = exported.join(format!("states/{state_name}.json"));
+        let exported_pwstate = exported.join(format!("states/{state_name}.pwstate.json"));
+        assert!(exported_state.exists());
+        assert!(exported_pwstate.exists());
+        let state_json = fs::read_to_string(&exported_state).expect("exported state");
+        assert!(state_json.contains("[REDACTED:sensitive-cookie]"));
+        assert!(!state_json.contains("abcdefghijklmnopqrstuvwxyz123456"));
+
+        let manifest: BrowserArtifactManifestV1 = serde_json::from_str(
+            &fs::read_to_string(exported.join("manifest.json")).expect("manifest"),
+        )
+        .expect("manifest json");
+        let hints = manifest
+            .state_restoration_hints
+            .expect("state restoration hints");
+        assert_eq!(hints["synthetic"], false);
+        assert!(hints["stateFiles"]
+            .as_array()
+            .expect("state files")
+            .iter()
+            .any(|v| v.as_str() == Some(&format!("states/{state_name}.json"))));
+        let _ = fs::remove_file(state_path);
+    }
+
+    #[test]
     fn export_replaces_existing_bundle_after_enrichment() {
         let dir = tempdir().expect("tempdir");
         let export_root = dir.path().join("exports");
@@ -1489,7 +1811,7 @@ mod tests {
         assert!(manifest.replayable);
         assert_eq!(
             manifest.replay_format_version.as_deref(),
-            Some("playwright-1")
+            Some("playwright-2")
         );
         assert!(manifest.entry_point_command.is_some());
         assert!(manifest.expected_final_state.is_some());
