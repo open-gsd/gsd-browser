@@ -296,11 +296,23 @@ pub async fn handle_recording_export(state: &DaemonState, params: &Value) -> Res
         .get("output")
         .and_then(Value::as_str)
         .ok_or("recording_export requires output")?;
-    let path = state
-        .recordings
-        .lock()
-        .await
-        .export(id, std::path::Path::new(output))?;
+
+    // CRITICAL (HIGH mutex finding): Hold the recordings Mutex *only* for the
+    // cheap path lookup. All fs copy, events.jsonl parsing, manifest enrichment,
+    // and disk writes now happen outside the lock so that record_event (hot path
+    // from dispatch), stop, list, etc. are never blocked for the duration of a
+    // large export. This makes exported replayable bundles production-safe.
+    let output_pb = std::path::Path::new(output).to_path_buf();
+    let src = {
+        let recs = state.recordings.lock().await;
+        let p = recs.recording_dir(id);
+        if !p.exists() {
+            return Err(format!("recording not found: {id}"));
+        }
+        p
+    }; // <-- Mutex guard dropped here before any I/O or CPU work
+
+    let path = crate::daemon::view::recording::export_recording_bundle(&src, &output_pb, id)?;
     Ok(json!({ "path": path }))
 }
 
