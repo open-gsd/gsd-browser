@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.28] - 2026-06-03
+
+### Added
+
+- Hosted HTTP MCP auth verifier support for remote MCP deployments.
+- Replayable recording bundle schema and manifest metadata, including richer export-time state restoration hints.
+- Replayable Playwright test generation from recording IDs or exported bundle paths.
+- Per-action network slicing for recordings so each captured step carries focused request evidence.
+
+### Changed
+
+- Recording exports now include richer before/after page state and command context for better evidence and replay workflows.
+- npm package and plugin metadata are aligned under the `@opengsd/gsd-browser` package scope.
+- Replayable example artifacts and agent docs now distinguish illustrative examples from exact production output and point readers to the ground-truth implementation.
+- Generated Playwright output is more robust around custom output paths, Unicode-safe strings, checkbox values, state files, and network evidence.
+
+### Fixed
+
+- Attached CDP mode now adopts existing browser pages instead of drifting to a newly created `about:blank`.
+- MCP auth guidance now clearly separates auth token and auth verifier options.
+- Recording state export redacts sensitive cookies and high-entropy storage values before writing shareable bundles.
+- Replayable bundle export now avoids nested source outputs and replaces existing exports via a temporary bundle.
+- Final review hardening across MCP tool wiring, recording export, replayable examples, and generated tests.
+
 ## [0.1.27] - 2026-05-30
 
 ### Added
