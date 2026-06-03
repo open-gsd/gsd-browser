@@ -305,7 +305,7 @@ fn validate_http_options(options: &HttpServerOptions) -> Result<(), String> {
         return Ok(());
     }
     Err(
-        "refusing to expose unauthenticated gsd-browser MCP on a non-loopback host; set GSD_BROWSER_MCP_AUTH_TOKEN, pass --auth-token, pass --auth-verify-url/set GSD_BROWSER_MCP_AUTH_VERIFY_URL, or explicitly pass --no-auth"
+        "refusing to expose unauthenticated gsd-browser MCP on a non-loopback host; set GSD_BROWSER_MCP_AUTH_TOKEN, pass --auth-token, set GSD_BROWSER_MCP_AUTH_VERIFY_URL, pass --auth-verify-url, or explicitly pass --no-auth"
             .to_string(),
     )
 }
