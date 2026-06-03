@@ -160,18 +160,19 @@ This is the **core vision delivered across PR 1-6**: any exploratory, repro, or 
 - State restoration fidelity is "best effort" post-redaction.
 
 **Agent best practices for this workflow:**
-- Always end evidence flows by calling generate-replayable-test (or instruct the user to) and checking the artifact into the repo under `tests/e2e/` or similar.
+- Always end evidence flows by calling `browser_generate_replayable_test` (or instruct the user to) and checking the artifact into the repo under `tests/e2e/` or similar.
 - Use named sessions + `evidence_creation_workflow` (or `create_evidence_bundle`) prompt as starting point, then explicitly follow up: "now call browser_generate_replayable_test on the resulting bundle and show me the test + any review notes".
 - Store exported bundles alongside generated tests (or in CI artifacts) for audit/replay.
 - For CI: a basic pattern (example, adapt to your runner):
 
   ```yaml
   # .github/workflows/replayable-regression.yml (sketch)
-  - name: Validate + generate + run replayable test from bundle
+  - name: Validate bundle
     run: |
       gsd-browser recording-validate "$BUNDLE_DIR" --json
-      gsd-browser generate-replayable-test --bundle "$BUNDLE_DIR" --name "ci-regression" --output "tests/ci-replay.spec.ts"
-      # Review step (or pre-committed reviewed version):
+      # Generate the reviewed test with the MCP tool:
+      # browser_generate_replayable_test({ "bundlePath": "$BUNDLE_DIR", "name": "ci-regression", "output": "tests/ci-replay.spec.ts" })
+      # Then run the committed reviewed version:
       npx playwright test "tests/ci-replay.spec.ts" --reporter=list
   ```
   Store reviewed generated tests in repo; use exported bundles as CI artifacts for audit. Re-record on major UI changes.

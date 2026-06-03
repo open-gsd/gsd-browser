@@ -3,8 +3,8 @@
   "recordingId": "rec_example_login_20260529",
   "sessionId": "sess_demo_abc",
   "name": "example-login-regression",
-  "startedAtMs": 1717000000000,
-  "stoppedAtMs": 1717000060000,
+  "startedAtMs": 1780012800000,
+  "stoppedAtMs": 1780012860000,
   "startSeq": 1,
   "stopSeq": 5,
   "eventCount": 5,
@@ -21,6 +21,11 @@
   },
   "artifacts": {
     "events": "events.jsonl",
+    "annotations": "annotations/",
+    "console": "logs/console.jsonl",
+    "network": "logs/network.jsonl",
+    "dialog": "logs/dialog.jsonl",
+    "deltas": "deltas.json",
     "states": "states/",
     "playwrightStates": "states/*.pwstate.json (redacted)",
     "frames": "frames/"
@@ -45,7 +50,7 @@
   "networkSliceManifest": {
     "derivedFrom": "per-action-network-in-events",
     "format": "full-slice-v1",
-    "sliceFields": ["method", "url", "status", "resourceType", "timestamp", "failed"],
+    "sliceFields": ["method", "url", "status", "resourceType", "timestamp", "failed", "failureText"],
     "note": "Full per-action slices in events.jsonl; optional HAR subset supported in replayable test generator (PR5)."
   },
   "stateRestorationHints": {

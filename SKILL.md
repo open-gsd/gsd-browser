@@ -389,12 +389,12 @@ gsd-browser recording-discard <id>
 gsd-browser recording-validate <id-or-path> --json
 ```
 
-**Replayable evidence bundles as first-class test artifacts (PR 1-6):** After `record-stop` (or during viewer Record mode), use `recording-export` (or pass recordingId directly) to produce a portable bundle containing enriched events (before/after DOM, full network slices PR5), redacted state snapshots, manifest with replayable:true. Then turn it into a high-quality, commit-table Playwright regression test:
+**Replayable evidence bundles as first-class test artifacts (PR 1-6):** After `record-stop` (or during viewer Record mode), use `recording-export` (or pass recordingId directly) to produce a portable bundle containing enriched events (before/after DOM, full network slices PR5), redacted state snapshots, manifest with replayable:true. Then turn it into a high-quality, commit-ready Playwright regression test:
 
-```bash
-gsd-browser generate-replayable-test --recording-id rec_abc123 --name "checkout-regression" --output tests/checkout.spec.ts
-# or from exported bundle dir:
-gsd-browser generate-replayable-test --bundle ./evidence/checkout-bug-2026-05 --output tests/checkout.spec.ts
+```js
+browser_generate_replayable_test({ "recordingId": "rec_abc123", "name": "checkout-regression", "output": "tests/checkout.spec.ts" })
+// or from exported bundle dir:
+browser_generate_replayable_test({ "bundlePath": "./evidence/checkout-bug-2026-05", "output": "tests/checkout.spec.ts" })
 ```
 
 The generated test includes: command replay, rich per-step DOM assertions (counts/text/structural with expected-vs-actual diffs), save_state restoration (redacted *.pwstate.json ready for storageState), full slice network assertions + optional HAR subset. **Safety:** states are redacted on export (sensitive cookies/tokens -> [REDACTED:...]); manifest records redaction policy. **MVP limits:** locators based on ephemeral refs need human review/refinement for robustness; DOM counts are tolerant smoke checks (use the diff comments). Prefer this over legacy `generate-test` for any flow you want as a durable regression artifact.
@@ -515,8 +515,9 @@ gsd-browser har-export --filename "session.har"    # Custom output path
 gsd-browser generate-test --name "login-flow" --output tests/login.spec.ts
 
 # Recommended (PR5+): full replayable evidence bundle workflow for rich, safe, stateful regression tests
-# (record flow → export/validate → generate-replayable-test). See "Recording bundles" section above and AGENT-BEST-PRACTICES.md.
-gsd-browser generate-replayable-test --bundle ./my-evidence-bundle --name "login-regression" --output tests/login.spec.ts
+# (record flow → export/validate → browser_generate_replayable_test). See "Recording bundles" section above and AGENT-BEST-PRACTICES.md.
+# MCP tool call:
+# browser_generate_replayable_test({ "bundlePath": "./my-evidence-bundle", "name": "login-regression", "output": "tests/login.spec.ts" })
 ```
 
 ### Security

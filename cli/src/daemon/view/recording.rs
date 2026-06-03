@@ -8,6 +8,7 @@ use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -93,6 +94,10 @@ impl RecordingStore {
             return Err("recording already active".to_string());
         }
         self.next_seq = 1;
+        self.pending_seq = None;
+        if let Some(tagger) = &self.current_recording_seq {
+            *tagger.lock().unwrap() = 0;
+        }
         self.redaction_hits = 0;
         self.frame_count = 0;
         self.hashes.clear();
@@ -330,6 +335,13 @@ impl RecordingStore {
         Some(seq)
     }
 
+    pub fn clear_pending_recorded_event(&mut self) -> Option<u64> {
+        if let Some(tagger) = &self.current_recording_seq {
+            *tagger.lock().unwrap() = 0;
+        }
+        self.pending_seq.take()
+    }
+
     /// PR-2: extraction/slicing logic — filters the (tagged) network buffer for entries matching this seq.
     /// Produces the "networkSlice" value embedded in each recorded event (and thus in events.jsonl).
     /// Reuses existing LogBuffer.snapshot() + the seq tags set at listener time.
@@ -528,6 +540,7 @@ pub fn export_recording_bundle(
     output: &Path,
     recording_id: &str,
 ) -> Result<PathBuf, String> {
+    validate_recording_id_component(recording_id)?;
     if !src.exists() {
         return Err(format!("recording not found: {}", recording_id));
     }
@@ -574,19 +587,14 @@ pub fn export_recording_bundle(
     {
         let events_path = temp_dest.join("events.jsonl");
         if events_path.exists() {
-            // PR5 Finding 9 guard: avoid materializing enormous events.jsonl during export (O(n) name scan)
-            if let Ok(meta) = fs::metadata(&events_path) {
-                if meta.len() > 80 * 1024 * 1024 {
-                    // continue with empty names (best-effort); full streaming scan is future work
-                }
-            }
-            if let Ok(events_data) = fs::read_to_string(&events_path) {
+            if let Ok(file) = fs::File::open(&events_path) {
+                let reader = BufReader::new(file);
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                for line in events_data.lines() {
+                for line in reader.lines().map_while(Result::ok) {
                     if line.trim().is_empty() {
                         continue;
                     }
-                    if let Ok(ev) = serde_json::from_str::<serde_json::Value>(line) {
+                    if let Ok(ev) = serde_json::from_str::<serde_json::Value>(&line) {
                         if ev.get("kind").and_then(|k| k.as_str()) == Some("save_state") {
                             let cmd = ev.get("command").unwrap_or(&serde_json::Value::Null);
                             let name = cmd
@@ -617,6 +625,7 @@ pub fn export_recording_bundle(
     // - Track actual success of pwstate conversion/write; only advertise files that were
     //   successfully materialized. No more silent references to phantom files.
     let bundle_states_dir = temp_dest.join("states");
+    let mut state_success_names: Vec<String> = Vec::new();
     let mut pw_success_names: Vec<String> = Vec::new();
     let mut state_redaction_applied = false;
 
@@ -633,12 +642,18 @@ pub fn export_recording_bundle(
                         if did_redact {
                             state_redaction_applied = true;
                         }
-                        if fs::write(
-                            &dst,
-                            serde_json::to_string_pretty(&redacted_state).unwrap_or_default(),
-                        )
-                        .is_ok()
-                        {
+                        let redacted_state_json =
+                            match serde_json::to_string_pretty(&redacted_state) {
+                                Ok(data) => data,
+                                Err(err) => {
+                                    tracing::warn!(
+                                    "[recording] failed to serialize redacted state {name}: {err}"
+                                );
+                                    continue;
+                                }
+                            };
+                        if fs::write(&dst, redacted_state_json).is_ok() {
+                            state_success_names.push(name.clone());
                             // Convert from the *redacted* snapshot (honest fidelity)
                             let pwstate = convert_gsd_to_pw_storage_state(&redacted_state);
                             // Also aggressively redact cookie values inside the pwstate output
@@ -660,13 +675,17 @@ pub fn export_recording_bundle(
                                 }
                             }
                             let pw_dst = bundle_states_dir.join(format!("{}.pwstate.json", name));
-                            if fs::write(
-                                &pw_dst,
-                                serde_json::to_string_pretty(&pw_redacted).unwrap_or_default(),
-                            )
-                            .is_ok()
-                            {
-                                pw_success_names.push(name.clone());
+                            match serde_json::to_string_pretty(&pw_redacted) {
+                                Ok(data) => {
+                                    if fs::write(&pw_dst, data).is_ok() {
+                                        pw_success_names.push(name.clone());
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        "[recording] failed to serialize playwright state {name}: {err}"
+                                    );
+                                }
                             }
                         }
                     }
@@ -687,10 +706,11 @@ pub fn export_recording_bundle(
     // Best-effort population of replay fields from the events.jsonl present in the copy.
     // Uses PR-1 enriched command/before/after/network so entry + final state are high fidelity.
     // Optimized single-pass first/last extraction (no full Vec allocation for large files).
-    if let Ok(events_data) = fs::read_to_string(temp_dest.join("events.jsonl")) {
+    if let Ok(file) = fs::File::open(temp_dest.join("events.jsonl")) {
+        let reader = BufReader::new(file);
         let mut first_line: Option<String> = None;
         let mut last_line: Option<String> = None;
-        for line in events_data.lines() {
+        for line in reader.lines().map_while(Result::ok) {
             if !line.trim().is_empty() {
                 if first_line.is_none() {
                     first_line = Some(line.to_string());
@@ -739,8 +759,8 @@ pub fn export_recording_bundle(
 
     // PR5: State restoration hints — now populated with real snapshots when save_state() was used during recording.
     // Bundles are self-describing + self-contained for the hardest (auth/stateful) replay scenarios.
-    let has_real_states = !restored_state_names.is_empty();
-    let state_files: Vec<String> = restored_state_names
+    let has_real_states = !state_success_names.is_empty();
+    let state_files: Vec<String> = state_success_names
         .iter()
         .map(|n| format!("states/{}.json", n))
         .collect();
@@ -923,7 +943,7 @@ fn sensitive_redaction_marker(value: &Value) -> Value {
 
 /// PR5 safety fix (HIGH review Finding 2): Best-effort redaction for BrowserState snapshots
 /// before they are copied into portable evidence bundles. Raw auth material (HttpOnly session
-/// cookies, bearer tokens, high-entropy values) must never leak into commit-table / shareable
+/// cookies, bearer tokens, high-entropy values) must never leak into commit-ready / shareable
 /// artifacts. This preserves the "state restoration" feature as a *best-effort* starting point
 /// (full fidelity often requires the auth-vault or re-login + explicit save_state after clean
 /// export). The redaction policy is recorded so generators and humans know the fidelity limit.
@@ -1035,8 +1055,18 @@ fn origin_from_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return String::new();
     };
-    let host = rest.split('/').next().unwrap_or_default();
-    format!("{scheme}://{host}")
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    if authority.is_empty() {
+        String::new()
+    } else {
+        format!("{scheme}://{authority}")
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1098,12 +1128,27 @@ fn copy_recording_bundle_for_export(src: &Path, dest: &Path) -> Result<(), Strin
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    if fs::symlink_metadata(src)
+        .map_err(|e| format!("stat {src:?}: {e}"))?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(format!(
+            "refusing to copy symlink in recording bundle: {src:?}"
+        ));
+    }
     fs::create_dir_all(dst).map_err(|e| format!("failed mkdir {dst:?}: {e}"))?;
     for entry in fs::read_dir(src).map_err(|e| format!("readdir {src:?}: {e}"))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let s = entry.path();
         let d = dst.join(entry.file_name());
-        if s.is_dir() {
+        let metadata = fs::symlink_metadata(&s).map_err(|e| format!("stat {s:?}: {e}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "refusing to copy symlink in recording bundle: {s:?}"
+            ));
+        }
+        if metadata.is_dir() {
             copy_dir_recursive(&s, &d)?;
         } else {
             fs::copy(&s, &d).map_err(|e| format!("copy file {s:?} -> {d:?}: {e}"))?;
@@ -1128,6 +1173,7 @@ fn convert_gsd_to_pw_storage_state(gsd_state: &serde_json::Value) -> serde_json:
         .cloned()
         .unwrap_or(serde_json::json!({}));
     let mut origins = Vec::new();
+    let mut conversion_warnings: Vec<String> = Vec::new();
     if let Some(obj) = ls.as_object() {
         if !obj.is_empty() {
             // Best-effort origin from first cookie domain (or fallback). Real grouping by origin
@@ -1144,7 +1190,6 @@ fn convert_gsd_to_pw_storage_state(gsd_state: &serde_json::Value) -> serde_json:
                     }
                 })
                 .unwrap_or_else(|| "https://localhost".to_string());
-            let mut conversion_warnings: Vec<String> = Vec::new();
             let ls_arr: Vec<serde_json::Value> = obj
                 .iter()
                 .map(|(k, v)| {
@@ -1174,8 +1219,20 @@ fn convert_gsd_to_pw_storage_state(gsd_state: &serde_json::Value) -> serde_json:
         "cookies": cookies,
         "origins": origins,
         "_note": "Generated by gsd-browser PR5 export from save_state snapshot (values redacted for safety). sessionStorage dropped (PW storageState does not include it). Non-string localStorage values were stringified.",
-        "_conversionWarnings": []
+        "_conversionWarnings": conversion_warnings
     })
+}
+
+fn validate_recording_id_component(recording_id: &str) -> Result<(), String> {
+    if recording_id.is_empty()
+        || recording_id.starts_with('.')
+        || !recording_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return Err("recording id contains unsafe path characters".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
