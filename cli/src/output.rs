@@ -1233,6 +1233,44 @@ pub fn format_text_act(result: &Value) -> String {
     lines.join("\n")
 }
 
+/// Format act_instruction result — show the generic plan and result summary.
+pub fn format_text_act_instruction(result: &Value) -> String {
+    let instruction = result
+        .get("instruction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let plan = result.get("plan").unwrap_or(&Value::Null);
+    let action = plan.get("action").and_then(|v| v.as_str()).unwrap_or("?");
+    let confidence = plan
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let reason = plan.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut lines = vec![format!(
+        "Instruction: {instruction}\nPlan: {action} (confidence: {confidence:.3})"
+    )];
+    if !reason.is_empty() {
+        lines.push(format!("Reason: {reason}"));
+    }
+    if let Some(params) = plan.get("params") {
+        lines.push(format!("Params: {params}"));
+    }
+    if result
+        .get("dryRun")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        lines.push("Dry run only; no action executed.".to_string());
+    }
+    if let Some(state) = result.get("state") {
+        lines.push(String::new());
+        lines.push("Page summary:".to_string());
+        lines.push(format_compact_summary(state));
+    }
+    lines.join("\n")
+}
+
 /// Format session-summary result — structured diagnostic snapshot.
 pub fn format_text_session_summary(result: &Value) -> String {
     let mut lines = Vec::new();

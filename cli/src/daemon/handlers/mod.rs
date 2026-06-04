@@ -11,6 +11,7 @@ pub mod extract;
 pub mod forms;
 pub mod har;
 pub mod inspect;
+pub mod instruction;
 pub mod intent;
 pub mod interaction;
 pub mod narration_cmds;
