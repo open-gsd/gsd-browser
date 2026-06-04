@@ -280,6 +280,7 @@ pub async fn handle_click_ref(
             "settle": settle,
             "clicked": {
                 "ref": ref_str,
+                "actionability": action.get("actionability").cloned().unwrap_or(Value::Null),
             },
             "ref_resolution": ref_resolution_json(ref_str, &node, &resolution),
         }))
@@ -336,6 +337,7 @@ pub async fn handle_hover_ref(
             "settle": settle,
             "hovered": {
                 "ref": ref_str,
+                "actionability": action.get("actionability").cloned().unwrap_or(Value::Null),
             },
             "ref_resolution": ref_resolution_json(ref_str, &node, &resolution),
         }))
@@ -425,6 +427,8 @@ pub async fn handle_fill_ref(
                 "actual": action.get("fill").and_then(|value| value.get("actual")).cloned().unwrap_or(Value::Null),
                 "method": action.get("fill").and_then(|value| value.get("method")).cloned().unwrap_or(Value::Null),
                 "kind": action.get("fill").and_then(|value| value.get("kind")).cloned().unwrap_or(Value::Null),
+                "valueResult": action.get("valueResult").cloned().unwrap_or(Value::Null),
+                "actionability": action.get("actionability").cloned().unwrap_or(Value::Null),
             },
             "ref_resolution": ref_resolution_json(ref_str, &node, &resolution),
         }))

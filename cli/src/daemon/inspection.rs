@@ -298,6 +298,23 @@ function absoluteCenter(context, el) {
   return { x, y };
 }
 
+function absolutePoint(context, point) {
+  let x = point.x;
+  let y = point.y;
+  let win = context.win;
+
+  while (win && win !== win.top) {
+    const frameEl = win.frameElement;
+    if (!frameEl) break;
+    const frameRect = frameEl.getBoundingClientRect();
+    x += frameRect.left;
+    y += frameRect.top;
+    win = win.parent;
+  }
+
+  return { x, y };
+}
+
 function absoluteBounds(context, el) {
   const rect = el.getBoundingClientRect();
   let x = rect.left;
@@ -331,6 +348,92 @@ function elementSummary(el, context) {
     value: el.value !== undefined ? String(el.value) : null,
     checked: !!el.checked,
   };
+}
+
+function hitBelongsToElement(el, hit) {
+  if (!hit) return false;
+  if (hit === el) return true;
+  if (el.contains && el.contains(hit)) return true;
+  const hitRoot = hit.getRootNode && hit.getRootNode();
+  if (hitRoot && hitRoot.host && (hitRoot.host === el || (el.contains && el.contains(hitRoot.host)))) {
+    return true;
+  }
+  const root = el.getRootNode && el.getRootNode();
+  if (root && root.host && hitBelongsToElement(root.host, hit)) return true;
+  return false;
+}
+
+function localActionPoint(context, el) {
+  if (!isVisible(el)) {
+    return { ok: false, reason: "element is not visible" };
+  }
+  if (!isEnabled(el) || el.getAttribute("aria-disabled") === "true") {
+    return { ok: false, reason: "element is disabled" };
+  }
+
+  const blocks = ["center", "nearest", "start", "end"];
+  let last = null;
+  for (const block of blocks) {
+    if (el.scrollIntoView) {
+      el.scrollIntoView({ block, inline: "center", behavior: "instant" });
+    }
+
+    const rect = el.getBoundingClientRect();
+    const viewportW = context.win.innerWidth || context.doc.documentElement.clientWidth || 0;
+    const viewportH = context.win.innerHeight || context.doc.documentElement.clientHeight || 0;
+    const left = Math.max(0, rect.left);
+    const right = Math.min(viewportW, rect.right);
+    const top = Math.max(0, rect.top);
+    const bottom = Math.min(viewportH, rect.bottom);
+    if (right <= left || bottom <= top) {
+      last = { ok: false, reason: "element is outside the viewport after scroll", block };
+      continue;
+    }
+
+    const samples = [
+      { x: (left + right) / 2, y: (top + bottom) / 2 },
+      { x: left + (right - left) * 0.25, y: top + (bottom - top) * 0.25 },
+      { x: left + (right - left) * 0.75, y: top + (bottom - top) * 0.25 },
+      { x: left + (right - left) * 0.25, y: top + (bottom - top) * 0.75 },
+      { x: left + (right - left) * 0.75, y: top + (bottom - top) * 0.75 },
+    ];
+
+    for (const sample of samples) {
+      const hit = context.doc.elementFromPoint(sample.x, sample.y);
+      if (hitBelongsToElement(el, hit)) {
+        return {
+          ok: true,
+          x: sample.x,
+          y: sample.y,
+          block,
+          covered: false,
+          hit: hit ? elementSummary(hit, context) : null,
+        };
+      }
+      last = {
+        ok: false,
+        reason: "element point is covered",
+        block,
+        x: sample.x,
+        y: sample.y,
+        hit: hit ? elementSummary(hit, context) : null,
+      };
+    }
+  }
+
+  const rect = el.getBoundingClientRect();
+  return {
+    ...(last || { ok: false, reason: "no actionable point found" }),
+    fallback: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+  };
+}
+
+function prepareActionTarget(context, el) {
+  const point = localActionPoint(context, el);
+  if (!point.ok && point.fallback) {
+    return { ...point, absolute: absolutePoint(context, point.fallback) };
+  }
+  return { ...point, absolute: point.ok ? absolutePoint(context, point) : null };
 }
 
 function isTextInputType(el) {
@@ -735,6 +838,56 @@ function selectOptionElement(context, el, options) {
 
   return { ok: false, error: "element is not a select, combobox, listbox, or menu trigger" };
 }
+
+function dispatchValueEvents(el) {
+  el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+}
+
+function setRangeOrNumberValue(el, rawValue) {
+  if (!el || !el.tagName || el.tagName.toLowerCase() !== "input") return null;
+  const type = String(el.getAttribute("type") || "text").toLowerCase();
+  if (type !== "range" && type !== "number") return null;
+
+  const wanted = String(rawValue ?? "");
+  if (wanted.trim() === "") {
+    if (type === "number") {
+      setNativeValue(el, "");
+      dispatchValueEvents(el);
+      return { ok: el.value === "", kind: type, expected: "", actual: String(el.value || ""), method: "numeric-empty" };
+    }
+    return { ok: false, kind: type, expected: wanted, actual: String(el.value || ""), error: "range value cannot be empty" };
+  }
+
+  const numeric = Number(wanted);
+  if (!Number.isFinite(numeric)) {
+    return { ok: false, kind: type, expected: wanted, actual: String(el.value || ""), error: "value is not numeric" };
+  }
+
+  let next = numeric;
+  const min = el.getAttribute("min");
+  const max = el.getAttribute("max");
+  if (min !== null && min !== "" && Number.isFinite(Number(min))) next = Math.max(next, Number(min));
+  if (max !== null && max !== "" && Number.isFinite(Number(max))) next = Math.min(next, Number(max));
+
+  setNativeValue(el, String(next));
+  dispatchValueEvents(el);
+
+  const actual = String(el.value || "");
+  const actualNumber = Number(actual);
+  const ok = Number.isFinite(actualNumber) && Math.abs(actualNumber - next) < 1e-9;
+  return {
+    ok,
+    kind: type,
+    expected: String(next),
+    actual,
+    method: "numeric-direct",
+    min: min ?? null,
+    max: max ?? null,
+    step: el.getAttribute("step"),
+    error: ok ? null : "numeric value verification failed",
+  };
+}
 "##;
 
 fn selected_frame_value(state: &DaemonState) -> Value {
@@ -929,15 +1082,13 @@ pub async fn resolve_selector_target(
   }}
   if (!target) target = matches[0];
 
-  if (target.element.scrollIntoView) {{
-    target.element.scrollIntoView({{ block: "center", inline: "center", behavior: "instant" }});
-  }}
-
-  const center = absoluteCenter(target.context, target.element);
+  const actionability = prepareActionTarget(target.context, target.element);
+  const center = actionability.absolute || absoluteCenter(target.context, target.element);
   return JSON.stringify({{
     ok: true,
     count: matches.length,
     target: target.summary,
+    actionability,
     center,
     boundaries: resolved.boundaries || [],
   }});
@@ -992,10 +1143,7 @@ pub async fn perform_selector_action(
   const el = target.element;
   const context = target.context;
   const options = {options};
-
-  if (el.scrollIntoView) {{
-    el.scrollIntoView({{ block: "center", inline: "center", behavior: "instant" }});
-  }}
+  const actionability = prepareActionTarget(context, el);
 
   try {{
     switch ({action}) {{
@@ -1018,9 +1166,15 @@ pub async fn perform_selector_action(
         break;
       }}
       case "type": {{
-        const fillResult = robustFillElement(context, el, options);
-        target.fillResult = fillResult;
-        if (!fillResult.ok) throw new Error(fillResult.error || "fill failed");
+        const numeric = setRangeOrNumberValue(el, String(options.text || ""));
+        if (numeric) {{
+          target.valueResult = numeric;
+          if (!numeric.ok) throw new Error(numeric.error || "numeric value failed");
+        }} else {{
+          const fillResult = robustFillElement(context, el, options);
+          target.fillResult = fillResult;
+          if (!fillResult.ok) throw new Error(fillResult.error || "fill failed");
+        }}
         break;
       }}
       case "select_option": {{
@@ -1047,8 +1201,10 @@ pub async fn perform_selector_action(
       error: String(err),
       count: matches.length,
       target: elementSummary(el, context),
+      actionability,
       fill: target.fillResult || null,
       selection: target.selection || null,
+      valueResult: target.valueResult || null,
       boundaries: resolved.boundaries || [],
     }});
   }}
@@ -1057,9 +1213,11 @@ pub async fn perform_selector_action(
     ok: true,
     count: matches.length,
     target: elementSummary(el, context),
+    actionability,
     fill: target.fillResult || null,
     selection: target.selection || null,
-    center: absoluteCenter(context, el),
+    valueResult: target.valueResult || null,
+    center: actionability.absolute || absoluteCenter(context, el),
     boundaries: resolved.boundaries || [],
   }});
 "#,
@@ -1538,11 +1696,10 @@ pub async fn act_on_snapshot_node(
   }}
 
   const el = match.element;
-  if (el.scrollIntoView) {{
-    el.scrollIntoView({{ block: "center", inline: "center", behavior: "instant" }});
-  }}
+  const actionability = prepareActionTarget(context, el);
 
   let fillResult = null;
+  let valueResult = null;
   try {{
     if (action === "click") {{
       if (el.focus) el.focus();
@@ -1557,8 +1714,14 @@ pub async fn act_on_snapshot_node(
         el.dispatchEvent(new MouseEvent(eventName, {{ bubbles: true, cancelable: true, view: context.win }}));
       }}
     }} else if (action === "fill") {{
-      fillResult = robustFillElement(context, el, options);
-      if (!fillResult.ok) throw new Error(fillResult.error || "fill failed");
+      const numeric = setRangeOrNumberValue(el, String(options.text || ""));
+      if (numeric) {{
+        valueResult = numeric;
+        if (!numeric.ok) throw new Error(numeric.error || "numeric value failed");
+      }} else {{
+        fillResult = robustFillElement(context, el, options);
+        if (!fillResult.ok) throw new Error(fillResult.error || "fill failed");
+      }}
     }} else {{
       throw new Error("unsupported ref action: " + action);
     }}
@@ -1569,7 +1732,9 @@ pub async fn act_on_snapshot_node(
       tier: match.tier,
       selector: selectorHint(el),
       summary: elementSummary(el, context),
+      actionability,
       fill: fillResult,
+      valueResult,
       frameLabel: context.label,
       frameUrl: context.url,
       boundaries: resolved.boundaries || [],
@@ -1581,7 +1746,9 @@ pub async fn act_on_snapshot_node(
     tier: match.tier,
     selector: selectorHint(el),
     summary: elementSummary(el, context),
+    actionability,
     fill: fillResult,
+    valueResult,
     frameLabel: context.label,
     frameUrl: context.url,
     boundaries: resolved.boundaries || [],

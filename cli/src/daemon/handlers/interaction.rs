@@ -64,6 +64,7 @@ fn selector_action_meta(selector: &str, result: &Value) -> Value {
         "tag": target.get("tag").cloned().unwrap_or(Value::Null),
         "role": target.get("role").cloned().unwrap_or(Value::Null),
         "name": target.get("name").cloned().unwrap_or(Value::Null),
+        "actionability": result.get("actionability").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -294,6 +295,8 @@ pub async fn handle_type_text(
                     "actual": action_result.get("fill").and_then(|value| value.get("actual")).cloned().unwrap_or(Value::Null),
                     "method": action_result.get("fill").and_then(|value| value.get("method")).cloned().unwrap_or(Value::Null),
                     "kind": action_result.get("fill").and_then(|value| value.get("kind")).cloned().unwrap_or(Value::Null),
+                    "valueResult": action_result.get("valueResult").cloned().unwrap_or(Value::Null),
+                    "actionability": action_result.get("actionability").cloned().unwrap_or(Value::Null),
                 },
                 "boundaries": action_result.get("boundaries").cloned().unwrap_or(json!([])),
             }))
