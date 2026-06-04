@@ -105,6 +105,7 @@ async fn dispatch_step(
         "navigate" => handlers::navigate::handle_navigate(page, step, state).await,
         "click" => handlers::interaction::handle_click(page, state, step).await,
         "type" => handlers::interaction::handle_type_text(page, state, step).await,
+        "select_option" => handlers::interaction::handle_select_option(page, state, step).await,
         "key_press" => handlers::interaction::handle_press(page, state, step).await,
         "wait_for" => handlers::wait::handle_wait_for(page, logs, state, step).await,
         "assert" => handlers::assert_cmd::handle_assert(page, logs, state, step).await,

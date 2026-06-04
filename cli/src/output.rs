@@ -279,7 +279,13 @@ pub fn format_text_interaction(result: &Value) -> String {
         let opt = selected
             .get("option")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                selected
+                    .get("option")
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            });
         lines.push(format!("Selected: \"{opt}\" in {sel}"));
     }
     if let Some(checked) = result.get("checked") {

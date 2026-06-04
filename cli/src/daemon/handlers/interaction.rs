@@ -558,8 +558,8 @@ pub async fn handle_scroll(
 
 // ── Select Option ──
 
-/// Handle `select_option` command — set select element value.
-/// Params: { selector: string, option: string }
+/// Handle `select_option` command — set select, combobox, listbox, or menu option.
+/// Params: { selector: string, option: string | string[] }
 pub async fn handle_select_option(
     page: &Page,
     state: &DaemonState,
@@ -569,26 +569,34 @@ pub async fn handle_select_option(
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing required parameter: selector".to_string())?;
-    let option = params
+    let option_value = params
         .get("option")
-        .and_then(|v| v.as_str())
+        .cloned()
         .ok_or_else(|| "missing required parameter: option".to_string())?;
+    if !(option_value.is_string() || option_value.is_array()) {
+        return Err("option must be a string or array of strings".to_string());
+    }
+    let option_hint = if let Some(option) = option_value.as_str() {
+        option.to_string()
+    } else {
+        option_value.to_string()
+    };
 
-    debug!("select_option: selector={selector} option={option}");
+    debug!("select_option: selector={selector} option={option_hint}");
 
     with_narration(
         page,
         state,
         ActionKind::SelectOption,
         Some(selector),
-        Some(option),
+        Some(&option_hint),
         || async {
             let action_result = inspection::perform_selector_action(
                 page,
                 state,
                 selector,
                 "select_option",
-                &json!({ "option": option }),
+                &json!({ "option": option_value.clone() }),
                 true,
             )
             .await?;
@@ -609,7 +617,10 @@ pub async fn handle_select_option(
                 "settle": settle,
                 "selected": {
                     "selector": selector,
-                    "option": option,
+                    "option": option_value.clone(),
+                    "mode": action_result.get("selection").and_then(|value| value.get("mode")).cloned().unwrap_or(Value::Null),
+                    "matched": action_result.get("selection").and_then(|value| value.get("matched")).cloned().unwrap_or(Value::Null),
+                    "actual": action_result.get("selection").and_then(|value| value.get("selected")).cloned().unwrap_or(Value::Null),
                     "frameLabel": action_result.get("target").and_then(|value| value.get("frameLabel")).cloned().unwrap_or(Value::Null),
                     "frameUrl": action_result.get("target").and_then(|value| value.get("frameUrl")).cloned().unwrap_or(Value::Null),
                 },

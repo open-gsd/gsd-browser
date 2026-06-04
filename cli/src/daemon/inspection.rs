@@ -515,6 +515,222 @@ function robustFillElement(context, el, options) {
 
   return { ok: true, before, actual, expected, kind, method, submitted };
 }
+
+function looseOptionText(text) {
+  return normalizeText(text).toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function optionValues(input) {
+  if (Array.isArray(input)) return input.map((value) => String(value));
+  if (input === undefined || input === null) return [""];
+  return [String(input)];
+}
+
+function optionTextCandidates(el) {
+  return [
+    el.value,
+    el.label,
+    el.getAttribute && el.getAttribute("value"),
+    el.getAttribute && el.getAttribute("data-value"),
+    el.getAttribute && el.getAttribute("data-testid"),
+    el.getAttribute && el.getAttribute("aria-label"),
+    el.getAttribute && el.getAttribute("title"),
+    accessibleName(el),
+    el.innerText,
+    el.textContent,
+  ].filter((value) => value !== undefined && value !== null && String(value).trim() !== "");
+}
+
+function optionMatchScore(option, wanted) {
+  const rawWanted = String(wanted);
+  const normalizedWanted = normalizeText(rawWanted);
+  const looseWanted = looseOptionText(rawWanted);
+  let best = 0;
+  for (const candidate of optionTextCandidates(option)) {
+    const rawCandidate = String(candidate);
+    const normalizedCandidate = normalizeText(rawCandidate);
+    const looseCandidate = looseOptionText(rawCandidate);
+    if (rawCandidate === rawWanted || normalizedCandidate === normalizedWanted) best = Math.max(best, 100);
+    if (looseCandidate === looseWanted) best = Math.max(best, 95);
+    if (looseWanted.length >= 2 && looseCandidate.includes(looseWanted)) best = Math.max(best, 70);
+    if (looseCandidate.length >= 3 && looseWanted.includes(looseCandidate)) best = Math.max(best, 70);
+  }
+  return best;
+}
+
+function selectedOptionSnapshot(selectEl) {
+  return Array.from(selectEl.selectedOptions || []).map((option) => ({
+    value: String(option.value || ""),
+    label: String(option.label || ""),
+    text: normalizeText(option.textContent || ""),
+  }));
+}
+
+function dispatchSelectEvents(el) {
+  el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+}
+
+function clickLike(context, el) {
+  if (typeof el.focus === "function") el.focus();
+  if (typeof el.click === "function") {
+    el.click();
+  } else {
+    el.dispatchEvent(new context.win.MouseEvent("mousedown", { bubbles: true, cancelable: true, view: context.win }));
+    el.dispatchEvent(new context.win.MouseEvent("mouseup", { bubbles: true, cancelable: true, view: context.win }));
+    el.dispatchEvent(new context.win.MouseEvent("click", { bubbles: true, cancelable: true, view: context.win }));
+  }
+}
+
+function selectNativeOption(context, el, wantedValues) {
+  const allOptions = Array.from(el.options || []);
+  if (allOptions.length === 0) return { ok: false, error: "select has no options" };
+
+  const matched = [];
+  for (const wanted of wantedValues) {
+    const ranked = allOptions
+      .map((option) => ({ option, score: optionMatchScore(option, wanted) }))
+      .filter((entry) => entry.score > 0 && !entry.option.disabled)
+      .sort((a, b) => b.score - a.score);
+    if (ranked.length === 0) return { ok: false, error: "option not found: " + wanted };
+    matched.push({ wanted, option: ranked[0].option, score: ranked[0].score });
+  }
+
+  if (el.multiple) {
+    for (const option of allOptions) option.selected = false;
+    for (const entry of matched) entry.option.selected = true;
+  } else {
+    matched[0].option.selected = true;
+    el.value = matched[0].option.value;
+  }
+  dispatchSelectEvents(el);
+
+  const selected = selectedOptionSnapshot(el);
+  const verified = wantedValues.every((wanted) =>
+    selected.some((option) => optionMatchScore({
+      value: option.value,
+      label: option.label,
+      getAttribute: () => "",
+      innerText: option.text,
+      textContent: option.text,
+    }, wanted) > 0)
+  );
+  if (!verified) {
+    return { ok: false, error: "selection verification failed", selected, expected: wantedValues };
+  }
+
+  return {
+    ok: true,
+    mode: "native-select",
+    selected,
+    matched: matched.map((entry) => ({
+      wanted: entry.wanted,
+      value: String(entry.option.value || ""),
+      label: String(entry.option.label || ""),
+      text: normalizeText(entry.option.textContent || ""),
+      score: entry.score,
+    })),
+  };
+}
+
+function customOptionRoots(context, el) {
+  const roots = [];
+  const doc = context.doc;
+  const add = (node) => {
+    if (node && !roots.includes(node)) roots.push(node);
+  };
+
+  add(el);
+  const controls = el.getAttribute && el.getAttribute("aria-controls");
+  if (controls) {
+    for (const id of controls.split(/\s+/)) add(doc.getElementById(id));
+  }
+  const owns = el.getAttribute && el.getAttribute("aria-owns");
+  if (owns) {
+    for (const id of owns.split(/\s+/)) add(doc.getElementById(id));
+  }
+  add(el.closest && el.closest("[role=listbox], [role=menu], [role=radiogroup], form, body"));
+  add(doc.body);
+  return roots;
+}
+
+function findCustomOption(context, el, wanted) {
+  const selector = [
+    "[role=option]",
+    "[role=menuitem]",
+    "[role=menuitemradio]",
+    "[role=menuitemcheckbox]",
+    "[data-value]",
+    "[aria-selected]",
+    "li",
+    "button",
+  ].join(",");
+
+  const seen = new Set();
+  const candidates = [];
+  for (const root of customOptionRoots(context, el)) {
+    const nodes = root.querySelectorAll ? Array.from(root.querySelectorAll(selector)) : [];
+    for (const node of nodes) {
+      if (seen.has(node) || node === el) continue;
+      seen.add(node);
+      if (!isVisible(node) || !isEnabled(node)) continue;
+      const score = optionMatchScore(node, wanted);
+      if (score > 0) candidates.push({ node, score });
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0] || null;
+}
+
+function selectCustomOption(context, el, wantedValues) {
+  if (wantedValues.length !== 1) {
+    return { ok: false, error: "custom dropdown selection supports one option at a time" };
+  }
+  const wanted = wantedValues[0];
+
+  clickLike(context, el);
+  const match = findCustomOption(context, el, wanted);
+  if (!match) return { ok: false, error: "option not found: " + wanted };
+
+  clickLike(context, match.node);
+  const selected = {
+    value: "value" in el ? String(el.value || "") : null,
+    text: normalizeText(el.innerText || el.textContent || ""),
+    optionText: normalizeText(match.node.innerText || match.node.textContent || ""),
+    optionRole: inferRole(match.node),
+    optionSelected: match.node.getAttribute("aria-selected"),
+  };
+  return {
+    ok: true,
+    mode: "custom-option",
+    selected,
+    matched: [{
+      wanted,
+      text: selected.optionText,
+      value: match.node.getAttribute("data-value") || match.node.getAttribute("value") || "",
+      score: match.score,
+    }],
+  };
+}
+
+function selectOptionElement(context, el, options) {
+  const wantedValues = optionValues(options.option);
+  if (!isVisible(el)) return { ok: false, error: "select target is not visible" };
+  if (!isEnabled(el) || el.getAttribute("aria-disabled") === "true") {
+    return { ok: false, error: "select target is disabled" };
+  }
+
+  if (el.tagName && el.tagName.toLowerCase() === "select") {
+    return selectNativeOption(context, el, wantedValues);
+  }
+
+  const role = inferRole(el) || (el.getAttribute && el.getAttribute("role")) || "";
+  if (["combobox", "listbox", "menu", "button", "textbox"].includes(role) || el.hasAttribute("aria-haspopup")) {
+    return selectCustomOption(context, el, wantedValues);
+  }
+
+  return { ok: false, error: "element is not a select, combobox, listbox, or menu trigger" };
+}
 "##;
 
 fn selected_frame_value(state: &DaemonState) -> Value {
@@ -804,21 +1020,9 @@ pub async fn perform_selector_action(
         break;
       }}
       case "select_option": {{
-        if (!el.tagName || el.tagName.toLowerCase() !== "select") {{
-          throw new Error("element is not a <select>");
-        }}
-        const optionValue = String(options.option || "");
-        const match = Array.from(el.options || []).find((option) =>
-          option.label === optionValue ||
-          option.value === optionValue ||
-          normalizeText(option.textContent || "") === optionValue
-        );
-        if (!match) {{
-          throw new Error("option not found: " + optionValue);
-        }}
-        el.value = match.value;
-        el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-        el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+        const selection = selectOptionElement(context, el, options);
+        target.selection = selection;
+        if (!selection.ok) throw new Error(selection.error || "select_option failed");
         break;
       }}
       case "set_checked": {{
@@ -840,6 +1044,7 @@ pub async fn perform_selector_action(
       count: matches.length,
       target: elementSummary(el, context),
       fill: target.fillResult || null,
+      selection: target.selection || null,
       boundaries: resolved.boundaries || [],
     }});
   }}
@@ -849,6 +1054,7 @@ pub async fn perform_selector_action(
     count: matches.length,
     target: elementSummary(el, context),
     fill: target.fillResult || null,
+    selection: target.selection || null,
     center: absoluteCenter(context, el),
     boundaries: resolved.boundaries || [],
   }});
