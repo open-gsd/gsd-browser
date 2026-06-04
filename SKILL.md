@@ -129,7 +129,7 @@ gsd-browser set-viewport --width 1920 --height 1080  # Custom dimensions
 
 ### Natural-Language Instruction Action
 
-Use `act-instruction` for short, action-oriented browser instructions when an agent or user has natural language and the page has clear live DOM affordances. It plans against visible fields, buttons, options, checkboxes, sliders, and drag targets, then dispatches the existing primitive commands. It is generic browser automation, not a benchmark script.
+Use `act-instruction` for short, action-oriented browser instructions when an agent or user has natural language and the page has clear live DOM affordances. It plans against visible fields, buttons, options, checkboxes, sliders, drag targets, revealable panels/tabs, repeated item rows, and simple DOM-visible counts, then dispatches bounded primitive commands. It is generic browser automation, not a benchmark script.
 
 ```bash
 gsd-browser act-instruction "enter 'alice@example.com' into Email and click Continue"
@@ -144,10 +144,11 @@ MCP clients use `browser_act_instruction` with the same controls: `instruction`,
 Best use cases:
 
 - Natural-language tasks like "fill both fields with cat", "select monthly", "drag item A to Done", or "click Submit".
+- Discovery tasks like "expand sections to find and click the link", simple repeated-row choices like "buy the shortest duration", and DOM-visible counting tasks like "how many blue letters are there?".
 - Ambiguous pages where `--dry-run`, `--scope`, or `--min-confidence` can make the plan inspectable before execution.
 - Small compound actions where a bounded sequence is simpler than hand-building a batch.
 
-Prefer refs, `browser_fill_form`, or `browser_batch` for critical flows, long workflows, or cases where exact element identity matters more than interpretation.
+Prefer refs, `browser_fill_form`, or `browser_batch` for critical flows, long workflows, canvas/image-only reasoning, or cases where exact element identity matters more than interpretation.
 
 ### Snapshot & Refs
 

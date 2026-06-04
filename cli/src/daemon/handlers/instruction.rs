@@ -21,6 +21,7 @@ enum InstructionKind {
     Fill,
     SelectOption,
     SetChecked,
+    Count,
     Drag,
     Scroll,
     Unknown,
@@ -33,6 +34,7 @@ impl InstructionKind {
             Self::Fill => "fill",
             Self::SelectOption => "select_option",
             Self::SetChecked => "set_checked",
+            Self::Count => "count",
             Self::Drag => "drag",
             Self::Scroll => "scroll",
             Self::Unknown => "unknown",
@@ -184,6 +186,8 @@ async fn dispatch_planned_action(
         "select_option" => handlers::interaction::handle_select_option(page, state, &params).await,
         "set_checked" => handlers::interaction::handle_set_checked(page, state, &params).await,
         "set_slider" => handle_set_slider(page, &params).await,
+        "discover_click" => handle_discover_click(page, &params).await,
+        "scroll_element" => handle_scroll_element(page, &params).await,
         "drag" => handlers::interaction::handle_drag(page, state, &params).await,
         "scroll" => handlers::interaction::handle_scroll(page, state, &params).await,
         other => Err(format!(
@@ -251,6 +255,134 @@ async fn handle_set_slider(page: &Page, params: &Value) -> Result<Value, String>
     }
 }
 
+async fn handle_scroll_element(page: &Page, params: &Value) -> Result<Value, String> {
+    let selector = params
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing required parameter: selector".to_string())?;
+    let selector_json = serde_json::to_string(selector).unwrap();
+    let js = format!(
+        r#"(() => {{
+  const el = document.querySelector({selector_json});
+  if (!el) return {{ ok: false, error: 'scroll_element target not found' }};
+  el.scrollTop = el.scrollHeight;
+  el.dispatchEvent(new Event('scroll', {{ bubbles: true }}));
+  return {{ ok: true, selector: {selector_json}, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight }};
+}})()"#
+    );
+    let result = timeout(PLAN_TIMEOUT, page.evaluate_expression(&js))
+        .await
+        .map_err(|_| "scroll_element timed out".to_string())?
+        .map_err(|e| format!("scroll_element failed: {}", super::clean_cdp_error(&e)))?;
+    let value = result.value().cloned().unwrap_or_else(|| json!({}));
+    if value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        Ok(json!({
+            "scrollElement": value,
+            "state": capture_compact_page_state(page, false).await,
+        }))
+    } else {
+        Err(value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("scroll_element failed")
+            .to_string())
+    }
+}
+
+async fn handle_discover_click(page: &Page, params: &Value) -> Result<Value, String> {
+    let target = params
+        .get("target")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing required parameter: target".to_string())?;
+    let target_json = serde_json::to_string(target).unwrap();
+    let js = format!(
+        r#"(async () => {{
+  const target = {target_json};
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  function visible(el) {{
+    if (!el || el.hidden || el.disabled) return false;
+    const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
+    return (r.width > 0 || r.height > 0) &&
+      s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) !== 0;
+  }}
+  function norm(text) {{
+    return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  }}
+  function textOf(el) {{
+    return [el.textContent || '', el.value || '', el.getAttribute('aria-label') || '', el.getAttribute('title') || ''].join(' ');
+  }}
+  function selector(el) {{
+    if (el.id) return '#' + CSS.escape(el.id);
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.documentElement) {{
+      let part = node.tagName.toLowerCase();
+      const parent = node.parentElement;
+      if (parent) {{
+        const siblings = Array.from(parent.children).filter(child => child.tagName === node.tagName);
+        if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')';
+      }}
+      parts.unshift(part);
+      node = parent;
+      if (parts.length >= 5) break;
+    }}
+    return parts.join(' > ');
+  }}
+  function targetClickables() {{
+    return Array.from(document.querySelectorAll('a, button, [role=link], [role=button], .alink, [onclick], [tabindex]'))
+      .filter(visible)
+      .filter(el => norm(textOf(el)).split(' ').includes(norm(target)) || norm(textOf(el)).includes(norm(target)));
+  }}
+  function discoveryControls() {{
+    return Array.from(document.querySelectorAll(
+      '[aria-expanded=false], [role=tab], [role=button], button, summary, .ui-tabs-anchor, .ui-accordion-header, [data-toggle], [data-testid*=tab], [data-testid*=section]'
+    )).filter(visible);
+  }}
+  const tried = [];
+  for (let pass = 0; pass < 2; pass++) {{
+    const direct = targetClickables()[0];
+    if (direct) {{
+      direct.click();
+      await delay(80);
+      return {{ ok: true, target, clicked: selector(direct), mode: pass === 0 ? 'direct' : 'after-discovery', tried }};
+    }}
+    for (const control of discoveryControls()) {{
+      const key = selector(control);
+      if (tried.includes(key)) continue;
+      tried.push(key);
+      control.click();
+      await delay(120);
+      const found = targetClickables()[0];
+      if (found) {{
+        found.click();
+        await delay(80);
+        return {{ ok: true, target, clicked: selector(found), discoveredBy: key, mode: 'discover-click', tried }};
+      }}
+    }}
+  }}
+  return {{ ok: false, error: 'discover_click could not reveal clickable target: ' + target, target, tried }};
+}})()"#
+    );
+    let result = timeout(PLAN_TIMEOUT, page.evaluate_expression(&js))
+        .await
+        .map_err(|_| "discover_click timed out".to_string())?
+        .map_err(|e| format!("discover_click failed: {}", super::clean_cdp_error(&e)))?;
+    let value = result.value().cloned().unwrap_or_else(|| json!({}));
+    if value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        Ok(json!({
+            "discoverClick": value,
+            "state": capture_compact_page_state(page, false).await,
+        }))
+    } else {
+        Err(value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("discover_click failed")
+            .to_string())
+    }
+}
+
 fn analysis_to_json(analysis: &InstructionAnalysis) -> Value {
     json!({
         "kind": analysis.kind.as_str(),
@@ -271,7 +403,11 @@ fn analyze_instruction(instruction: &str) -> InstructionAnalysis {
     let mut checked = None;
     let mut direction = None;
 
-    let kind = if contains_any(&lower, &["drag ", "dragged ", "move "]) && lower.contains(" to ") {
+    let kind = if starts_with_any(&lower, &["how many ", "count "]) || lower.contains(" how many ")
+    {
+        target_hint = trailing_hint(instruction, &["how many", "count"]);
+        InstructionKind::Count
+    } else if contains_any(&lower, &["drag ", "dragged ", "move "]) && lower.contains(" to ") {
         target_hint = quoted.first().cloned();
         if target_hint.is_none() || secondary_hint.is_none() {
             let (first, second) = split_around_to(instruction);
@@ -279,13 +415,6 @@ fn analyze_instruction(instruction: &str) -> InstructionAnalysis {
             secondary_hint = secondary_hint.or(second);
         }
         InstructionKind::Drag
-    } else if lower.contains("scroll") {
-        direction = if lower.contains("up") {
-            Some("up".to_string())
-        } else {
-            Some("down".to_string())
-        };
-        InstructionKind::Scroll
     } else if contains_any(&lower, &["uncheck", "untick", "deselect "]) {
         checked = Some(false);
         target_hint = quoted
@@ -318,6 +447,7 @@ fn analyze_instruction(instruction: &str) -> InstructionAnalysis {
         &lower,
         &["type ", "enter ", "fill ", "input ", "write ", "search "],
     ) || contains_any(&lower, &[" into ", " in the field", " in field"])
+        || (lower.contains("enter ") && !quoted.is_empty())
     {
         let (parsed_value, parsed_target) = value_target_from_markers(
             instruction,
@@ -327,17 +457,27 @@ fn analyze_instruction(instruction: &str) -> InstructionAnalysis {
         value = value.or(parsed_value);
         target_hint = field_hint(instruction).or(parsed_target);
         InstructionKind::Fill
+    } else if lower.contains("scroll") {
+        direction = if lower.contains("up") {
+            Some("up".to_string())
+        } else {
+            Some("down".to_string())
+        };
+        InstructionKind::Scroll
     } else if starts_with_any(
         &lower,
         &[
             "click ", "press ", "tap ", "open ", "submit", "continue", "confirm", "save", "done",
-            "next",
+            "next", "buy ", "expand ", "switch ",
         ],
-    ) {
+    ) || lower.contains(" click ")
+        || lower.contains(" press ")
+        || lower.contains(" tap ")
+    {
         target_hint = quoted
             .first()
             .cloned()
-            .or_else(|| trailing_hint(instruction, &["click", "press", "tap", "open"]));
+            .or_else(|| trailing_hint(instruction, &["click", "press", "tap", "open", "buy"]));
         InstructionKind::Click
     } else {
         InstructionKind::Unknown
@@ -582,6 +722,22 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
     for (const token of ht) if (tt.has(token)) hits++;
     return hits / ht.length;
   }}
+  function normalized(text) {{
+    return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  }}
+  function exactPhraseScore(hint, text) {{
+    const h = normalized(hint);
+    const t = normalized(text);
+    if (!h || !t) return 0;
+    const compactText = t.replace(/\s+/g, '');
+    for (const variant of [h, h.replace(/^(?:on|the|a|an)\s+/, '')]) {{
+      if (!variant) continue;
+      if (t === variant) return 1;
+      if (t.includes(variant)) return 0.9;
+      if (compactText.includes(variant.replace(/\s+/g, ''))) return 0.85;
+    }}
+    return 0;
+  }}
   function selector(el) {{
     if (el.id) return '#' + CSS.escape(el.id);
     const testId = el.getAttribute('data-testid');
@@ -595,8 +751,25 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
       const sel = el.tagName.toLowerCase() + '[type=' + JSON.stringify(type) + ']';
       if (document.querySelectorAll(sel).length === 1) return sel;
     }}
-    const all = Array.from(document.querySelectorAll(el.tagName.toLowerCase()));
-    return el.tagName.toLowerCase() + ':nth-of-type(' + (all.indexOf(el) + 1) + ')';
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.documentElement) {{
+      let part = node.tagName.toLowerCase();
+      if (node.id) {{
+        part += '#' + CSS.escape(node.id);
+        parts.unshift(part);
+        break;
+      }}
+      const parent = node.parentElement;
+      if (parent) {{
+        const siblings = Array.from(parent.children).filter(child => child.tagName === node.tagName);
+        if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')';
+      }}
+      parts.unshift(part);
+      node = parent;
+      if (parts.length >= 5) break;
+    }}
+    return parts.join(' > ');
   }}
   function candidate(el) {{
     const rect = el.getBoundingClientRect();
@@ -638,7 +811,52 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
   function requestedItems(text) {{
     const cleaned = stripFollowUp(text);
     if (!cleaned || /^nothing$/i.test(cleaned)) return [];
-    return cleaned.split(/\s*,\s*|\s+\band\b\s+/i).map(item => item.trim()).filter(Boolean);
+    return cleaned
+      .replace(/^(?:words?\s+)?(?:similar|related|synonyms?)\s+to\s+/i, '')
+      .split(/\s*,\s*|\s+\band\b\s+/i)
+      .map(item => item.trim().replace(/^(?:words?\s+)?(?:similar|related|synonyms?)\s+to\s+/i, ''))
+      .filter(Boolean);
+  }}
+  const semanticGroups = [
+    ['small', 'mini', 'tiny', 'little'],
+    ['large', 'big', 'huge'],
+    ['home', 'homes', 'house', 'houses'],
+    ['keep', 'retain', 'hold'],
+    ['start', 'begin', 'initiate'],
+    ['real', 'genuine', 'authentic'],
+    ['red', 'scarlet', 'crimson'],
+    ['calm', 'peaceful', 'quiet'],
+    ['car', 'cars', 'automobile', 'automobiles', 'vehicle', 'vehicles'],
+    ['pig', 'hog', 'swine'],
+    ['like', 'similar', 'alike'],
+    ['hide', 'conceal', 'cover'],
+    ['cut', 'scar', 'slice'],
+    ['water', 'aqua'],
+  ];
+  function semanticTokens(word) {{
+    const base = tokens(word);
+    const out = new Set(base);
+    for (const token of base) {{
+      const singular = token.endsWith('s') ? token.slice(0, -1) : token;
+      out.add(singular);
+      for (const group of semanticGroups) {{
+        if (group.includes(token) || group.includes(singular)) {{
+          for (const item of group) out.add(item);
+        }}
+      }}
+    }}
+    return out;
+  }}
+  function semanticScore(hint, text) {{
+    const ht = semanticTokens(hint);
+    if (!ht.size) return 0;
+    const tt = semanticTokens(text);
+    let hits = 0;
+    for (const token of ht) if (tt.has(token)) hits++;
+    if (hits) return hits / ht.size;
+    const plainHint = String(hint || '').toLowerCase();
+    const plainText = String(text || '').toLowerCase();
+    return plainText.includes(plainHint) ? 0.75 : 0;
   }}
   function relationScore(el, anchor) {{
     if (!anchor) return 0;
@@ -656,7 +874,7 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
     const ranked = best(interactive, el => {{
       const tag = el.tagName.toLowerCase();
       const type = (el.getAttribute('type') || '').toLowerCase();
-      let score = tokenScore(hint, textOf(el));
+      let score = Math.max(tokenScore(hint, textOf(el)), exactPhraseScore(hint, textOf(el)));
       if (/submit|continue|confirm|save|done|next|ok/i.test(hint)) {{
         if (type === 'submit') score += 0.5;
         if (/submit|continue|confirm|save|done|next|ok/i.test(textOf(el))) score += 0.4;
@@ -782,6 +1000,202 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
     }}
   }}
 
+  function discoverClickPlan() {{
+    const target = targetHint || (instruction.match(/\blink\s+["']?([^"'.]+)["']?/i) || [])[1];
+    if (!target) return null;
+    if (!/\b(find|switch|expand|reveal|open)\b/i.test(instruction)) return null;
+    return {{
+      ok: true,
+      action: 'discover_click',
+      params: {{ target }},
+      confidence: 0.75,
+      reason: 'instruction asks to reveal content and click a target by text'
+    }};
+  }}
+  const discoveryPlan = discoverClickPlan();
+  if (discoveryPlan) return discoveryPlan;
+
+  function parseDurationSeconds(text) {{
+    const match = String(text || '').match(/(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?/i);
+    if (!match || (!match[1] && !match[2])) return null;
+    return (Number(match[1] || 0) * 3600) + (Number(match[2] || 0) * 60);
+  }}
+  function extremeClickPlan() {{
+    if (!/\b(shortest|longest|lowest|highest|smallest|largest|cheapest|most expensive)\b/i.test(instruction)) return null;
+    const wantMin = /\b(shortest|lowest|smallest|cheapest)\b/i.test(instruction);
+    const buttons = interactive.filter(el => {{
+      const tag = el.tagName.toLowerCase();
+      return tag === 'button' || tag === 'a' || (el.getAttribute('role') || '').toLowerCase() === 'button';
+    }});
+    const scored = [];
+    for (const button of buttons) {{
+      const ancestors = [];
+      let cursor = button;
+      while (cursor && cursor !== root && cursor !== document.body && ancestors.length < 6) {{
+        if (cursor.nodeType === Node.ELEMENT_NODE) ancestors.push(cursor);
+        cursor = cursor.parentElement;
+      }}
+      const container = (/\bduration\b/i.test(instruction)
+        ? ancestors.find(el => /duration/i.test(textOf(el)))
+        : null) || button.closest('tr, li, .flight, .card, .row, section, article, div') || button.parentElement;
+      if (!container) continue;
+      const text = textOf(container);
+      let metric = /duration/i.test(instruction) ? parseDurationSeconds(text) : null;
+      if (metric == null) {{
+        const numbers = Array.from(String(text).matchAll(/-?\d+(?:\.\d+)?/g)).map(m => Number(m[0]));
+        if (numbers.length) metric = numbers[0];
+      }}
+      if (metric != null && Number.isFinite(metric)) scored.push({{ button, metric }});
+    }}
+    if (!scored.length) return null;
+    scored.sort((a, b) => wantMin ? a.metric - b.metric : b.metric - a.metric);
+    const chosen = scored[0];
+    return {{
+      ok: true,
+      action: 'click',
+      params: {{ selector: selector(chosen.button) }},
+      confidence: 0.82,
+      reason: 'matched repeated item with requested extreme numeric or duration value',
+      candidate: candidate(chosen.button),
+      metric: chosen.metric
+    }};
+  }}
+  const extremePlan = extremeClickPlan();
+  if (extremePlan) return extremePlan;
+
+  function countPlan() {{
+    if (kind !== 'count') return null;
+    const textItems = all('svg text').filter(el => visible(el) || (el.textContent || '').trim()).map(el => {{
+      const size = Number.parseFloat(getComputedStyle(el).fontSize || el.getAttribute('font-size') || '0');
+      return {{ el, text: (el.textContent || '').trim(), size, fill: String(el.getAttribute('fill') || getComputedStyle(el).fill || '').toLowerCase() }};
+    }});
+    const svgItems = all('svg text, svg circle, svg rect, svg polygon, svg path, svg ellipse').filter(el => visible(el)).map(el => ({{
+      el,
+      tag: el.tagName.toLowerCase(),
+      text: (el.textContent || '').trim(),
+      fill: String(el.getAttribute('fill') || getComputedStyle(el).fill || '').toLowerCase()
+    }}));
+    let answer = null;
+    if (/\bdigits?\b/i.test(instruction)) {{
+      answer = textItems.filter(item => /^\d$/.test(item.text)).length;
+    }}
+    if (answer == null) {{
+      const colorMatch = instruction.match(/\b(red|scarlet|blue|green|yellow|magenta|purple|aqua|cyan|black|white|orange|gray|grey)\b/i);
+      if (colorMatch && /\bletters?\b/i.test(instruction)) {{
+        const color = colorMatch[1].toLowerCase();
+        answer = textItems.filter(item => /^[a-z]$/i.test(item.text) && item.fill.includes(color)).length;
+      }} else if (colorMatch && /\bitems?\b/i.test(instruction)) {{
+        const color = colorMatch[1].toLowerCase();
+        answer = svgItems.filter(item => item.fill.includes(color)).length;
+      }}
+    }}
+    if (answer == null) {{
+      const sizeMatch = instruction.match(/\b(small|large|big|tiny)\s+(?:letter\s+)?([a-z])s?\b/i);
+      const letterMatch = sizeMatch || instruction.match(/\b(?:letter\s+)?([a-z])s?\b/i);
+      if (letterMatch) {{
+        const sizeWord = sizeMatch ? sizeMatch[1].toLowerCase() : null;
+        const letter = (sizeMatch ? sizeMatch[2] : letterMatch[1]).toLowerCase();
+        const sizes = textItems.map(item => item.size).filter(Number.isFinite).sort((a, b) => a - b);
+        const median = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0;
+        answer = textItems.filter(item => {{
+          if (item.text.toLowerCase() !== letter) return false;
+          if (!sizeWord) return true;
+          if (sizeWord === 'small' || sizeWord === 'tiny') return !item.size || item.size <= median;
+          return item.size >= median;
+        }}).length;
+      }}
+    }}
+    if (answer == null && /\b(circles?|rectangles?|squares?|triangles?|polygons?)\b/i.test(instruction)) {{
+      const tag = /circles?/i.test(instruction) ? 'circle' :
+        /rectangles?|squares?/i.test(instruction) ? 'rect' :
+        /triangles?|polygons?/i.test(instruction) ? 'polygon' : null;
+      if (tag) answer = all('svg ' + tag).filter(visible).length;
+    }}
+    if (answer == null) return null;
+    const buttons = best(interactive.filter(el => el.tagName.toLowerCase() === 'button' || (el.getAttribute('role') || '').toLowerCase() === 'button'), el => {{
+      return (textOf(el).trim() === String(answer)) ? 1 : 0;
+    }});
+    if (buttons.length) {{
+      return {{
+        ok: true,
+        action: 'click',
+        params: {{ selector: selector(buttons[0].el) }},
+        confidence: 0.8,
+        reason: 'counted visible page items and matched numeric answer button',
+        candidate: candidate(buttons[0].el),
+        answer
+      }};
+    }}
+    const fields = all('input, textarea').filter(el => {{
+      const tag = el.tagName.toLowerCase();
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      return tag === 'textarea' || (tag === 'input' && ['', 'text', 'number'].includes(type));
+    }});
+    if (fields.length) {{
+      return {{
+        ok: true,
+        action: 'type',
+        params: {{ selector: selector(fields[0]), text: String(answer), clear_first: true }},
+        confidence: 0.75,
+        reason: 'counted visible page items and matched answer field',
+        candidate: candidate(fields[0]),
+        answer
+      }};
+    }}
+    return null;
+  }}
+  const counted = countPlan();
+  if (counted) return counted;
+
+  function scrollFillPressPlan() {{
+    if (kind !== 'fill' || !/\bscroll\b/i.test(instruction) || !wantedValue) return null;
+    const hasBox = el => {{
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return (r.width > 0 || r.height > 0) && s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) !== 0;
+    }};
+    const scrollable = all('textarea, [style*=overflow], [role=textbox], div').find(el => hasBox(el) && el.scrollHeight > el.clientHeight + 8);
+    const fields = all('input, textarea, [contenteditable=true]').filter(el => {{
+      const tag = el.tagName.toLowerCase();
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      if (tag === 'textarea') return false;
+      return el.isContentEditable || (tag === 'input' && ['', 'text', 'password', 'email', 'search', 'url', 'tel', 'number'].includes(type));
+    }});
+    const field = fields.find(el => targetHint ? tokenScore(targetHint, textOf(el)) > 0 : true) || fields[0];
+    const followHint = followUpClickHint() || secondaryHint;
+    const follow = followHint ? all('button, a, input, [role=button], [role=link]').find(el => tokenScore(followHint, textOf(el)) > 0 || String(textOf(el)).toLowerCase().includes(String(followHint).toLowerCase())) : null;
+    if (!scrollable || !field) return null;
+    const steps = [{{
+      action: 'scroll_element',
+      params: {{ selector: selector(scrollable) }},
+      confidence: 0.85,
+      reason: 'matched scrollable element mentioned before fill action',
+      candidate: candidate(scrollable)
+    }}, {{
+      action: 'type',
+      params: {{ selector: selector(field), text: transformedValue(wantedValue), clear_first: true }},
+      confidence: 0.75,
+      reason: 'matched fillable field after prerequisite scroll',
+      candidate: candidate(field)
+    }}];
+    if (follow) steps.push({{
+      action: 'click',
+      params: {{ selector: selector(follow) }},
+      confidence: 0.75,
+      reason: 'matched follow-up control after prerequisite scroll and fill',
+      candidate: candidate(follow)
+    }});
+    return {{
+      ok: true,
+      action: 'sequence',
+      steps,
+      confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
+      reason: 'planned scroll, fill, and follow-up control sequence'
+    }};
+  }}
+  const scrollFill = scrollFillPressPlan();
+  if (scrollFill) return scrollFill;
+
   if (kind === 'fill') {{
     const fields = interactive.filter(el => {{
       const tag = el.tagName.toLowerCase();
@@ -869,7 +1283,7 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
       for (const item of items) {{
         const rankedBoxes = best(boxes.filter(el => !used.has(selector(el))), el => {{
           const text = textOf(el);
-          return tokenScore(item, text) || (text.toLowerCase().includes(item.toLowerCase()) ? 1 : 0);
+          return Math.max(semanticScore(item, text), tokenScore(item, text), text.toLowerCase().includes(item.toLowerCase()) ? 1 : 0);
         }});
         if (rankedBoxes.length) {{
           const chosen = rankedBoxes[0];
@@ -922,7 +1336,7 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
       for (const item of items) {{
         const rankedBoxes = best(boxes.filter(el => !used.has(selector(el))), el => {{
           const text = textOf(el);
-          return tokenScore(item, text) || (text.toLowerCase().includes(item.toLowerCase()) ? 1 : 0);
+          return Math.max(semanticScore(item, text), tokenScore(item, text), text.toLowerCase().includes(item.toLowerCase()) ? 1 : 0);
         }});
         if (rankedBoxes.length) {{
           const chosen = rankedBoxes[0];
@@ -978,7 +1392,7 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
   const clickables = best(interactive, el => {{
     const tag = el.tagName.toLowerCase();
     const type = (el.getAttribute('type') || '').toLowerCase();
-    let score = tokenScore(clickHint, textOf(el));
+    let score = Math.max(tokenScore(clickHint, textOf(el)), exactPhraseScore(clickHint, textOf(el)));
     if (kind === 'click' && /submit|continue|confirm|save|done|next/.test(instruction.toLowerCase())) {{
       if (type === 'submit') score += 0.5;
       if (/submit|continue|confirm|save|done|next|ok/.test(textOf(el).toLowerCase())) score += 0.4;

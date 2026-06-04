@@ -234,7 +234,7 @@ Ask your MCP client: "Use the gsd-browser prompt `autonomous_research_task` with
 | Situation                              | Best Starting Tool(s) / Pattern                                      |
 |----------------------------------------|----------------------------------------------------------------------|
 | Need to click/fill something           | `browser_act` first (semantic), then refs for precision             |
-| Have a short natural-language action   | `browser_act_instruction` with `dry_run`; add `scope`, `min_confidence`, or `max_steps` on ambiguous pages |
+| Have a short natural-language action   | `browser_act_instruction` with `dry_run`; handles concise click/fill/select/check/reveal/count/repeated-row instructions; add `scope`, `min_confidence`, or `max_steps` on ambiguous pages |
 | Complex or dynamic page                | `browser_snapshot` + refs (or `browser_find_element`)                |
 | Want human to see / help / judge       | `browser_view` + `annotation_request` + recordings + `browser_goal` + takeover/step |
 | Need reproducibility / evidence        | `browser_record_start/stop` + annotations + `recording_export`       |
