@@ -5,12 +5,14 @@
 //! dispatch CDP → settle → capture compact page state → return JSON.
 
 use crate::daemon::capture::capture_compact_page_state;
+use crate::daemon::input_dispatch::{dispatch_mouse, mouse_button, mouse_buttons_mask_for_button};
 use crate::daemon::inspection;
 use crate::daemon::narration::events::ActionKind;
 use crate::daemon::settle::{ensure_mutation_counter, settle_after_action};
 use crate::daemon::state::DaemonState;
 use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
 use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
+use chromiumoxide::cdp::browser_protocol::input::{DispatchMouseEventType, MouseButton};
 use chromiumoxide::layout::Point;
 use chromiumoxide::Page;
 use gsd_browser_common::types::SettleOptions;
@@ -681,33 +683,158 @@ pub async fn handle_set_checked(
 
 // ── Drag ──
 
-/// Handle `drag` command — simulate drag from source to target element.
-/// Params: { source: string, target: string }
+/// Handle `drag` command — simulate a real mouse drag.
+/// Params: { source?: string, target?: string, from_x?: f64, from_y?: f64,
+///           to_x?: f64, to_y?: f64, steps?: u32, button?: string }
 pub async fn handle_drag(
     page: &Page,
     state: &DaemonState,
     params: &Value,
 ) -> Result<Value, String> {
-    let source_sel = params
-        .get("source")
+    let source_sel = params.get("source").and_then(|v| v.as_str());
+    let target_sel = params.get("target").and_then(|v| v.as_str());
+    let from_x = params.get("from_x").and_then(|v| v.as_f64());
+    let from_y = params.get("from_y").and_then(|v| v.as_f64());
+    let to_x = params.get("to_x").and_then(|v| v.as_f64());
+    let to_y = params.get("to_y").and_then(|v| v.as_f64());
+    let steps = params
+        .get("steps")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .clamp(1, 100) as u32;
+    let button_name = params
+        .get("button")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing required parameter: source".to_string())?;
-    let target_sel = params
-        .get("target")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing required parameter: target".to_string())?;
+        .unwrap_or("left");
 
-    debug!("drag: source={source_sel} target={target_sel}");
+    let has_selectors = source_sel.is_some() && target_sel.is_some();
+    let has_coordinates = from_x.is_some() && from_y.is_some() && to_x.is_some() && to_y.is_some();
+    if !has_selectors && !has_coordinates {
+        return Err(
+            "drag requires either source+target selectors or from_x+from_y+to_x+to_y coordinates"
+                .to_string(),
+        );
+    }
+
+    debug!(
+        "drag: source={source_sel:?} target={target_sel:?} from=({from_x:?},{from_y:?}) to=({to_x:?},{to_y:?}) steps={steps}"
+    );
 
     with_narration(
         page,
         state,
         ActionKind::Drag,
-        Some(source_sel),
-        Some(source_sel),
+        source_sel,
+        source_sel.or(Some("coordinates")),
         || async {
-            let centers_js = format!(
-                r#"(() => {{
+            let (sx, sy, tx, ty) = match (from_x, from_y, to_x, to_y) {
+                (Some(sx), Some(sy), Some(tx), Some(ty)) => (sx, sy, tx, ty),
+                _ => {
+                    let source_sel =
+                        source_sel.ok_or_else(|| "drag: missing source selector".to_string())?;
+                    let target_sel =
+                        target_sel.ok_or_else(|| "drag: missing target selector".to_string())?;
+                    element_centers(page, source_sel, target_sel).await?
+                }
+            };
+
+            let button = mouse_button(Some(button_name))?;
+            if matches!(button, MouseButton::None) {
+                return Err("drag button cannot be none".to_string());
+            }
+            let button_mask = mouse_buttons_mask_for_button(&button);
+
+            dispatch_mouse(
+                page,
+                DispatchMouseEventType::MouseMoved,
+                sx,
+                sy,
+                MouseButton::None,
+                0,
+                0,
+                0,
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| format!("drag: move to source failed: {e}"))?;
+
+            dispatch_mouse(
+                page,
+                DispatchMouseEventType::MousePressed,
+                sx,
+                sy,
+                button.clone(),
+                button_mask,
+                1,
+                0,
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| format!("drag: mouse down failed: {e}"))?;
+
+            for i in 1..=steps {
+                let ratio = i as f64 / steps as f64;
+                let ix = sx + (tx - sx) * ratio;
+                let iy = sy + (ty - sy) * ratio;
+                dispatch_mouse(
+                    page,
+                    DispatchMouseEventType::MouseMoved,
+                    ix,
+                    iy,
+                    MouseButton::None,
+                    button_mask,
+                    0,
+                    0,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(|e| format!("drag: move step {i} failed: {e}"))?;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            dispatch_mouse(
+                page,
+                DispatchMouseEventType::MouseReleased,
+                tx,
+                ty,
+                button,
+                0,
+                1,
+                0,
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| format!("drag: mouse up failed: {e}"))?;
+
+            let (state, settle) = settle_and_capture(page).await;
+            Ok(json!({
+                "state": state,
+                "settle": settle,
+                "dragged": {
+                    "source": source_sel,
+                    "target": target_sel,
+                    "from": { "x": sx, "y": sy },
+                    "to": { "x": tx, "y": ty },
+                    "steps": steps,
+                    "button": button_name,
+                },
+            }))
+        },
+    )
+    .await
+}
+
+async fn element_centers(
+    page: &Page,
+    source_sel: &str,
+    target_sel: &str,
+) -> Result<(f64, f64, f64, f64), String> {
+    let centers_js = format!(
+        r#"(() => {{
             const src = document.querySelector({src_json});
             const tgt = document.querySelector({tgt_json});
             if (!src) throw new Error('source element not found: ' + {src_json});
@@ -721,66 +848,33 @@ pub async fn handle_drag(
                 ty: tr.y + tr.height / 2,
             }};
         }})()"#,
-                src_json = serde_json::to_string(source_sel).unwrap(),
-                tgt_json = serde_json::to_string(target_sel).unwrap()
-            );
+        src_json = serde_json::to_string(source_sel).unwrap(),
+        tgt_json = serde_json::to_string(target_sel).unwrap()
+    );
 
-            let result = timeout(ELEMENT_TIMEOUT, page.evaluate_expression(&centers_js))
-                .await
-                .map_err(|_| "drag: timed out getting element centers".to_string())?
-                .map_err(|e| format!("drag: failed to get element centers: {e}"))?;
+    let result = timeout(ELEMENT_TIMEOUT, page.evaluate_expression(&centers_js))
+        .await
+        .map_err(|_| "drag: timed out getting element centers".to_string())?
+        .map_err(|e| format!("drag: failed to get element centers: {e}"))?;
 
-            let centers = result.value().cloned().unwrap_or(json!({}));
-            let sx = centers
-                .get("sx")
-                .and_then(|v| v.as_f64())
-                .ok_or("drag: could not get source x")?;
-            let sy = centers
-                .get("sy")
-                .and_then(|v| v.as_f64())
-                .ok_or("drag: could not get source y")?;
-            let tx = centers
-                .get("tx")
-                .and_then(|v| v.as_f64())
-                .ok_or("drag: could not get target x")?;
-            let ty = centers
-                .get("ty")
-                .and_then(|v| v.as_f64())
-                .ok_or("drag: could not get target y")?;
-
-            timeout(CDP_TIMEOUT, page.move_mouse(Point::new(sx, sy)))
-                .await
-                .map_err(|_| "drag: timed out moving to source".to_string())?
-                .map_err(|e| format!("drag: move to source failed: {e}"))?;
-
-            timeout(CDP_TIMEOUT, page.click(Point::new(sx, sy)))
-                .await
-                .map_err(|_| "drag: timed out clicking source".to_string())?
-                .map_err(|e| format!("drag: click source failed: {e}"))?;
-
-            let steps = 10;
-            for i in 1..=steps {
-                let ratio = i as f64 / steps as f64;
-                let ix = sx + (tx - sx) * ratio;
-                let iy = sy + (ty - sy) * ratio;
-                let _ = timeout(CDP_TIMEOUT, page.move_mouse(Point::new(ix, iy))).await;
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-
-            timeout(CDP_TIMEOUT, page.click(Point::new(tx, ty)))
-                .await
-                .map_err(|_| "drag: timed out clicking target".to_string())?
-                .map_err(|e| format!("drag: click target failed: {e}"))?;
-
-            let (state, settle) = settle_and_capture(page).await;
-            Ok(json!({
-                "state": state,
-                "settle": settle,
-                "dragged": { "source": source_sel, "target": target_sel },
-            }))
-        },
-    )
-    .await
+    let centers = result.value().cloned().unwrap_or(json!({}));
+    let sx = centers
+        .get("sx")
+        .and_then(|v| v.as_f64())
+        .ok_or("drag: could not get source x")?;
+    let sy = centers
+        .get("sy")
+        .and_then(|v| v.as_f64())
+        .ok_or("drag: could not get source y")?;
+    let tx = centers
+        .get("tx")
+        .and_then(|v| v.as_f64())
+        .ok_or("drag: could not get target x")?;
+    let ty = centers
+        .get("ty")
+        .and_then(|v| v.as_f64())
+        .ok_or("drag: could not get target y")?;
+    Ok((sx, sy, tx, ty))
 }
 
 // ── Set Viewport ──

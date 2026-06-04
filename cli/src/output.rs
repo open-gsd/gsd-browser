@@ -296,7 +296,17 @@ pub fn format_text_interaction(result: &Value) -> String {
     if let Some(dragged) = result.get("dragged") {
         let src = dragged.get("source").and_then(|v| v.as_str()).unwrap_or("");
         let tgt = dragged.get("target").and_then(|v| v.as_str()).unwrap_or("");
-        lines.push(format!("Dragged: {src} → {tgt}"));
+        if !src.is_empty() || !tgt.is_empty() {
+            lines.push(format!("Dragged: {src} → {tgt}"));
+        } else {
+            let from = dragged.get("from").unwrap_or(&serde_json::Value::Null);
+            let to = dragged.get("to").unwrap_or(&serde_json::Value::Null);
+            let fx = from.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let fy = from.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let tx = to.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let ty = to.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            lines.push(format!("Dragged: ({fx:.1}, {fy:.1}) → ({tx:.1}, {ty:.1})"));
+        }
     }
     if let Some(uploaded) = result.get("uploaded") {
         let sel = uploaded

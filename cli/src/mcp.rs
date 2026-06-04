@@ -1070,6 +1070,24 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["ref"]
             }
         }),
+        json!({
+            "name": "browser_drag",
+            "description": "Perform a real mouse drag with CDP mouse down/move/up. Use source+target selectors for element drags, or from_x/from_y/to_x/to_y coordinates for sliders, drawing, and canvas-style interactions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "Optional CSS selector for drag start element" },
+                    "target": { "type": "string", "description": "Optional CSS selector for drag end element" },
+                    "from_x": { "type": "number", "description": "Start X coordinate in viewport CSS pixels" },
+                    "from_y": { "type": "number", "description": "Start Y coordinate in viewport CSS pixels" },
+                    "to_x": { "type": "number", "description": "End X coordinate in viewport CSS pixels" },
+                    "to_y": { "type": "number", "description": "End Y coordinate in viewport CSS pixels" },
+                    "steps": { "type": "integer", "default": 10, "description": "Interpolation steps between start and end" },
+                    "button": { "type": "string", "default": "left", "description": "Mouse button to hold: left, middle, right, back, or forward" },
+                    "session": { "type": "string" }
+                }
+            }
+        }),
         // === Semantic / Intent-based (huge for agents) ===
         json!({
             "name": "browser_act",
@@ -1823,6 +1841,31 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 return Err(err.message);
             }
             "Clicked successfully".to_string()
+        }
+
+        "browser_drag" => {
+            let mut params = json!({});
+            for key in [
+                "source", "target", "from_x", "from_y", "to_x", "to_y", "steps", "button",
+            ] {
+                if let Some(value) = arguments.get(key) {
+                    params[key] = value.clone();
+                }
+            }
+            let resp = crate::daemon_client::send_request(
+                "drag",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
+            serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_fill_ref" => {

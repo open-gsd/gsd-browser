@@ -31,7 +31,7 @@ pub fn modifier_mask(modifiers: Option<&[String]>) -> Result<i64, String> {
     Ok(mask)
 }
 
-fn mouse_button(button: Option<&str>) -> Result<MouseButton, String> {
+pub(crate) fn mouse_button(button: Option<&str>) -> Result<MouseButton, String> {
     match button.unwrap_or("left").to_ascii_lowercase().as_str() {
         "none" => Ok(MouseButton::None),
         "left" => Ok(MouseButton::Left),
@@ -48,7 +48,7 @@ pub fn mouse_buttons_mask(button: &str) -> Result<i64, String> {
     Ok(mouse_buttons_mask_for_button(&mouse_button(Some(button))?))
 }
 
-fn mouse_buttons_mask_for_button(button: &MouseButton) -> i64 {
+pub(crate) fn mouse_buttons_mask_for_button(button: &MouseButton) -> i64 {
     match button {
         MouseButton::None => 0,
         MouseButton::Left => 1,
@@ -92,7 +92,7 @@ async fn scroll_info(page: &Page) -> Value {
     .unwrap_or_else(|| json!({}))
 }
 
-async fn dispatch_mouse(
+pub(crate) async fn dispatch_mouse(
     page: &Page,
     event_type: DispatchMouseEventType,
     x: f64,

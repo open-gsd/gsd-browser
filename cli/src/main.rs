@@ -207,9 +207,27 @@ enum Commands {
     /// Drag an element to another element
     Drag {
         /// CSS selector of the source element
-        source: String,
+        source: Option<String>,
         /// CSS selector of the target element
-        target: String,
+        target: Option<String>,
+        /// Starting X coordinate in CSS pixels
+        #[arg(long)]
+        from_x: Option<f64>,
+        /// Starting Y coordinate in CSS pixels
+        #[arg(long)]
+        from_y: Option<f64>,
+        /// Ending X coordinate in CSS pixels
+        #[arg(long)]
+        to_x: Option<f64>,
+        /// Ending Y coordinate in CSS pixels
+        #[arg(long)]
+        to_y: Option<f64>,
+        /// Interpolation steps between start and end
+        #[arg(long, default_value = "10")]
+        steps: u32,
+        /// Mouse button to hold during the drag
+        #[arg(long, default_value = "left")]
+        button: String,
     },
     /// Set the viewport size (preset or custom dimensions)
     SetViewport {
@@ -989,7 +1007,29 @@ async fn main() {
         Commands::SetChecked { selector, checked } => {
             cmd_set_checked(&cli, selector, *checked).await
         }
-        Commands::Drag { source, target } => cmd_drag(&cli, source, target).await,
+        Commands::Drag {
+            source,
+            target,
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            steps,
+            button,
+        } => {
+            cmd_drag(
+                &cli,
+                source.as_deref(),
+                target.as_deref(),
+                *from_x,
+                *from_y,
+                *to_x,
+                *to_y,
+                *steps,
+                button,
+            )
+            .await
+        }
         Commands::SetViewport {
             preset,
             width,
@@ -1664,10 +1704,43 @@ async fn cmd_set_checked(cli: &Cli, selector: &str, checked: bool) -> CmdResult 
     handle_response(cli, resp, output::format_text_interaction)
 }
 
-async fn cmd_drag(cli: &Cli, source: &str, target: &str) -> CmdResult {
+async fn cmd_drag(
+    cli: &Cli,
+    source: Option<&str>,
+    target: Option<&str>,
+    from_x: Option<f64>,
+    from_y: Option<f64>,
+    to_x: Option<f64>,
+    to_y: Option<f64>,
+    steps: u32,
+    button: &str,
+) -> CmdResult {
+    let mut params = serde_json::json!({
+        "steps": steps,
+        "button": button,
+    });
+    if let Some(source) = source {
+        params["source"] = serde_json::json!(source);
+    }
+    if let Some(target) = target {
+        params["target"] = serde_json::json!(target);
+    }
+    if let Some(from_x) = from_x {
+        params["from_x"] = serde_json::json!(from_x);
+    }
+    if let Some(from_y) = from_y {
+        params["from_y"] = serde_json::json!(from_y);
+    }
+    if let Some(to_x) = to_x {
+        params["to_x"] = serde_json::json!(to_x);
+    }
+    if let Some(to_y) = to_y {
+        params["to_y"] = serde_json::json!(to_y);
+    }
+
     let resp = daemon_client::send_request(
         "drag",
-        serde_json::json!({"source": source, "target": target}),
+        params,
         cli.browser_path.as_deref(),
         cli.cdp_url.as_deref(),
         cli.session.as_deref(),
