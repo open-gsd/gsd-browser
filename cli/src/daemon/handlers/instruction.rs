@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 const PLAN_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_MAX_STEPS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InstructionKind {
@@ -51,7 +52,8 @@ struct InstructionAnalysis {
 
 /// Handle `act_instruction`.
 ///
-/// Params: { instruction: string, dry_run?: bool }
+/// Params: { instruction: string, dry_run?: bool, scope?: string,
+/// min_confidence?: number, max_steps?: number }
 pub async fn handle_act_instruction(
     page: &Page,
     state: &DaemonState,
@@ -66,6 +68,17 @@ pub async fn handle_act_instruction(
         .or_else(|| params.get("dryRun"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let scope = params.get("scope").and_then(|v| v.as_str());
+    let min_confidence = params
+        .get("min_confidence")
+        .or_else(|| params.get("minConfidence"))
+        .and_then(|v| v.as_f64());
+    let max_steps = params
+        .get("max_steps")
+        .or_else(|| params.get("maxSteps"))
+        .and_then(|v| v.as_u64())
+        .map(|value| value as usize)
+        .unwrap_or(DEFAULT_MAX_STEPS);
 
     let analysis = analyze_instruction(instruction);
     if analysis.kind == InstructionKind::Unknown {
@@ -74,7 +87,33 @@ pub async fn handle_act_instruction(
         ));
     }
 
-    let plan = build_plan(page, instruction, &analysis).await?;
+    let plan = build_plan(page, instruction, &analysis, scope).await?;
+    let step_count = plan_step_count(&plan);
+    if step_count > max_steps {
+        return Ok(json!({
+            "instruction": instruction,
+            "analysis": analysis_to_json(&analysis),
+            "plan": plan,
+            "blocked": true,
+            "blockReason": "max_steps_exceeded",
+            "message": format!("act_instruction planned {step_count} steps, above max_steps={max_steps}; rerun with dry_run, a narrower scope, or a higher max_steps if this is intended"),
+            "dryRun": dry_run,
+        }));
+    }
+    if let Some(min_confidence) = min_confidence {
+        let confidence = plan_confidence(&plan);
+        if confidence < min_confidence {
+            return Ok(json!({
+                "instruction": instruction,
+                "analysis": analysis_to_json(&analysis),
+                "plan": plan,
+                "blocked": true,
+                "blockReason": "confidence_below_threshold",
+                "message": format!("act_instruction confidence {confidence:.3} is below min_confidence={min_confidence:.3}; inspect the plan or lower the threshold to execute"),
+                "dryRun": dry_run,
+            }));
+        }
+    }
     if dry_run {
         return Ok(json!({
             "instruction": instruction,
@@ -110,6 +149,23 @@ pub async fn handle_act_instruction(
         "result": result,
         "state": capture_compact_page_state(page, false).await,
     }))
+}
+
+fn plan_step_count(plan: &Value) -> usize {
+    if plan.get("action").and_then(|v| v.as_str()) == Some("sequence") {
+        plan.get("steps")
+            .and_then(|v| v.as_array())
+            .map(|steps| steps.len())
+            .unwrap_or(0)
+    } else {
+        1
+    }
+}
+
+fn plan_confidence(plan: &Value) -> f64 {
+    plan.get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
 }
 
 async fn dispatch_planned_action(
@@ -237,9 +293,7 @@ fn analyze_instruction(instruction: &str) -> InstructionAnalysis {
             .cloned()
             .or_else(|| trailing_hint(instruction, &["uncheck", "untick", "deselect"]));
         InstructionKind::SetChecked
-    } else if contains_any(&lower, &["check ", "tick "])
-        && contains_any(&lower, &["checkbox", "box", "radio"])
-    {
+    } else if starts_with_any(&lower, &["check ", "tick "]) {
         checked = Some(true);
         target_hint = quoted
             .first()
@@ -433,6 +487,7 @@ async fn build_plan(
     page: &Page,
     instruction: &str,
     analysis: &InstructionAnalysis,
+    scope: Option<&str>,
 ) -> Result<Value, String> {
     if analysis.kind == InstructionKind::Scroll {
         return Ok(json!({
@@ -446,7 +501,7 @@ async fn build_plan(
         }));
     }
 
-    let js = planner_js(instruction, analysis);
+    let js = planner_js(instruction, analysis, scope);
     let result = timeout(PLAN_TIMEOUT, page.evaluate_expression(&js))
         .await
         .map_err(|_| "act_instruction: planner timed out".to_string())?
@@ -472,13 +527,14 @@ async fn build_plan(
     }
 }
 
-fn planner_js(instruction: &str, analysis: &InstructionAnalysis) -> String {
+fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&str>) -> String {
     let instruction_json = serde_json::to_string(instruction).unwrap();
     let kind_json = serde_json::to_string(analysis.kind.as_str()).unwrap();
     let value_json = serde_json::to_string(&analysis.value).unwrap();
     let target_json = serde_json::to_string(&analysis.target_hint).unwrap();
     let secondary_json = serde_json::to_string(&analysis.secondary_hint).unwrap();
     let checked_json = serde_json::to_string(&analysis.checked).unwrap();
+    let scope_json = serde_json::to_string(&scope).unwrap();
 
     format!(
         r#"(() => {{
@@ -488,6 +544,9 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis) -> String {
   const targetHint = {target_json};
   const secondaryHint = {secondary_json};
   const checked = {checked_json};
+  const scopeSelector = {scope_json};
+  const root = scopeSelector ? document.querySelector(scopeSelector) : document;
+  if (!root) return {{ ok: false, error: 'act_instruction: scope not found: ' + scopeSelector }};
 
   function visible(el) {{
     if (!el || el.hidden || el.disabled) return false;
@@ -628,9 +687,16 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis) -> String {
       reason: 'planned primary action plus follow-up click from compound instruction'
     }};
   }}
-  const interactive = Array.from(document.querySelectorAll(
+  function all(selectorText) {{
+    const results = Array.from(root.querySelectorAll(selectorText));
+    if (root !== document && root.matches && root.matches(selectorText)) {{
+      results.unshift(root);
+    }}
+    return results;
+  }}
+  const interactive = all(
     'button, a, input, textarea, select, [role=button], [role=link], [role=option], [role=menuitem], [role=tab], [role=slider], [onclick], [tabindex], [contenteditable=true]'
-  ));
+  );
   function ordinalIndex(text) {{
     const lower = String(text || '').toLowerCase();
     const named = [
@@ -649,7 +715,7 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis) -> String {
     const valueMatch = instruction.match(/\b(?:select|set|choose|move)\s+(-?\d+(?:\.\d+)?)\s+(?:with|on|using)\s+(?:the\s+)?slider\b/i);
     if (!valueMatch) return null;
     const desired = Number(valueMatch[1]);
-    const sliders = Array.from(document.querySelectorAll('input[type=range], [role=slider], .ui-slider, [class*=slider]')).filter(visible);
+    const sliders = all('input[type=range], [role=slider], .ui-slider, [class*=slider]').filter(visible);
     for (const el of sliders) {{
       const minAttr = el.getAttribute('min') ?? el.getAttribute('aria-valuemin');
       const maxAttr = el.getAttribute('max') ?? el.getAttribute('aria-valuemax');
@@ -848,6 +914,41 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis) -> String {
       const role = (el.getAttribute('role') || '').toLowerCase();
       return type === 'checkbox' || type === 'radio' || role === 'checkbox' || role === 'radio';
     }});
+    const items = requestedItems(targetHint);
+    if (checked !== false && items.length > 1) {{
+      const used = new Set();
+      const steps = [];
+      let followAnchor = boxes[boxes.length - 1] || null;
+      for (const item of items) {{
+        const rankedBoxes = best(boxes.filter(el => !used.has(selector(el))), el => {{
+          const text = textOf(el);
+          return tokenScore(item, text) || (text.toLowerCase().includes(item.toLowerCase()) ? 1 : 0);
+        }});
+        if (rankedBoxes.length) {{
+          const chosen = rankedBoxes[0];
+          followAnchor = chosen.el;
+          used.add(selector(chosen.el));
+          steps.push({{
+            action: 'set_checked',
+            params: {{ selector: selector(chosen.el), checked: true }},
+            confidence: Math.min(1, chosen.score),
+            reason: 'matched checkbox or radio item by visible label text',
+            candidate: candidate(chosen.el)
+          }});
+        }}
+      }}
+      const follow = clickStepForHint(followUpClickHint(), followAnchor);
+      if (follow) steps.push(follow);
+      if (steps.length) {{
+        return {{
+          ok: true,
+          action: 'sequence',
+          steps,
+          confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
+          reason: 'planned checkbox or radio sequence from listed instruction values'
+        }};
+      }}
+    }}
     const ranked = best(boxes, el => targetHint ? tokenScore(targetHint, textOf(el)) : 0.2);
     if (!ranked.length) return {{ ok: false, error: 'act_instruction: no checkbox or radio target found' }};
     const chosen = ranked[0];
@@ -862,7 +963,7 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis) -> String {
 
   if (kind === 'drag') {{
     const rankedSource = best(interactive, el => tokenScore(targetHint, textOf(el)));
-    const rankedTarget = best(interactive.concat(Array.from(document.querySelectorAll('div, li, td, canvas, svg, [role=gridcell]'))), el => tokenScore(secondaryHint, textOf(el)));
+    const rankedTarget = best(interactive.concat(all('div, li, td, canvas, svg, [role=gridcell]')), el => tokenScore(secondaryHint, textOf(el)));
     if (!rankedSource.length || !rankedTarget.length) return {{ ok: false, error: 'act_instruction: could not match drag source and target' }};
     return {{
       ok: true, action: 'drag',
@@ -920,6 +1021,9 @@ mod tests {
             analyze_instruction("uncheck newsletter checkbox").checked,
             Some(false)
         );
+        let checked = analyze_instruction("check Red, Green, and Blue");
+        assert_eq!(checked.kind, InstructionKind::SetChecked);
+        assert_eq!(checked.target_hint.as_deref(), Some("Red, Green, and Blue"));
         assert_eq!(
             analyze_instruction("drag card A to Done").kind,
             InstructionKind::Drag
@@ -949,5 +1053,30 @@ mod tests {
         assert_eq!(select.kind, InstructionKind::SelectOption);
         assert_eq!(select.value.as_deref(), Some("California"));
         assert_eq!(select.target_hint.as_deref(), Some("the State dropdown"));
+    }
+
+    #[test]
+    fn sequence_helpers_report_step_count_and_confidence() {
+        let plan = json!({
+            "action": "sequence",
+            "confidence": 0.42,
+            "steps": [
+                {"action": "type", "confidence": 0.7},
+                {"action": "click", "confidence": 0.9}
+            ]
+        });
+        assert_eq!(plan_step_count(&plan), 2);
+        assert_eq!(plan_confidence(&plan), 0.42);
+    }
+
+    #[test]
+    fn non_sequence_plan_counts_as_one_step() {
+        let plan = json!({
+            "action": "click",
+            "confidence": 0.8,
+            "params": {"selector": "#submit"}
+        });
+        assert_eq!(plan_step_count(&plan), 1);
+        assert_eq!(plan_confidence(&plan), 0.8);
     }
 }

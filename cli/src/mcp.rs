@@ -1134,12 +1134,15 @@ fn build_tool_list() -> Vec<Value> {
         }),
         json!({
             "name": "browser_act_instruction",
-            "description": "Perform a generic natural-language browser instruction by planning against live DOM affordances, then dispatching existing primitives such as click, type, select_option, set_checked, drag, or scroll. Use dry_run to inspect the selected target first.",
+            "description": "Perform a generic natural-language browser instruction by planning against live DOM affordances, then dispatching existing primitives such as click, type, select_option, set_checked, drag, or scroll. Use dry_run to inspect the selected target first. Use scope/min_confidence/max_steps when the page has repeated controls or the action should be guarded.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "instruction": { "type": "string", "description": "Short action-oriented instruction, such as \"enter 'alice@example.com' into email\", \"click Continue\", or \"choose California from State\"" },
                     "dry_run": { "type": "boolean", "default": false, "description": "Return the inferred action plan without executing it" },
+                    "scope": { "type": "string", "description": "Optional CSS selector that constrains planning to a form, dialog, panel, or other page region" },
+                    "min_confidence": { "type": "number", "description": "Optional threshold that blocks execution if the plan confidence is lower than this value" },
+                    "max_steps": { "type": "integer", "description": "Maximum primitive steps the instruction may execute; defaults to a small bounded sequence" },
                     "session": { "type": "string" }
                 },
                 "required": ["instruction"]
@@ -2114,7 +2117,24 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .or_else(|| arguments.get("dryRun"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let params = json!({ "instruction": instruction, "dry_run": dry_run });
+            let mut params = json!({ "instruction": instruction, "dry_run": dry_run });
+            if let Some(scope) = arguments.get("scope").and_then(|v| v.as_str()) {
+                params["scope"] = json!(scope);
+            }
+            if let Some(min_confidence) = arguments
+                .get("min_confidence")
+                .or_else(|| arguments.get("minConfidence"))
+                .and_then(|v| v.as_f64())
+            {
+                params["min_confidence"] = json!(min_confidence);
+            }
+            if let Some(max_steps) = arguments
+                .get("max_steps")
+                .or_else(|| arguments.get("maxSteps"))
+                .and_then(|v| v.as_u64())
+            {
+                params["max_steps"] = json!(max_steps);
+            }
 
             let resp = crate::daemon_client::send_request(
                 "act_instruction",

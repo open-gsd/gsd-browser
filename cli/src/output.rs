@@ -1250,11 +1250,44 @@ pub fn format_text_act_instruction(result: &Value) -> String {
     let mut lines = vec![format!(
         "Instruction: {instruction}\nPlan: {action} (confidence: {confidence:.3})"
     )];
+    if result
+        .get("blocked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let reason = result
+            .get("blockReason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("blocked");
+        lines.push(format!("Blocked: {reason}"));
+        if let Some(message) = result.get("message").and_then(|v| v.as_str()) {
+            lines.push(message.to_string());
+        }
+    }
     if !reason.is_empty() {
         lines.push(format!("Reason: {reason}"));
     }
     if let Some(params) = plan.get("params") {
         lines.push(format!("Params: {params}"));
+    }
+    if let Some(steps) = plan.get("steps").and_then(|v| v.as_array()) {
+        lines.push(format!("Steps: {}", steps.len()));
+        for (index, step) in steps.iter().enumerate() {
+            let step_action = step.get("action").and_then(|v| v.as_str()).unwrap_or("?");
+            let step_confidence = step
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let step_reason = step.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            let mut line = format!("  {}. {step_action} ({step_confidence:.3})", index + 1);
+            if !step_reason.is_empty() {
+                line.push_str(&format!(" - {step_reason}"));
+            }
+            lines.push(line);
+            if let Some(params) = step.get("params") {
+                lines.push(format!("     Params: {params}"));
+            }
+        }
     }
     if result
         .get("dryRun")

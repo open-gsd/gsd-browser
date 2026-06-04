@@ -127,6 +127,28 @@ gsd-browser set-viewport --preset mobile           # Preset: mobile, tablet, des
 gsd-browser set-viewport --width 1920 --height 1080  # Custom dimensions
 ```
 
+### Natural-Language Instruction Action
+
+Use `act-instruction` for short, action-oriented browser instructions when an agent or user has natural language and the page has clear live DOM affordances. It plans against visible fields, buttons, options, checkboxes, sliders, and drag targets, then dispatches the existing primitive commands. It is generic browser automation, not a benchmark script.
+
+```bash
+gsd-browser act-instruction "enter 'alice@example.com' into Email and click Continue"
+gsd-browser act-instruction --dry-run "choose California from State"
+gsd-browser act-instruction --scope "form#billing" "enter '94107' into ZIP and click Save"
+gsd-browser act-instruction --min-confidence 0.7 --dry-run "click the destructive action"
+gsd-browser act-instruction --max-steps 3 "check Red, Green, and Blue"
+```
+
+MCP clients use `browser_act_instruction` with the same controls: `instruction`, `dry_run`, `scope`, `min_confidence`, and `max_steps`.
+
+Best use cases:
+
+- Natural-language tasks like "fill both fields with cat", "select monthly", "drag item A to Done", or "click Submit".
+- Ambiguous pages where `--dry-run`, `--scope`, or `--min-confidence` can make the plan inspectable before execution.
+- Small compound actions where a bounded sequence is simpler than hand-building a batch.
+
+Prefer refs, `browser_fill_form`, or `browser_batch` for critical flows, long workflows, or cases where exact element identity matters more than interpretation.
+
 ### Snapshot & Refs
 
 Refs are versioned (`@v1:e1`, `@v2:e3`). The version increments each snapshot. **Old refs become stale after page changes — always re-snapshot.**
