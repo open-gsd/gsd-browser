@@ -272,6 +272,7 @@ pub async fn handle_fill_form(
         r#"(() => {{
     const formSel = {form_sel_json};
     const keys = {keys_json};
+    const fieldSelector = 'input:not([type=hidden]), select, textarea, [contenteditable]:not([contenteditable="false"]), [role~="textbox"]';
 
     let form;
     if (formSel) {{
@@ -282,8 +283,8 @@ pub async fn handle_fill_form(
         if (forms.length === 1) form = forms[0];
         else if (forms.length > 1) {{
             form = forms.reduce((best, f) => {{
-                const count = f.querySelectorAll('input:not([type=hidden]), select, textarea').length;
-                const bestCount = best.querySelectorAll('input:not([type=hidden]), select, textarea').length;
+                const count = f.querySelectorAll(fieldSelector).length;
+                const bestCount = best.querySelectorAll(fieldSelector).length;
                 return count > bestCount ? f : best;
             }}, forms[0]);
         }} else {{
@@ -306,38 +307,86 @@ pub async fn handle_fill_form(
         return tag;
     }}
 
-    const elements = Array.from(form.querySelectorAll('input, select, textarea'));
+    const elements = Array.from(form.querySelectorAll(fieldSelector));
 
     function normalize(s) {{ return (s || '').toLowerCase().trim(); }}
+    function loose(s) {{ return normalize(s).replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }}
+    function hasRole(el, role) {{
+        return String(el.getAttribute('role') || '').split(/\s+/).includes(role);
+    }}
+    function isEditable(el) {{
+        const editable = el.getAttribute('contenteditable');
+        return (editable !== null && editable.toLowerCase() !== 'false') || hasRole(el, 'textbox');
+    }}
+
+    function visible(el) {{
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    }}
+
+    function labelTexts(el) {{
+        const out = [];
+        if (el.id) {{
+            const lbl = document.querySelector('label[for=' + JSON.stringify(el.id) + ']');
+            if (lbl) out.push(lbl.textContent || '');
+        }}
+        const wrap = el.closest('label');
+        if (wrap) {{
+            const clone = wrap.cloneNode(true);
+            clone.querySelectorAll(fieldSelector).forEach(c => c.remove());
+            out.push(clone.textContent || '');
+        }}
+        const labelledBy = el.getAttribute('aria-labelledby');
+        if (labelledBy) {{
+            for (const id of labelledBy.split(/\s+/)) {{
+                const lbl = document.getElementById(id);
+                if (lbl) out.push(lbl.textContent || '');
+            }}
+        }}
+        return out;
+    }}
+
+    function fieldTexts(el) {{
+        return [
+            ...labelTexts(el),
+            el.name,
+            el.placeholder,
+            el.getAttribute('aria-label'),
+            el.id,
+            el.getAttribute('data-testid'),
+            el.getAttribute('data-test'),
+        ].filter(Boolean);
+    }}
+
+    function matchScore(key, text) {{
+        const lk = normalize(key);
+        const lt = normalize(text);
+        if (!lt) return 0;
+        if (lt === lk) return 100;
+
+        const looseKey = loose(key);
+        const looseText = loose(text);
+        if (looseText === looseKey) return 95;
+        if (looseText.includes(looseKey) || looseKey.includes(looseText)) return 70;
+        return 0;
+    }}
 
     function resolveField(key) {{
-        const lk = normalize(key);
+        const candidates = [];
         for (const el of elements) {{
-            // Priority 1: label text match
-            if (el.id) {{
-                const lbl = document.querySelector('label[for=' + JSON.stringify(el.id) + ']');
-                if (lbl && normalize(lbl.textContent) === lk) return el;
+            let best = 0;
+            for (const text of fieldTexts(el)) {{
+                best = Math.max(best, matchScore(key, text));
             }}
-            const wrap = el.closest('label');
-            if (wrap) {{
-                const clone = wrap.cloneNode(true);
-                clone.querySelectorAll('input, select, textarea').forEach(c => c.remove());
-                if (normalize(clone.textContent) === lk) return el;
+            if (best > 0) {{
+                if (!visible(el)) best -= 20;
+                if (el.disabled || el.getAttribute('aria-disabled') === 'true') best -= 30;
+                candidates.push({{ el, score: best }});
             }}
         }}
-        for (const el of elements) {{
-            // Priority 2: name match
-            if (normalize(el.name) === lk) return el;
-        }}
-        for (const el of elements) {{
-            // Priority 3: placeholder match
-            if (normalize(el.placeholder) === lk) return el;
-        }}
-        for (const el of elements) {{
-            // Priority 4: aria-label match
-            if (normalize(el.getAttribute('aria-label')) === lk) return el;
-        }}
-        return null;
+        candidates.sort((a, b) => b.score - a.score);
+        return candidates.length ? candidates[0].el : null;
     }}
 
     const resolved = [];
@@ -350,7 +399,7 @@ pub async fn handle_fill_form(
             continue;
         }}
         const tag = el.tagName.toLowerCase();
-        const type = (el.getAttribute('type') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textarea' : 'text')).toLowerCase();
+        const type = (el.getAttribute('type') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textarea' : isEditable(el) ? 'contenteditable' : 'text')).toLowerCase();
         resolved.push({{
             key,
             selector: buildSelector(el),

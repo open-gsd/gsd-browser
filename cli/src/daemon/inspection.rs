@@ -332,6 +332,189 @@ function elementSummary(el, context) {
     checked: !!el.checked,
   };
 }
+
+function isTextInputType(el) {
+  if (!el || !el.tagName) return false;
+  const tag = el.tagName.toLowerCase();
+  if (tag === "textarea") return true;
+  if (tag !== "input") return false;
+  const type = String(el.getAttribute("type") || "text").toLowerCase();
+  return ![
+    "button",
+    "checkbox",
+    "file",
+    "hidden",
+    "image",
+    "radio",
+    "range",
+    "reset",
+    "submit",
+  ].includes(type);
+}
+
+function editableKind(el) {
+  if ("value" in el && isTextInputType(el)) {
+    return "value";
+  }
+  const contentEditable = el.getAttribute("contenteditable");
+  const hasEditableAttr = contentEditable !== null && contentEditable.toLowerCase() !== "false";
+  const hasTextboxRole = String(el.getAttribute("role") || "").split(/\s+/).includes("textbox");
+  if (el.isContentEditable || hasEditableAttr || hasTextboxRole) {
+    return "contenteditable";
+  }
+  return "";
+}
+
+function readEditableValue(el) {
+  const kind = editableKind(el);
+  if (kind === "value") return String(el.value || "");
+  if (kind === "contenteditable") return String(el.textContent || "");
+  return "";
+}
+
+function setNativeValue(el, value) {
+  const next = String(value);
+  const ownSetter = Object.getOwnPropertyDescriptor(el, "value")?.set;
+  const proto = Object.getPrototypeOf(el);
+  const protoSetter = proto ? Object.getOwnPropertyDescriptor(proto, "value")?.set : null;
+  if (protoSetter && ownSetter !== protoSetter) {
+    protoSetter.call(el, next);
+  } else if (ownSetter) {
+    ownSetter.call(el, next);
+  } else {
+    el.value = next;
+  }
+}
+
+function dispatchTextEvents(context, el, value, inputType, data) {
+  const base = { bubbles: true, cancelable: true, composed: true };
+  try {
+    el.dispatchEvent(new context.win.InputEvent("beforeinput", {
+      ...base,
+      inputType,
+      data: data == null ? null : String(data),
+    }));
+  } catch (_) {
+    el.dispatchEvent(new Event("beforeinput", base));
+  }
+  try {
+    el.dispatchEvent(new context.win.InputEvent("input", {
+      ...base,
+      inputType,
+      data: data == null ? null : String(data),
+    }));
+  } catch (_) {
+    el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+  }
+  el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+  if ("value" in el) {
+    el.setAttribute("value", value);
+  }
+}
+
+function dispatchKeyTriplet(context, el, key) {
+  const init = { key, bubbles: true, cancelable: true, composed: true, view: context.win };
+  el.dispatchEvent(new context.win.KeyboardEvent("keydown", init));
+  el.dispatchEvent(new context.win.KeyboardEvent("keypress", init));
+  el.dispatchEvent(new context.win.KeyboardEvent("keyup", init));
+}
+
+function valuesEquivalent(el, actual, expected) {
+  if (actual === expected) return true;
+  const type = String(el.getAttribute("type") || "").toLowerCase();
+  if (type === "number" && actual !== "" && expected !== "") {
+    return Number(actual) === Number(expected);
+  }
+  return false;
+}
+
+function robustFillElement(context, el, options) {
+  const text = String(options.text || "");
+  const clearFirst = !!options.clearFirst;
+  const slowly = !!options.slowly;
+  const submit = !!options.submit;
+  const kind = editableKind(el);
+
+  if (!kind) {
+    return { ok: false, error: "element does not support text input" };
+  }
+  if (!isVisible(el)) {
+    return { ok: false, error: "element is not visible" };
+  }
+  if (!isEnabled(el) || el.getAttribute("aria-disabled") === "true") {
+    return { ok: false, error: "element is disabled" };
+  }
+  if (el.readOnly || el.getAttribute("aria-readonly") === "true") {
+    return { ok: false, error: "element is read-only" };
+  }
+
+  const before = readEditableValue(el);
+  const expected = slowly && !clearFirst ? before + text : text;
+  if (typeof el.focus === "function") el.focus();
+
+  if (kind === "value" && typeof el.select === "function") {
+    try { el.select(); } catch (_) {}
+  }
+
+  if (clearFirst) {
+    if (kind === "value") setNativeValue(el, "");
+    else el.textContent = "";
+    dispatchTextEvents(context, el, "", "deleteContentBackward", null);
+  }
+
+  if (slowly) {
+    let next = clearFirst ? "" : before;
+    for (const ch of text) {
+      dispatchKeyTriplet(context, el, ch);
+      next += ch;
+      if (kind === "value") setNativeValue(el, next);
+      else el.textContent = next;
+      dispatchTextEvents(context, el, next, "insertText", ch);
+    }
+  } else {
+    if (kind === "value") setNativeValue(el, expected);
+    else el.textContent = expected;
+    dispatchTextEvents(context, el, expected, "insertText", text);
+  }
+
+  let actual = readEditableValue(el);
+  let method = "native-setter";
+  if (!valuesEquivalent(el, actual, expected)) {
+    if (kind === "value") el.value = expected;
+    else el.textContent = expected;
+    dispatchTextEvents(context, el, expected, "insertReplacementText", text);
+    actual = readEditableValue(el);
+    method = "direct-fallback";
+  }
+
+  if (!valuesEquivalent(el, actual, expected)) {
+    return {
+      ok: false,
+      error: "value verification failed",
+      expected,
+      actual,
+      before,
+      kind,
+      method,
+    };
+  }
+
+  let submitted = false;
+  if (submit) {
+    dispatchKeyTriplet(context, el, "Enter");
+    const form = el.form || el.closest("form");
+    if (form) {
+      if (typeof form.requestSubmit === "function") {
+        form.requestSubmit();
+      } else if (typeof form.submit === "function") {
+        form.submit();
+      }
+      submitted = true;
+    }
+  }
+
+  return { ok: true, before, actual, expected, kind, method, submitted };
+}
 "##;
 
 fn selected_frame_value(state: &DaemonState) -> Value {
@@ -615,51 +798,9 @@ pub async fn perform_selector_action(
         break;
       }}
       case "type": {{
-        const text = String(options.text || "");
-        const clearFirst = !!options.clearFirst;
-        const slowly = !!options.slowly;
-        const submit = !!options.submit;
-
-        if (typeof el.focus === "function") el.focus();
-
-        if ("value" in el) {{
-          if (clearFirst) {{
-            el.value = "";
-            el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-          }}
-
-          if (slowly) {{
-            let nextValue = clearFirst ? "" : String(el.value || "");
-            for (const ch of text) {{
-              nextValue += ch;
-              el.value = nextValue;
-              el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-            }}
-          }} else {{
-            el.value = text;
-            el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-          }}
-          el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-        }} else if (el.isContentEditable) {{
-          if (clearFirst) el.textContent = "";
-          el.textContent = text;
-          el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-        }} else {{
-          throw new Error("element does not support text input");
-        }}
-
-        if (submit) {{
-          el.dispatchEvent(new KeyboardEvent("keydown", {{ key: "Enter", bubbles: true }}));
-          el.dispatchEvent(new KeyboardEvent("keyup", {{ key: "Enter", bubbles: true }}));
-          const form = el.form || el.closest("form");
-          if (form) {{
-            if (typeof form.requestSubmit === "function") {{
-              form.requestSubmit();
-            }} else if (typeof form.submit === "function") {{
-              form.submit();
-            }}
-          }}
-        }}
+        const fillResult = robustFillElement(context, el, options);
+        target.fillResult = fillResult;
+        if (!fillResult.ok) throw new Error(fillResult.error || "fill failed");
         break;
       }}
       case "select_option": {{
@@ -698,6 +839,7 @@ pub async fn perform_selector_action(
       error: String(err),
       count: matches.length,
       target: elementSummary(el, context),
+      fill: target.fillResult || null,
       boundaries: resolved.boundaries || [],
     }});
   }}
@@ -706,6 +848,7 @@ pub async fn perform_selector_action(
     ok: true,
     count: matches.length,
     target: elementSummary(el, context),
+    fill: target.fillResult || null,
     center: absoluteCenter(context, el),
     boundaries: resolved.boundaries || [],
   }});
@@ -1189,6 +1332,7 @@ pub async fn act_on_snapshot_node(
     el.scrollIntoView({{ block: "center", inline: "center", behavior: "instant" }});
   }}
 
+  let fillResult = null;
   try {{
     if (action === "click") {{
       if (el.focus) el.focus();
@@ -1203,50 +1347,8 @@ pub async fn act_on_snapshot_node(
         el.dispatchEvent(new MouseEvent(eventName, {{ bubbles: true, cancelable: true, view: context.win }}));
       }}
     }} else if (action === "fill") {{
-      const text = String(options.text || "");
-      const clearFirst = !!options.clearFirst;
-      const slowly = !!options.slowly;
-      const submit = !!options.submit;
-      if (el.focus) el.focus();
-
-      if (clearFirst && "value" in el) {{
-        el.value = "";
-        el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-      }}
-
-      if ("value" in el) {{
-        if (slowly) {{
-          let value = clearFirst ? "" : String(el.value || "");
-          for (const ch of text) {{
-            value += ch;
-            el.value = value;
-            el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-          }}
-        }} else {{
-          el.value = text;
-          el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-        }}
-        el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-      }} else if (el.isContentEditable) {{
-        if (clearFirst) el.textContent = "";
-        el.textContent = text;
-        el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-      }} else {{
-        throw new Error("element does not support text input");
-      }}
-
-      if (submit) {{
-        el.dispatchEvent(new KeyboardEvent("keydown", {{ key: "Enter", bubbles: true }}));
-        el.dispatchEvent(new KeyboardEvent("keyup", {{ key: "Enter", bubbles: true }}));
-        const form = el.form || el.closest("form");
-        if (form) {{
-          if (typeof form.requestSubmit === "function") {{
-            form.requestSubmit();
-          }} else if (typeof form.submit === "function") {{
-            form.submit();
-          }}
-        }}
-      }}
+      fillResult = robustFillElement(context, el, options);
+      if (!fillResult.ok) throw new Error(fillResult.error || "fill failed");
     }} else {{
       throw new Error("unsupported ref action: " + action);
     }}
@@ -1257,6 +1359,7 @@ pub async fn act_on_snapshot_node(
       tier: match.tier,
       selector: selectorHint(el),
       summary: elementSummary(el, context),
+      fill: fillResult,
       frameLabel: context.label,
       frameUrl: context.url,
       boundaries: resolved.boundaries || [],
@@ -1268,6 +1371,7 @@ pub async fn act_on_snapshot_node(
     tier: match.tier,
     selector: selectorHint(el),
     summary: elementSummary(el, context),
+    fill: fillResult,
     frameLabel: context.label,
     frameUrl: context.url,
     boundaries: resolved.boundaries || [],
