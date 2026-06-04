@@ -1141,6 +1141,25 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["values"]
             }
         }),
+        json!({
+            "name": "browser_select_option",
+            "description": "Select an option in a native select, ARIA combobox, listbox, or menu-like dropdown. Matches by value, label, visible text, aria-label, or partial normalized text.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "CSS selector for the select, combobox/listbox, or dropdown trigger" },
+                    "option": {
+                        "description": "Option text/value to select. Arrays are supported for native multi-select elements.",
+                        "oneOf": [
+                            { "type": "string" },
+                            { "type": "array", "items": { "type": "string" } }
+                        ]
+                    },
+                    "session": { "type": "string" }
+                },
+                "required": ["selector", "option"]
+            }
+        }),
         // === Assertions & Control Flow ===
         json!({
             "name": "browser_assert",
@@ -1908,6 +1927,36 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 return Err(err.message);
             }
             "Filled successfully".to_string()
+        }
+
+        "browser_select_option" => {
+            let selector = arguments
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .ok_or("selector is required")?;
+            let option = arguments.get("option").ok_or("option is required")?.clone();
+            let option_is_string_array = option
+                .as_array()
+                .map(|items| !items.is_empty() && items.iter().all(|item| item.is_string()))
+                .unwrap_or(false);
+            if !(option.is_string() || option_is_string_array) {
+                return Err("option must be a string or array of strings".to_string());
+            }
+
+            let resp = crate::daemon_client::send_request(
+                "select_option",
+                json!({ "selector": selector, "option": option }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
+            serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
 
         "browser_wait_for" => {
