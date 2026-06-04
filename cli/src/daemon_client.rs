@@ -437,12 +437,16 @@ pub fn stop_daemon(session: Option<&str>) -> Result<(), Box<dyn std::error::Erro
     let pid: i32 = pid_str.trim().parse().map_err(|_| "invalid PID file")?;
 
     terminate_process(pid, "daemon")?;
-    cleanup_session_browser_processes(manifest.as_ref())?;
+    let cleanup_error = cleanup_session_browser_processes(manifest.as_ref()).err();
 
     // Always clean up stale files
     let _ = fs::remove_file(pid_path_for(session));
     let _ = fs::remove_file(socket_path_for(session));
     let _ = write_stopped_manifest(session, "daemon stopped");
+
+    if let Some(err) = cleanup_error {
+        return Err(err);
+    }
 
     Ok(())
 }
