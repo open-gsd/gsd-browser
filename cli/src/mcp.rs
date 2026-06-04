@@ -1935,7 +1935,11 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .and_then(|v| v.as_str())
                 .ok_or("selector is required")?;
             let option = arguments.get("option").ok_or("option is required")?.clone();
-            if !(option.is_string() || option.is_array()) {
+            let option_is_string_array = option
+                .as_array()
+                .map(|items| !items.is_empty() && items.iter().all(|item| item.is_string()))
+                .unwrap_or(false);
+            if !(option.is_string() || option_is_string_array) {
                 return Err("option must be a string or array of strings".to_string());
             }
 

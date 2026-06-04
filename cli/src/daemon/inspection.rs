@@ -585,6 +585,10 @@ function clickLike(context, el) {
 function selectNativeOption(context, el, wantedValues) {
   const allOptions = Array.from(el.options || []);
   if (allOptions.length === 0) return { ok: false, error: "select has no options" };
+  if (!wantedValues.length) return { ok: false, error: "option array cannot be empty" };
+  if (!el.multiple && wantedValues.length > 1) {
+    return { ok: false, error: "multiple options require a multi-select element", expected: wantedValues };
+  }
 
   const matched = [];
   for (const wanted of wantedValues) {

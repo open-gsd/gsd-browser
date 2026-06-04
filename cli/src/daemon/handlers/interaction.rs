@@ -573,7 +573,11 @@ pub async fn handle_select_option(
         .get("option")
         .cloned()
         .ok_or_else(|| "missing required parameter: option".to_string())?;
-    if !(option_value.is_string() || option_value.is_array()) {
+    let option_is_string_array = option_value
+        .as_array()
+        .map(|items| !items.is_empty() && items.iter().all(|item| item.is_string()))
+        .unwrap_or(false);
+    if !(option_value.is_string() || option_is_string_array) {
         return Err("option must be a string or array of strings".to_string());
     }
     let option_hint = if let Some(option) = option_value.as_str() {
