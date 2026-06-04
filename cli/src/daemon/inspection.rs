@@ -356,7 +356,10 @@ function editableKind(el) {
   if ("value" in el && isTextInputType(el)) {
     return "value";
   }
-  if (el.isContentEditable || el.getAttribute("contenteditable") === "true" || el.getAttribute("role") === "textbox") {
+  const contentEditable = el.getAttribute("contenteditable");
+  const hasEditableAttr = contentEditable !== null && contentEditable.toLowerCase() !== "false";
+  const hasTextboxRole = String(el.getAttribute("role") || "").split(/\s+/).includes("textbox");
+  if (el.isContentEditable || hasEditableAttr || hasTextboxRole) {
     return "contenteditable";
   }
   return "";

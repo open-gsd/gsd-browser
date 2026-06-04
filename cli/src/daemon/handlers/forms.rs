@@ -272,6 +272,7 @@ pub async fn handle_fill_form(
         r#"(() => {{
     const formSel = {form_sel_json};
     const keys = {keys_json};
+    const fieldSelector = 'input:not([type=hidden]), select, textarea, [contenteditable]:not([contenteditable="false"]), [role~="textbox"]';
 
     let form;
     if (formSel) {{
@@ -282,8 +283,8 @@ pub async fn handle_fill_form(
         if (forms.length === 1) form = forms[0];
         else if (forms.length > 1) {{
             form = forms.reduce((best, f) => {{
-                const count = f.querySelectorAll('input:not([type=hidden]), select, textarea, [contenteditable=true], [role=textbox]').length;
-                const bestCount = best.querySelectorAll('input:not([type=hidden]), select, textarea, [contenteditable=true], [role=textbox]').length;
+                const count = f.querySelectorAll(fieldSelector).length;
+                const bestCount = best.querySelectorAll(fieldSelector).length;
                 return count > bestCount ? f : best;
             }}, forms[0]);
         }} else {{
@@ -306,10 +307,17 @@ pub async fn handle_fill_form(
         return tag;
     }}
 
-    const elements = Array.from(form.querySelectorAll('input:not([type=hidden]), select, textarea, [contenteditable=true], [role=textbox]'));
+    const elements = Array.from(form.querySelectorAll(fieldSelector));
 
     function normalize(s) {{ return (s || '').toLowerCase().trim(); }}
     function loose(s) {{ return normalize(s).replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }}
+    function hasRole(el, role) {{
+        return String(el.getAttribute('role') || '').split(/\s+/).includes(role);
+    }}
+    function isEditable(el) {{
+        const editable = el.getAttribute('contenteditable');
+        return (editable !== null && editable.toLowerCase() !== 'false') || hasRole(el, 'textbox');
+    }}
 
     function visible(el) {{
         const style = window.getComputedStyle(el);
@@ -326,7 +334,7 @@ pub async fn handle_fill_form(
         const wrap = el.closest('label');
         if (wrap) {{
             const clone = wrap.cloneNode(true);
-            clone.querySelectorAll('input, select, textarea, [contenteditable=true], [role=textbox]').forEach(c => c.remove());
+            clone.querySelectorAll(fieldSelector).forEach(c => c.remove());
             out.push(clone.textContent || '');
         }}
         const labelledBy = el.getAttribute('aria-labelledby');
@@ -391,7 +399,7 @@ pub async fn handle_fill_form(
             continue;
         }}
         const tag = el.tagName.toLowerCase();
-        const type = (el.getAttribute('type') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textarea' : (el.isContentEditable || el.getAttribute('role') === 'textbox') ? 'contenteditable' : 'text')).toLowerCase();
+        const type = (el.getAttribute('type') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textarea' : isEditable(el) ? 'contenteditable' : 'text')).toLowerCase();
         resolved.push({{
             key,
             selector: buildSelector(el),
