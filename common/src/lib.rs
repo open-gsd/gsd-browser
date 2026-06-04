@@ -186,6 +186,12 @@ pub fn socket_path_for(session: Option<&str>) -> std::path::PathBuf {
     }
 }
 
+pub fn named_pipe_name_for(session: Option<&str>) -> String {
+    let session_key = session.unwrap_or("default");
+    let identity = format!("{}::{session_key}", state_dir().display());
+    format!(r"\\.\pipe\gsd-browser-{}", stable_socket_hash(&identity))
+}
+
 /// Session-aware PID path. When session is Some, uses
 /// `~/.gsd-browser/sessions/<name>/daemon.pid`.
 pub fn pid_path_for(session: Option<&str>) -> std::path::PathBuf {

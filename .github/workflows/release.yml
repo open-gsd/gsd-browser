@@ -67,6 +67,46 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/gsd-browser.exe" "${{ matrix.artifact }}"
           ./${{ matrix.artifact }} --version
 
+      - name: Smoke test Windows daemon
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./${{ matrix.artifact }} daemon health --json
+
+          $browser = (Get-Command chrome -ErrorAction SilentlyContinue).Source
+          if (-not $browser) {
+            $browser = Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"
+          }
+          if (-not (Test-Path $browser)) {
+            $browser = Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe"
+          }
+          if (-not (Test-Path $browser)) {
+            $browser = Join-Path $env:ProgramFiles "Microsoft\Edge\Application\msedge.exe"
+          }
+          if (-not (Test-Path $browser)) {
+            $browser = Join-Path ${env:ProgramFiles(x86)} "Microsoft\Edge\Application\msedge.exe"
+          }
+          if (-not (Test-Path $browser)) {
+            Write-Host "Chrome or Edge not found; skipping launched browser smoke."
+            exit 0
+          }
+
+          $profile = Join-Path $env:RUNNER_TEMP "gsd-browser-release-smoke"
+          $browserProcess = Start-Process `
+            -FilePath $browser `
+            -ArgumentList "--remote-debugging-port=9222", "--user-data-dir=$profile", "--no-first-run", "--no-default-browser-check", "about:blank" `
+            -PassThru
+
+          try {
+            Start-Sleep -Seconds 3
+            ./${{ matrix.artifact }} --cdp-url http://127.0.0.1:9222 --session release-smoke daemon start
+            ./${{ matrix.artifact }} --session release-smoke daemon health --json
+            ./${{ matrix.artifact }} --session release-smoke snapshot --json
+          } finally {
+            ./${{ matrix.artifact }} --session release-smoke daemon stop
+            Stop-Process -Id $browserProcess.Id -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Sign macOS binary
         if: runner.os == 'macOS'
         env:
