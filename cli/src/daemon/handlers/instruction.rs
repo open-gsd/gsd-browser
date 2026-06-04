@@ -89,18 +89,19 @@ pub async fn handle_act_instruction(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "act_instruction: planner returned no action".to_string())?;
 
-    let params = plan.get("params").cloned().unwrap_or_else(|| json!({}));
-    let result = match action {
-        "click" => handlers::interaction::handle_click(page, state, &params).await,
-        "type" => handlers::interaction::handle_type_text(page, state, &params).await,
-        "select_option" => handlers::interaction::handle_select_option(page, state, &params).await,
-        "set_checked" => handlers::interaction::handle_set_checked(page, state, &params).await,
-        "drag" => handlers::interaction::handle_drag(page, state, &params).await,
-        "scroll" => handlers::interaction::handle_scroll(page, state, &params).await,
-        other => Err(format!(
-            "act_instruction: unsupported planned action: {other}"
-        )),
-    }?;
+    let result = if action == "sequence" {
+        let steps = plan
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "act_instruction: sequence plan has no steps".to_string())?;
+        let mut results = Vec::with_capacity(steps.len());
+        for step in steps {
+            results.push(dispatch_planned_action(page, state, step).await?);
+        }
+        json!({ "steps": results })
+    } else {
+        dispatch_planned_action(page, state, &plan).await?
+    };
 
     Ok(json!({
         "instruction": instruction,
@@ -109,6 +110,89 @@ pub async fn handle_act_instruction(
         "result": result,
         "state": capture_compact_page_state(page, false).await,
     }))
+}
+
+async fn dispatch_planned_action(
+    page: &Page,
+    state: &DaemonState,
+    plan: &Value,
+) -> Result<Value, String> {
+    let action = plan
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "act_instruction: planner returned no action".to_string())?;
+    let params = plan.get("params").cloned().unwrap_or_else(|| json!({}));
+    match action {
+        "click" => handlers::interaction::handle_click(page, state, &params).await,
+        "type" => handlers::interaction::handle_type_text(page, state, &params).await,
+        "select_option" => handlers::interaction::handle_select_option(page, state, &params).await,
+        "set_checked" => handlers::interaction::handle_set_checked(page, state, &params).await,
+        "set_slider" => handle_set_slider(page, &params).await,
+        "drag" => handlers::interaction::handle_drag(page, state, &params).await,
+        "scroll" => handlers::interaction::handle_scroll(page, state, &params).await,
+        other => Err(format!(
+            "act_instruction: unsupported planned action: {other}"
+        )),
+    }
+}
+
+async fn handle_set_slider(page: &Page, params: &Value) -> Result<Value, String> {
+    let selector = params
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing required parameter: selector".to_string())?;
+    let value = params
+        .get("value")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| "missing required parameter: value".to_string())?;
+    let selector_json = serde_json::to_string(selector).unwrap();
+    let value_json = serde_json::to_string(&value).unwrap();
+    let js = format!(
+        r#"(() => {{
+  const selector = {selector_json};
+  const desired = {value_json};
+  const el = document.querySelector(selector);
+  if (!el) return {{ ok: false, error: 'slider not found: ' + selector }};
+  if (el.matches('input[type=range]')) {{
+    el.value = String(desired);
+    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    return {{ ok: true, selector, value: Number(el.value), mode: 'native-range' }};
+  }}
+  if (window.jQuery && window.jQuery(el).slider) {{
+    try {{
+      window.jQuery(el).slider('value', desired);
+      return {{ ok: true, selector, value: Number(window.jQuery(el).slider('value')), mode: 'jquery-ui' }};
+    }} catch (error) {{
+      return {{ ok: false, error: String(error && error.message || error) }};
+    }}
+  }}
+  if (el.getAttribute('role') === 'slider') {{
+    el.setAttribute('aria-valuenow', String(desired));
+    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    return {{ ok: true, selector, value: desired, mode: 'aria' }};
+  }}
+  return {{ ok: false, error: 'matched element is not a supported slider' }};
+}})()"#
+    );
+    let result = timeout(PLAN_TIMEOUT, page.evaluate_expression(&js))
+        .await
+        .map_err(|_| "set_slider timed out".to_string())?
+        .map_err(|e| format!("set_slider failed: {}", super::clean_cdp_error(&e)))?;
+    let value = result.value().cloned().unwrap_or_else(|| json!({}));
+    if value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        Ok(json!({
+            "slider": value,
+            "state": capture_compact_page_state(page, false).await,
+        }))
+    } else {
+        Err(value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("set_slider failed")
+            .to_string())
+    }
 }
 
 fn analysis_to_json(analysis: &InstructionAnalysis) -> Value {
@@ -476,61 +560,286 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis) -> String {
     scored.sort((a, b) => b.score - a.score);
     return scored;
   }}
+  function stripFollowUp(text) {{
+    return String(text || '')
+      .replace(/\s+(?:and|then)\s+(?:click|press|tap|hit)\s+(?:the\s+)?[^,.]+\.?$/i, '')
+      .trim();
+  }}
+  function followUpClickHint() {{
+    const match = instruction.match(/\b(?:and|then)\s+(?:click|press|tap|hit)\s+(?:the\s+)?([^,.]+)\.?$/i);
+    if (!match) return null;
+    return match[1].replace(/\b(button|link|control)\b/ig, '').trim() || match[1].trim();
+  }}
+  function transformedValue(text) {{
+    if (text == null) return text;
+    if (/all\s+upper\s+case|uppercase|upper-case/i.test(instruction)) return String(text).toUpperCase();
+    if (/all\s+lower\s+case|lowercase|lower-case/i.test(instruction)) return String(text).toLowerCase();
+    return text;
+  }}
+  function requestedItems(text) {{
+    const cleaned = stripFollowUp(text);
+    if (!cleaned || /^nothing$/i.test(cleaned)) return [];
+    return cleaned.split(/\s*,\s*|\s+\band\b\s+/i).map(item => item.trim()).filter(Boolean);
+  }}
+  function relationScore(el, anchor) {{
+    if (!anchor) return 0;
+    const form = anchor.closest('form');
+    if (form && form.contains(el)) return 0.5;
+    const anchorParent = anchor.parentElement;
+    if (anchorParent && anchorParent.contains(el)) return 0.25;
+    const position = anchor.compareDocumentPosition(el);
+    if (position & Node.DOCUMENT_POSITION_FOLLOWING) return 0.15;
+    if (position & Node.DOCUMENT_POSITION_PRECEDING) return -0.05;
+    return 0;
+  }}
+  function clickStepForHint(hint, anchor = null) {{
+    if (!hint) return null;
+    const ranked = best(interactive, el => {{
+      const tag = el.tagName.toLowerCase();
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      let score = tokenScore(hint, textOf(el));
+      if (/submit|continue|confirm|save|done|next|ok/i.test(hint)) {{
+        if (type === 'submit') score += 0.5;
+        if (/submit|continue|confirm|save|done|next|ok/i.test(textOf(el))) score += 0.4;
+      }}
+      if (tag === 'button' || tag === 'a' || type === 'submit' || (el.getAttribute('role') || '').toLowerCase() === 'button') score += 0.05;
+      score += relationScore(el, anchor);
+      return score;
+    }});
+    if (!ranked.length) return null;
+    const chosen = ranked[0];
+    return {{
+      action: 'click',
+      params: {{ selector: selector(chosen.el) }},
+      confidence: Math.min(1, chosen.score),
+      reason: 'matched follow-up clickable element by instruction text',
+      candidate: candidate(chosen.el)
+    }};
+  }}
+  function withFollowUp(primary, anchor = null) {{
+    const followHint = followUpClickHint();
+    const follow = clickStepForHint(followHint, anchor);
+    if (!follow) return primary;
+    return {{
+      ok: true,
+      action: 'sequence',
+      steps: [primary, follow],
+      confidence: Math.min(primary.confidence || 0.5, follow.confidence || 0.5),
+      reason: 'planned primary action plus follow-up click from compound instruction'
+    }};
+  }}
   const interactive = Array.from(document.querySelectorAll(
-    'button, a, input, textarea, select, [role=button], [role=link], [role=option], [role=menuitem], [role=tab], [onclick], [tabindex], [contenteditable=true]'
+    'button, a, input, textarea, select, [role=button], [role=link], [role=option], [role=menuitem], [role=tab], [role=slider], [onclick], [tabindex], [contenteditable=true]'
   ));
+  function ordinalIndex(text) {{
+    const lower = String(text || '').toLowerCase();
+    const named = [
+      ['first', 0], ['1st', 0],
+      ['second', 1], ['2nd', 1],
+      ['third', 2], ['3rd', 2],
+      ['fourth', 3], ['4th', 3],
+      ['fifth', 4], ['5th', 4],
+    ];
+    for (const [word, index] of named) if (lower.includes(word)) return index;
+    const match = lower.match(/\b(\d+)(?:st|nd|rd|th)?\s+checkbox\b/);
+    if (match) return Math.max(0, Number(match[1]) - 1);
+    return null;
+  }}
+  function sliderPlan() {{
+    const valueMatch = instruction.match(/\b(?:select|set|choose|move)\s+(-?\d+(?:\.\d+)?)\s+(?:with|on|using)\s+(?:the\s+)?slider\b/i);
+    if (!valueMatch) return null;
+    const desired = Number(valueMatch[1]);
+    const sliders = Array.from(document.querySelectorAll('input[type=range], [role=slider], .ui-slider, [class*=slider]')).filter(visible);
+    for (const el of sliders) {{
+      const minAttr = el.getAttribute('min') ?? el.getAttribute('aria-valuemin');
+      const maxAttr = el.getAttribute('max') ?? el.getAttribute('aria-valuemax');
+      let min = minAttr == null ? Number.NaN : Number(minAttr);
+      let max = maxAttr == null ? Number.NaN : Number(maxAttr);
+      let orientation = (el.getAttribute('aria-orientation') || '').toLowerCase();
+      try {{
+        if ((!Number.isFinite(min) || !Number.isFinite(max)) && window.jQuery && window.jQuery(el).slider) {{
+          min = Number(window.jQuery(el).slider('option', 'min'));
+          max = Number(window.jQuery(el).slider('option', 'max'));
+          orientation = String(window.jQuery(el).slider('option', 'orientation') || orientation).toLowerCase();
+        }}
+      }} catch (_) {{}}
+      if (!Number.isFinite(min) || !Number.isFinite(max) || max === min) continue;
+      const rect = el.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (desired - min) / (max - min)));
+      const vertical = orientation === 'vertical';
+      return {{
+        action: 'set_slider',
+        params: {{
+          selector: selector(el),
+          value: desired,
+          x: vertical ? rect.left + rect.width / 2 : rect.left + rect.width * ratio,
+          y: vertical ? rect.bottom - rect.height * ratio : rect.top + rect.height / 2
+        }},
+        confidence: 0.85,
+        reason: 'matched slider value from instruction and slider range metadata',
+        candidate: candidate(el)
+      }};
+    }}
+    return null;
+  }}
+  if (/\bslider\b/i.test(instruction) && /\bcheckbox\b/i.test(instruction)) {{
+    const steps = [];
+    const slider = sliderPlan();
+    if (slider) steps.push(slider);
+    const boxes = interactive.filter(el => {{
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      const role = (el.getAttribute('role') || '').toLowerCase();
+      return type === 'checkbox' || role === 'checkbox';
+    }});
+    const index = ordinalIndex(instruction);
+    let followAnchor = null;
+    if (index != null && boxes[index]) {{
+      followAnchor = boxes[index];
+      steps.push({{
+        action: 'set_checked',
+        params: {{ selector: selector(boxes[index]), checked: true }},
+        confidence: 0.9,
+        reason: 'matched ordinal checkbox target from instruction',
+        candidate: candidate(boxes[index])
+      }});
+    }}
+    const follow = clickStepForHint(followUpClickHint(), followAnchor);
+    if (follow) steps.push(follow);
+    if (steps.length >= 2) {{
+      return {{
+        ok: true,
+        action: 'sequence',
+        steps,
+        confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
+        reason: 'planned slider, checkbox, and follow-up click sequence'
+      }};
+    }}
+  }}
 
   if (kind === 'fill') {{
     const fields = interactive.filter(el => {{
       const tag = el.tagName.toLowerCase();
       const type = (el.getAttribute('type') || '').toLowerCase();
       return tag === 'textarea' || el.isContentEditable ||
-        (tag === 'input' && !['button','submit','checkbox','radio','file','hidden'].includes(type));
+        (tag === 'input' && ['', 'text', 'password', 'email', 'search', 'url', 'tel', 'number'].includes(type));
     }});
     const ranked = best(fields, el => {{
       const t = textOf(el);
       let score = targetHint ? tokenScore(targetHint, t) : 0.2;
+      if (targetHint && /\b(text|input|field|box)\b/i.test(targetHint) && score === 0) score = 0.2;
       if ((el.getAttribute('type') || '').toLowerCase() === 'search') score += 0.2;
       if (/search/.test(instruction.toLowerCase()) && /search/.test(t.toLowerCase())) score += 0.5;
       return score;
     }});
     if (!ranked.length) return {{ ok: false, error: 'act_instruction: no fillable field found' }};
     if (!wantedValue) return {{ ok: false, error: 'act_instruction: fill instruction has no text value' }};
+    const textValue = transformedValue(wantedValue);
+    const repeatedFields = /\bboth\s+(?:text\s+)?(?:fields?|inputs?)\b/i.test(instruction) ||
+      /\ball\s+(?:text\s+)?(?:fields?|inputs?)\b/i.test(instruction);
+    if (repeatedFields) {{
+      const count = /\bboth\b/i.test(instruction) ? Math.min(2, fields.length) : fields.length;
+      const repeatedRanked = best(fields, el => {{
+        const t = textOf(el);
+        let score = targetHint ? tokenScore(targetHint, t) : 0.2;
+        if (/\bpassword\b/i.test(instruction) && (el.getAttribute('type') || '').toLowerCase() === 'password') score += 0.6;
+        if (targetHint && /\b(text|input|field|box)\b/i.test(targetHint) && score === 0) score = 0.2;
+        return score;
+      }});
+      const targets = repeatedRanked.slice(0, count).map(item => item.el);
+      const steps = targets.map(el => ({{
+        action: 'type',
+        params: {{ selector: selector(el), text: textValue, clear_first: true }},
+        confidence: 0.7,
+        reason: 'matched repeated fillable field from collective instruction',
+        candidate: candidate(el)
+      }}));
+      const follow = clickStepForHint(followUpClickHint(), targets[targets.length - 1]);
+      if (follow) steps.push(follow);
+      if (steps.length) {{
+        return {{
+          ok: true,
+          action: 'sequence',
+          steps,
+          confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
+          reason: 'planned repeated field fill sequence from collective instruction'
+        }};
+      }}
+    }}
     const chosen = ranked[0];
-    return {{
+    return withFollowUp({{
       ok: true, action: 'type',
-      params: {{ selector: selector(chosen.el), text: wantedValue, clear_first: true }},
+      params: {{ selector: selector(chosen.el), text: textValue, clear_first: true }},
       confidence: Math.min(1, chosen.score),
       reason: 'matched fillable field from instruction and DOM labels',
       candidate: candidate(chosen.el)
-    }};
+    }}, chosen.el);
   }}
 
   if (kind === 'select_option') {{
     const selects = best(interactive.filter(el => el.tagName.toLowerCase() === 'select'), el => {{
       const options = Array.from(el.options || []).map(o => (o.textContent || o.value || '').toLowerCase()).join(' ');
-      return (wantedValue ? tokenScore(wantedValue, options) : 0) + (targetHint ? tokenScore(targetHint, textOf(el)) * 0.5 : 0.1);
+      return (wantedValue ? tokenScore(stripFollowUp(wantedValue), options) : 0) + (targetHint ? tokenScore(targetHint, textOf(el)) * 0.5 : 0);
     }});
     if (selects.length && wantedValue) {{
       const chosen = selects[0];
-      return {{
+      return withFollowUp({{
         ok: true, action: 'select_option',
-        params: {{ selector: selector(chosen.el), option: wantedValue }},
+        params: {{ selector: selector(chosen.el), option: stripFollowUp(wantedValue) }},
         confidence: Math.min(1, chosen.score),
         reason: 'matched select element and option text',
         candidate: candidate(chosen.el)
-      }};
+      }}, chosen.el);
+    }}
+    const boxes = interactive.filter(el => {{
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      const role = (el.getAttribute('role') || '').toLowerCase();
+      return type === 'checkbox' || type === 'radio' || role === 'checkbox' || role === 'radio';
+    }});
+    const items = requestedItems(wantedValue);
+    if (boxes.length && (items.length || /^nothing$/i.test(stripFollowUp(wantedValue)))) {{
+      const used = new Set();
+      const steps = [];
+      let followAnchor = boxes[boxes.length - 1] || null;
+      for (const item of items) {{
+        const rankedBoxes = best(boxes.filter(el => !used.has(selector(el))), el => {{
+          const text = textOf(el);
+          return tokenScore(item, text) || (text.toLowerCase().includes(item.toLowerCase()) ? 1 : 0);
+        }});
+        if (rankedBoxes.length) {{
+          const chosen = rankedBoxes[0];
+          followAnchor = chosen.el;
+          used.add(selector(chosen.el));
+          steps.push({{
+            action: 'set_checked',
+            params: {{ selector: selector(chosen.el), checked: true }},
+            confidence: Math.min(1, chosen.score),
+            reason: 'matched checkbox option by visible label text',
+            candidate: candidate(chosen.el)
+          }});
+        }}
+      }}
+      const follow = clickStepForHint(followUpClickHint(), followAnchor);
+      if (follow) steps.push(follow);
+      if (steps.length) {{
+        return {{
+          ok: true,
+          action: 'sequence',
+          steps,
+          confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
+          reason: 'planned checkbox selection sequence from listed instruction values'
+        }};
+      }}
     }}
     const optionClicks = best(interactive, el => tokenScore(wantedValue || targetHint, textOf(el)));
     if (!optionClicks.length) return {{ ok: false, error: 'act_instruction: no matching option-like element found' }};
     const chosen = optionClicks[0];
-    return {{
+    return withFollowUp({{
       ok: true, action: 'click',
       params: {{ selector: selector(chosen.el) }},
       confidence: Math.min(1, chosen.score),
       reason: 'matched clickable option-like element by visible text',
       candidate: candidate(chosen.el)
-    }};
+    }}, chosen.el);
   }}
 
   if (kind === 'set_checked') {{
@@ -542,13 +851,13 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis) -> String {
     const ranked = best(boxes, el => targetHint ? tokenScore(targetHint, textOf(el)) : 0.2);
     if (!ranked.length) return {{ ok: false, error: 'act_instruction: no checkbox or radio target found' }};
     const chosen = ranked[0];
-    return {{
+    return withFollowUp({{
       ok: true, action: 'set_checked',
       params: {{ selector: selector(chosen.el), checked: checked !== false }},
       confidence: Math.min(1, chosen.score),
       reason: 'matched checkbox or radio by instruction text',
       candidate: candidate(chosen.el)
-    }};
+    }}, chosen.el);
   }}
 
   if (kind === 'drag') {{
