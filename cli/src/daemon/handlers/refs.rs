@@ -422,6 +422,9 @@ pub async fn handle_fill_ref(
                 "text_length": text.len(),
                 "slowly": slowly,
                 "submitted": submit,
+                "actual": action.get("fill").and_then(|value| value.get("actual")).cloned().unwrap_or(Value::Null),
+                "method": action.get("fill").and_then(|value| value.get("method")).cloned().unwrap_or(Value::Null),
+                "kind": action.get("fill").and_then(|value| value.get("kind")).cloned().unwrap_or(Value::Null),
             },
             "ref_resolution": ref_resolution_json(ref_str, &node, &resolution),
         }))

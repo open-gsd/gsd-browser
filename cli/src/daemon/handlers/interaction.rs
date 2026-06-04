@@ -291,6 +291,9 @@ pub async fn handle_type_text(
                     "submitted": submit,
                     "frameLabel": action_result.get("target").and_then(|value| value.get("frameLabel")).cloned().unwrap_or(Value::Null),
                     "frameUrl": action_result.get("target").and_then(|value| value.get("frameUrl")).cloned().unwrap_or(Value::Null),
+                    "actual": action_result.get("fill").and_then(|value| value.get("actual")).cloned().unwrap_or(Value::Null),
+                    "method": action_result.get("fill").and_then(|value| value.get("method")).cloned().unwrap_or(Value::Null),
+                    "kind": action_result.get("fill").and_then(|value| value.get("kind")).cloned().unwrap_or(Value::Null),
                 },
                 "boundaries": action_result.get("boundaries").cloned().unwrap_or(json!([])),
             }))
