@@ -204,7 +204,7 @@ enum Commands {
         #[arg(long)]
         checked: bool,
     },
-    /// Drag an element to another element
+    /// Drag between elements or between explicit coordinates
     Drag {
         /// CSS selector of the source element
         source: Option<String>,

@@ -683,6 +683,57 @@ pub async fn handle_set_checked(
 
 // ── Drag ──
 
+fn validate_drag_params(params: &Value) -> Result<(bool, u32, String), String> {
+    let source_sel = params.get("source").and_then(|v| v.as_str());
+    let target_sel = params.get("target").and_then(|v| v.as_str());
+    let from_x = params.get("from_x").and_then(|v| v.as_f64());
+    let from_y = params.get("from_y").and_then(|v| v.as_f64());
+    let to_x = params.get("to_x").and_then(|v| v.as_f64());
+    let to_y = params.get("to_y").and_then(|v| v.as_f64());
+    let has_any_selector = source_sel.is_some() || target_sel.is_some();
+    let has_all_selectors = source_sel.is_some() && target_sel.is_some();
+    let has_any_coordinate =
+        from_x.is_some() || from_y.is_some() || to_x.is_some() || to_y.is_some();
+    let has_all_coordinates =
+        from_x.is_some() && from_y.is_some() && to_x.is_some() && to_y.is_some();
+
+    if has_any_selector && has_any_coordinate {
+        return Err(
+            "drag accepts either source+target selectors or from_x+from_y+to_x+to_y coordinates, not both"
+                .to_string(),
+        );
+    }
+    if has_any_selector && !has_all_selectors {
+        return Err("drag selector mode requires both source and target".to_string());
+    }
+    if has_any_coordinate && !has_all_coordinates {
+        return Err("drag coordinate mode requires from_x, from_y, to_x, and to_y".to_string());
+    }
+    if !has_all_selectors && !has_all_coordinates {
+        return Err(
+            "drag requires either source+target selectors or from_x+from_y+to_x+to_y coordinates"
+                .to_string(),
+        );
+    }
+
+    let steps = params
+        .get("steps")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .clamp(1, 100) as u32;
+    let button_name = params
+        .get("button")
+        .and_then(|v| v.as_str())
+        .unwrap_or("left")
+        .to_string();
+    let button = mouse_button(Some(&button_name))?;
+    if matches!(button, MouseButton::None) {
+        return Err("drag button cannot be none".to_string());
+    }
+
+    Ok((has_all_coordinates, steps, button_name))
+}
+
 /// Handle `drag` command — simulate a real mouse drag.
 /// Params: { source?: string, target?: string, from_x?: f64, from_y?: f64,
 ///           to_x?: f64, to_y?: f64, steps?: u32, button?: string }
@@ -697,24 +748,7 @@ pub async fn handle_drag(
     let from_y = params.get("from_y").and_then(|v| v.as_f64());
     let to_x = params.get("to_x").and_then(|v| v.as_f64());
     let to_y = params.get("to_y").and_then(|v| v.as_f64());
-    let steps = params
-        .get("steps")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(10)
-        .clamp(1, 100) as u32;
-    let button_name = params
-        .get("button")
-        .and_then(|v| v.as_str())
-        .unwrap_or("left");
-
-    let has_selectors = source_sel.is_some() && target_sel.is_some();
-    let has_coordinates = from_x.is_some() && from_y.is_some() && to_x.is_some() && to_y.is_some();
-    if !has_selectors && !has_coordinates {
-        return Err(
-            "drag requires either source+target selectors or from_x+from_y+to_x+to_y coordinates"
-                .to_string(),
-        );
-    }
+    let (use_coordinates, steps, button_name) = validate_drag_params(params)?;
 
     debug!(
         "drag: source={source_sel:?} target={target_sel:?} from=({from_x:?},{from_y:?}) to=({to_x:?},{to_y:?}) steps={steps}"
@@ -727,21 +761,18 @@ pub async fn handle_drag(
         source_sel,
         source_sel.or(Some("coordinates")),
         || async {
-            let (sx, sy, tx, ty) = match (from_x, from_y, to_x, to_y) {
-                (Some(sx), Some(sy), Some(tx), Some(ty)) => (sx, sy, tx, ty),
-                _ => {
-                    let source_sel =
-                        source_sel.ok_or_else(|| "drag: missing source selector".to_string())?;
-                    let target_sel =
-                        target_sel.ok_or_else(|| "drag: missing target selector".to_string())?;
-                    element_centers(page, source_sel, target_sel).await?
-                }
+            let (sx, sy, tx, ty) = if use_coordinates {
+                (
+                    from_x.unwrap(),
+                    from_y.unwrap(),
+                    to_x.unwrap(),
+                    to_y.unwrap(),
+                )
+            } else {
+                element_centers(page, source_sel.unwrap(), target_sel.unwrap()).await?
             };
 
-            let button = mouse_button(Some(button_name))?;
-            if matches!(button, MouseButton::None) {
-                return Err("drag button cannot be none".to_string());
-            }
+            let button = mouse_button(Some(&button_name))?;
             let button_mask = mouse_buttons_mask_for_button(&button);
 
             dispatch_mouse(
@@ -1018,6 +1049,56 @@ mod tests {
             };
             assert!(amount != 0);
         }
+    }
+
+    #[test]
+    fn drag_accepts_selector_mode() {
+        let params = json!({"source": "#a", "target": "#b"});
+        let (use_coordinates, steps, button) = super::validate_drag_params(&params).unwrap();
+        assert!(!use_coordinates);
+        assert_eq!(steps, 10);
+        assert_eq!(button, "left");
+    }
+
+    #[test]
+    fn drag_accepts_coordinate_mode_and_clamps_steps() {
+        let params = json!({
+            "from_x": 1.0,
+            "from_y": 2.0,
+            "to_x": 3.0,
+            "to_y": 4.0,
+            "steps": 500,
+            "button": "right",
+        });
+        let (use_coordinates, steps, button) = super::validate_drag_params(&params).unwrap();
+        assert!(use_coordinates);
+        assert_eq!(steps, 100);
+        assert_eq!(button, "right");
+    }
+
+    #[test]
+    fn drag_rejects_ambiguous_selector_and_coordinate_mode() {
+        let params = json!({
+            "source": "#a",
+            "target": "#b",
+            "from_x": 1.0,
+            "from_y": 2.0,
+            "to_x": 3.0,
+            "to_y": 4.0,
+        });
+        assert!(super::validate_drag_params(&params).is_err());
+    }
+
+    #[test]
+    fn drag_rejects_none_button() {
+        let params = json!({
+            "from_x": 1.0,
+            "from_y": 2.0,
+            "to_x": 3.0,
+            "to_y": 4.0,
+            "button": "none",
+        });
+        assert!(super::validate_drag_params(&params).is_err());
     }
 
     #[test]
