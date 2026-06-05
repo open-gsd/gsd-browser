@@ -219,10 +219,13 @@ async fn handle_set_slider(page: &Page, params: &Value) -> Result<Value, String>
     el.dispatchEvent(new Event('change', {{ bubbles: true }}));
     return {{ ok: true, selector, value: Number(el.value), mode: 'native-range' }};
   }}
-  if (window.jQuery && window.jQuery(el).slider) {{
+  if (window.jQuery) {{
     try {{
-      window.jQuery(el).slider('value', desired);
-      return {{ ok: true, selector, value: Number(window.jQuery(el).slider('value')), mode: 'jquery-ui' }};
+      const jq = window.jQuery(el);
+      if (jq && jq.data && (jq.data('ui-slider') || jq.data('slider'))) {{
+        jq.slider('value', desired);
+        return {{ ok: true, selector, value: Number(jq.slider('value')), mode: 'jquery-ui' }};
+      }}
     }} catch (error) {{
       return {{ ok: false, error: String(error && error.message || error) }};
     }}
@@ -429,6 +432,65 @@ fn analyze_instruction(instruction: &str) -> InstructionAnalysis {
             .cloned()
             .or_else(|| trailing_hint(instruction, &["check", "tick"]));
         InstructionKind::SetChecked
+    } else if has_value_control_hint(&lower)
+        && (starts_with_any(
+            &lower,
+            &[
+                "select ", "choose ", "pick ", "set ", "move ", "use ", "enter ", "input ",
+            ],
+        ) || lower.contains(" with ")
+            || lower.contains(" using ")
+            || lower.contains(" on "))
+    {
+        let (mut parsed_value, mut parsed_target) = value_target_from_markers(
+            instruction,
+            &[
+                "select", "choose", "pick", "set", "move", "use", "enter", "input",
+            ],
+            &[
+                " with ", " using ", " on ", " into ", " in ", " to ", " as ",
+            ],
+        );
+        let parsed_value_is_control = parsed_value
+            .as_deref()
+            .map(|text| has_value_control_hint(&text.to_lowercase()))
+            .unwrap_or(false);
+        if parsed_value_is_control && parsed_target.is_some() {
+            std::mem::swap(&mut parsed_value, &mut parsed_target);
+        }
+        let numeric = first_number(instruction);
+        let fallback_control_hint = value_control_hint(instruction);
+        let numeric_control = parsed_target
+            .as_deref()
+            .or(fallback_control_hint.as_deref())
+            .map(|text| {
+                let text = text.to_lowercase();
+                contains_any(
+                    &text,
+                    &[
+                        "slider",
+                        "range",
+                        "spinner",
+                        "spinbutton",
+                        "stepper",
+                        "number",
+                        "numeric",
+                    ],
+                )
+            })
+            .unwrap_or(false);
+        let parsed_value_has_digit = parsed_value
+            .as_deref()
+            .map(|text| text.chars().any(|ch| ch.is_ascii_digit()))
+            .unwrap_or(false);
+        let parsed_value = if (numeric_control || !parsed_value_has_digit) && numeric.is_some() {
+            numeric
+        } else {
+            parsed_value
+        };
+        value = value.or(parsed_value);
+        target_hint = parsed_target.or(fallback_control_hint);
+        InstructionKind::Fill
     } else if starts_with_any(
         &lower,
         &["select ", "choose ", "pick ", "set dropdown", "set option"],
@@ -499,6 +561,75 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 
 fn starts_with_any(haystack: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|prefix| haystack.starts_with(prefix))
+}
+
+fn has_value_control_hint(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "slider",
+            "range",
+            "spinner",
+            "spinbutton",
+            "stepper",
+            "number",
+            "numeric",
+            "date",
+            "time",
+            "month",
+            "week",
+            "color",
+            "colour",
+            "datetime",
+        ],
+    )
+}
+
+fn value_control_hint(input: &str) -> Option<String> {
+    let lower = input.to_lowercase();
+    for word in [
+        "slider",
+        "range",
+        "spinner",
+        "spinbutton",
+        "stepper",
+        "number",
+        "numeric",
+        "date",
+        "time",
+        "month",
+        "week",
+        "color",
+        "colour",
+        "datetime",
+    ] {
+        if lower.contains(word) {
+            return Some(word.to_string());
+        }
+    }
+    None
+}
+
+fn first_number(input: &str) -> Option<String> {
+    let mut current = String::new();
+    let mut started = false;
+    let mut seen_digit = false;
+    for ch in input.chars() {
+        if ch.is_ascii_digit() || (ch == '-' && !started) || (ch == '.' && started) {
+            current.push(ch);
+            started = true;
+            if ch.is_ascii_digit() {
+                seen_digit = true;
+            }
+        } else if started {
+            break;
+        }
+    }
+    if seen_digit {
+        Some(current)
+    } else {
+        None
+    }
 }
 
 fn quoted_strings(input: &str) -> Vec<String> {
@@ -610,7 +741,7 @@ fn field_hint(input: &str) -> Option<String> {
 fn clean_hint(value: Option<String>) -> Option<String> {
     value
         .map(|text| {
-            text.trim()
+            strip_follow_up_suffix(text.trim())
                 .trim_matches(|ch: char| {
                     matches!(
                         ch,
@@ -621,6 +752,25 @@ fn clean_hint(value: Option<String>) -> Option<String> {
                 .to_string()
         })
         .filter(|text| !text.is_empty())
+}
+
+fn strip_follow_up_suffix(text: &str) -> &str {
+    let lower = text.to_lowercase();
+    for marker in [
+        " and click ",
+        " and press ",
+        " and tap ",
+        " and hit ",
+        " then click ",
+        " then press ",
+        " then tap ",
+        " then hit ",
+    ] {
+        if let Some(index) = lower.find(marker) {
+            return &text[..index];
+        }
+    }
+    text
 }
 
 async fn build_plan(
@@ -913,8 +1063,55 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
     return results;
   }}
   const interactive = all(
-    'button, a, input, textarea, select, [role=button], [role=link], [role=option], [role=menuitem], [role=tab], [role=slider], [onclick], [tabindex], [contenteditable=true]'
+    'button, a, input, textarea, select, [role=button], [role=link], [role=option], [role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], [role=tab], [role=slider], [role=spinbutton], [role=textbox], [role=searchbox], [role=combobox], [role=switch], [onclick], [tabindex], [contenteditable=true], [contenteditable=""]'
   );
+  const textInputTypes = new Set(['', 'text', 'password', 'email', 'search', 'url', 'tel', 'number', 'date', 'time', 'month', 'week', 'datetime-local', 'color', 'range']);
+  function roleOf(el) {{
+    return (el.getAttribute('role') || '').toLowerCase();
+  }}
+  function typeOf(el) {{
+    return (el.getAttribute('type') || '').toLowerCase();
+  }}
+  function isEditableElement(el) {{
+    const editable = el.getAttribute('contenteditable');
+    return el.isContentEditable || (editable !== null && editable.toLowerCase() !== 'false');
+  }}
+  function isFillableField(el) {{
+    const tag = el.tagName.toLowerCase();
+    const type = typeOf(el);
+    const role = roleOf(el);
+    return tag === 'textarea' || isEditableElement(el) ||
+      (tag === 'input' && textInputTypes.has(type)) ||
+      ['textbox', 'searchbox', 'spinbutton', 'slider'].includes(role);
+  }}
+  function isSliderControl(el) {{
+    if (typeOf(el) === 'range' || roleOf(el) === 'slider') return true;
+    try {{
+      if (!window.jQuery) return false;
+      const jq = window.jQuery(el);
+      return !!(jq && jq.data && (jq.data('ui-slider') || jq.data('slider')));
+    }} catch (_) {{
+      return false;
+    }}
+  }}
+  function controlTypeScore(hint, el) {{
+    const haystack = normalized([hint || '', instruction].join(' '));
+    const tag = el.tagName.toLowerCase();
+    const type = typeOf(el);
+    const role = roleOf(el);
+    let score = 0;
+    if (/\b(slider|range)\b/.test(haystack) && (type === 'range' || role === 'slider' || /\bslider\b/i.test(textOf(el)))) score += 0.7;
+    if (/\b(spinner|spinbutton|stepper|numeric|number)\b/.test(haystack) && (type === 'number' || role === 'spinbutton')) score += 0.7;
+    if (/\bdate\b/.test(haystack) && type === 'date') score += 0.7;
+    if (/\btime\b/.test(haystack) && type === 'time') score += 0.7;
+    if (/\bmonth\b/.test(haystack) && type === 'month') score += 0.7;
+    if (/\bweek\b/.test(haystack) && type === 'week') score += 0.7;
+    if (/\b(datetime|date time|date-time)\b/.test(haystack) && type === 'datetime-local') score += 0.7;
+    if (/\b(colou?r)\b/.test(haystack) && type === 'color') score += 0.7;
+    if (/\bsearch\b/.test(haystack) && (type === 'search' || role === 'searchbox')) score += 0.4;
+    if (/\b(text|input|field|box)\b/.test(haystack) && (tag === 'input' || tag === 'textarea' || role === 'textbox')) score += 0.2;
+    return score;
+  }}
   function ordinalIndex(text) {{
     const lower = String(text || '').toLowerCase();
     const named = [
@@ -930,10 +1127,10 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
     return null;
   }}
   function sliderPlan() {{
-    const valueMatch = instruction.match(/\b(?:select|set|choose|move)\s+(-?\d+(?:\.\d+)?)\s+(?:with|on|using)\s+(?:the\s+)?slider\b/i);
+    const valueMatch = instruction.match(/\b(?:select|set|choose|move|use|enter|input)\s+(-?\d+(?:\.\d+)?)\s+(?:with|on|using|in|into)\s+(?:the\s+)?(?:slider|range)\b/i);
     if (!valueMatch) return null;
     const desired = Number(valueMatch[1]);
-    const sliders = all('input[type=range], [role=slider], .ui-slider, [class*=slider]').filter(visible);
+    const sliders = all('input[type=range], [role=slider], .ui-slider, [class*=slider]').filter(el => visible(el) && isSliderControl(el));
     for (const el of sliders) {{
       const minAttr = el.getAttribute('min') ?? el.getAttribute('aria-valuemin');
       const maxAttr = el.getAttribute('max') ?? el.getAttribute('aria-valuemax');
@@ -941,10 +1138,13 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
       let max = maxAttr == null ? Number.NaN : Number(maxAttr);
       let orientation = (el.getAttribute('aria-orientation') || '').toLowerCase();
       try {{
-        if ((!Number.isFinite(min) || !Number.isFinite(max)) && window.jQuery && window.jQuery(el).slider) {{
-          min = Number(window.jQuery(el).slider('option', 'min'));
-          max = Number(window.jQuery(el).slider('option', 'max'));
-          orientation = String(window.jQuery(el).slider('option', 'orientation') || orientation).toLowerCase();
+        if ((!Number.isFinite(min) || !Number.isFinite(max)) && window.jQuery) {{
+          const jq = window.jQuery(el);
+          if (jq && jq.data && (jq.data('ui-slider') || jq.data('slider'))) {{
+            min = Number(jq.slider('option', 'min'));
+            max = Number(jq.slider('option', 'max'));
+            orientation = String(jq.slider('option', 'orientation') || orientation).toLowerCase();
+          }}
         }}
       }} catch (_) {{}}
       if (!Number.isFinite(min) || !Number.isFinite(max) || max === min) continue;
@@ -963,10 +1163,61 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
         reason: 'matched slider value from instruction and slider range metadata',
         candidate: candidate(el)
       }};
-    }}
-    return null;
   }}
-  if (/\bslider\b/i.test(instruction) && /\bcheckbox\b/i.test(instruction)) {{
+  function listedNumbers() {{
+    const bracket = instruction.match(/\[([^\]]+)\]/);
+    const source = bracket ? bracket[1] : '';
+    if (!source) return [];
+    return Array.from(source.matchAll(/-?\d+(?:\.\d+)?/g)).map(match => Number(match[0])).filter(Number.isFinite);
+  }}
+  function multiSliderPlan() {{
+    const values = listedNumbers();
+    if (values.length < 2 || !/\bsliders?\b/i.test(instruction)) return null;
+    const sliders = all('input[type=range], [role=slider], .ui-slider, [class*=slider]').filter(el => visible(el) && isSliderControl(el));
+    if (sliders.length < values.length) return null;
+    const steps = values.map((value, index) => ({{
+      action: 'set_slider',
+      params: {{ selector: selector(sliders[index]), value }},
+      confidence: 0.82,
+      reason: 'matched listed value to repeated slider by document order',
+      candidate: candidate(sliders[index])
+    }}));
+    const follow = clickStepForHint(followUpClickHint() || (/submit/i.test(instruction) ? 'submit' : null), sliders[values.length - 1]);
+    if (follow) steps.push(follow);
+    return {{
+      ok: true,
+      action: 'sequence',
+      steps,
+      confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
+      reason: 'planned repeated slider value sequence from listed instruction values'
+    }};
+  }}
+  function spinbuttonPlan() {{
+    const valueMatch = instruction.match(/\b(?:select|set|choose|move|use|enter|input)\s+(-?\d+(?:\.\d+)?)\s+(?:with|on|using|in|into)\s+(?:the\s+)?(?:spinner|spinbutton|stepper|number|numeric)\b/i);
+    if (!valueMatch) return null;
+    const desired = valueMatch[1];
+    const fields = all('input[type=number], [role=spinbutton]').filter(visible);
+    if (!fields.length) return null;
+    const ranked = best(fields, el => 0.4 + controlTypeScore(targetHint, el) + (targetHint ? tokenScore(targetHint, textOf(el)) * 0.4 : 0));
+    const chosen = (ranked[0] || {{ el: fields[0], score: 0.7 }});
+    return withFollowUp({{
+      ok: true,
+      action: 'type',
+      params: {{ selector: selector(chosen.el), text: desired, clear_first: true }},
+      confidence: Math.min(1, chosen.score || 0.75),
+      reason: 'matched numeric spinner or spinbutton value from instruction',
+      candidate: candidate(chosen.el)
+    }}, chosen.el);
+  }}
+  const multiSlider = multiSliderPlan();
+  if (multiSlider) return multiSlider;
+	  const directSlider = sliderPlan();
+	  if (directSlider && !/\bcheckbox\b/i.test(instruction)) {{
+	    return withFollowUp(Object.assign({{ ok: true }}, directSlider), document.querySelector(directSlider.params.selector));
+	  }}
+	  const directSpinbutton = spinbuttonPlan();
+	  if (directSpinbutton) return directSpinbutton;
+	  if (/\bslider\b/i.test(instruction) && /\bcheckbox\b/i.test(instruction)) {{
     const steps = [];
     const slider = sliderPlan();
     if (slider) steps.push(slider);
@@ -1155,12 +1406,11 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
       return (r.width > 0 || r.height > 0) && s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) !== 0;
     }};
     const scrollable = all('textarea, [style*=overflow], [role=textbox], div').find(el => hasBox(el) && el.scrollHeight > el.clientHeight + 8);
-    const fields = all('input, textarea, [contenteditable=true]').filter(el => {{
-      const tag = el.tagName.toLowerCase();
-      const type = (el.getAttribute('type') || '').toLowerCase();
-      if (tag === 'textarea') return false;
-      return el.isContentEditable || (tag === 'input' && ['', 'text', 'password', 'email', 'search', 'url', 'tel', 'number'].includes(type));
-    }});
+	    const fields = all('input, textarea, [contenteditable=true], [contenteditable=""], [role=textbox], [role=searchbox], [role=spinbutton], [role=slider]').filter(el => {{
+	      const tag = el.tagName.toLowerCase();
+	      if (tag === 'textarea') return false;
+	      return isFillableField(el);
+	    }});
     const field = fields.find(el => targetHint ? tokenScore(targetHint, textOf(el)) > 0 : true) || fields[0];
     const followHint = followUpClickHint() || secondaryHint;
     const follow = followHint ? all('button, a, input, [role=button], [role=link]').find(el => tokenScore(followHint, textOf(el)) > 0 || String(textOf(el)).toLowerCase().includes(String(followHint).toLowerCase())) : null;
@@ -1196,21 +1446,17 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
   const scrollFill = scrollFillPressPlan();
   if (scrollFill) return scrollFill;
 
-  if (kind === 'fill') {{
-    const fields = interactive.filter(el => {{
-      const tag = el.tagName.toLowerCase();
-      const type = (el.getAttribute('type') || '').toLowerCase();
-      return tag === 'textarea' || el.isContentEditable ||
-        (tag === 'input' && ['', 'text', 'password', 'email', 'search', 'url', 'tel', 'number'].includes(type));
-    }});
-    const ranked = best(fields, el => {{
-      const t = textOf(el);
-      let score = targetHint ? tokenScore(targetHint, t) : 0.2;
-      if (targetHint && /\b(text|input|field|box)\b/i.test(targetHint) && score === 0) score = 0.2;
-      if ((el.getAttribute('type') || '').toLowerCase() === 'search') score += 0.2;
-      if (/search/.test(instruction.toLowerCase()) && /search/.test(t.toLowerCase())) score += 0.5;
-      return score;
-    }});
+	  if (kind === 'fill') {{
+	    const fields = interactive.filter(isFillableField);
+	    const ranked = best(fields, el => {{
+	      const t = textOf(el);
+	      let score = targetHint ? tokenScore(targetHint, t) : 0.2;
+	      score += controlTypeScore(targetHint, el);
+	      if (targetHint && /\b(text|input|field|box)\b/i.test(targetHint) && score === 0) score = 0.2;
+	      if (typeOf(el) === 'search') score += 0.2;
+	      if (/search/.test(instruction.toLowerCase()) && /search/.test(t.toLowerCase())) score += 0.5;
+	      return score;
+	    }});
     if (!ranked.length) return {{ ok: false, error: 'act_instruction: no fillable field found' }};
     if (!wantedValue) return {{ ok: false, error: 'act_instruction: fill instruction has no text value' }};
     const textValue = transformedValue(wantedValue);
@@ -1218,10 +1464,11 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
       /\ball\s+(?:text\s+)?(?:fields?|inputs?)\b/i.test(instruction);
     if (repeatedFields) {{
       const count = /\bboth\b/i.test(instruction) ? Math.min(2, fields.length) : fields.length;
-      const repeatedRanked = best(fields, el => {{
-        const t = textOf(el);
-        let score = targetHint ? tokenScore(targetHint, t) : 0.2;
-        if (/\bpassword\b/i.test(instruction) && (el.getAttribute('type') || '').toLowerCase() === 'password') score += 0.6;
+	      const repeatedRanked = best(fields, el => {{
+	        const t = textOf(el);
+	        let score = targetHint ? tokenScore(targetHint, t) : 0.2;
+	        score += controlTypeScore(targetHint, el);
+	        if (/\bpassword\b/i.test(instruction) && typeOf(el) === 'password') score += 0.6;
         if (targetHint && /\b(text|input|field|box)\b/i.test(targetHint) && score === 0) score = 0.2;
         return score;
       }});
@@ -1255,11 +1502,17 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
     }}, chosen.el);
   }}
 
-  if (kind === 'select_option') {{
-    const selects = best(interactive.filter(el => el.tagName.toLowerCase() === 'select'), el => {{
-      const options = Array.from(el.options || []).map(o => (o.textContent || o.value || '').toLowerCase()).join(' ');
-      return (wantedValue ? tokenScore(stripFollowUp(wantedValue), options) : 0) + (targetHint ? tokenScore(targetHint, textOf(el)) * 0.5 : 0);
-    }});
+	  if (kind === 'select_option') {{
+	    const selects = best(interactive.filter(el => {{
+	      const tag = el.tagName.toLowerCase();
+	      const role = roleOf(el);
+	      return tag === 'select' || ['combobox', 'listbox', 'menu'].includes(role) || el.hasAttribute('aria-haspopup');
+	    }}), el => {{
+	      const options = Array.from(el.options || []).map(o => (o.textContent || o.value || '').toLowerCase()).join(' ');
+	      let score = (wantedValue ? tokenScore(stripFollowUp(wantedValue), options) : 0) + (targetHint ? tokenScore(targetHint, textOf(el)) * 0.7 : 0.2);
+	      if (/\b(dropdown|select|option|list|menu|combo)\b/i.test(instruction) && (el.tagName.toLowerCase() === 'select' || roleOf(el) === 'combobox' || el.hasAttribute('aria-haspopup'))) score += 0.35;
+	      return score;
+	    }});
     if (selects.length && wantedValue) {{
       const chosen = selects[0];
       return withFollowUp({{
@@ -1467,6 +1720,24 @@ mod tests {
         assert_eq!(select.kind, InstructionKind::SelectOption);
         assert_eq!(select.value.as_deref(), Some("California"));
         assert_eq!(select.target_hint.as_deref(), Some("the State dropdown"));
+    }
+
+    #[test]
+    fn value_controls_are_not_treated_as_dropdown_options() {
+        let slider = analyze_instruction("Select -94 with the slider and hit Submit");
+        assert_eq!(slider.kind, InstructionKind::Fill);
+        assert_eq!(slider.value.as_deref(), Some("-94"));
+        assert_eq!(slider.target_hint.as_deref(), Some("the slider"));
+
+        let spinner = analyze_instruction("Use the spinner to select -6");
+        assert_eq!(spinner.kind, InstructionKind::Fill);
+        assert_eq!(spinner.value.as_deref(), Some("-6"));
+        assert_eq!(spinner.target_hint.as_deref(), Some("the spinner"));
+
+        let date = analyze_instruction("set date to 2026-06-04");
+        assert_eq!(date.kind, InstructionKind::Fill);
+        assert_eq!(date.value.as_deref(), Some("2026-06-04"));
+        assert_eq!(date.target_hint.as_deref(), Some("date"));
     }
 
     #[test]
