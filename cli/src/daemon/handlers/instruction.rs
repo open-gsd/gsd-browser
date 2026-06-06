@@ -4,53 +4,23 @@
 //! translates short user instructions into existing primitive handlers by
 //! combining verb classification with live DOM affordances.
 
+mod model;
+mod page_model;
+mod verification;
+
 use crate::daemon::capture::capture_compact_page_state;
 use crate::daemon::handlers;
 use crate::daemon::state::DaemonState;
 use chromiumoxide::Page;
+use model::{InstructionAnalysis, InstructionKind};
+use page_model::capture_instruction_page_model;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::time::timeout;
+use verification::verify_action_effect;
 
 const PLAN_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_STEPS: usize = 8;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InstructionKind {
-    Click,
-    Fill,
-    SelectOption,
-    SetChecked,
-    Count,
-    Drag,
-    Scroll,
-    Unknown,
-}
-
-impl InstructionKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Click => "click",
-            Self::Fill => "fill",
-            Self::SelectOption => "select_option",
-            Self::SetChecked => "set_checked",
-            Self::Count => "count",
-            Self::Drag => "drag",
-            Self::Scroll => "scroll",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct InstructionAnalysis {
-    kind: InstructionKind,
-    value: Option<String>,
-    target_hint: Option<String>,
-    secondary_hint: Option<String>,
-    checked: Option<bool>,
-    direction: Option<String>,
-}
 
 /// Handle `act_instruction`.
 ///
@@ -89,13 +59,16 @@ pub async fn handle_act_instruction(
         ));
     }
 
-    let plan = build_plan(page, instruction, &analysis, scope).await?;
+    let before_model = capture_instruction_page_model(page, scope).await?;
+    let mut plan = build_plan(page, instruction, &analysis, scope).await?;
+    annotate_plan_context(&mut plan, &before_model);
     let step_count = plan_step_count(&plan);
     if step_count > max_steps {
         return Ok(json!({
             "instruction": instruction,
-            "analysis": analysis_to_json(&analysis),
+            "analysis": analysis.to_json(),
             "plan": plan,
+            "pageModel": before_model,
             "blocked": true,
             "blockReason": "max_steps_exceeded",
             "message": format!("act_instruction planned {step_count} steps, above max_steps={max_steps}; rerun with dry_run, a narrower scope, or a higher max_steps if this is intended"),
@@ -107,8 +80,9 @@ pub async fn handle_act_instruction(
         if confidence < min_confidence {
             return Ok(json!({
                 "instruction": instruction,
-                "analysis": analysis_to_json(&analysis),
+                "analysis": analysis.to_json(),
                 "plan": plan,
+                "pageModel": before_model,
                 "blocked": true,
                 "blockReason": "confidence_below_threshold",
                 "message": format!("act_instruction confidence {confidence:.3} is below min_confidence={min_confidence:.3}; inspect the plan or lower the threshold to execute"),
@@ -119,8 +93,9 @@ pub async fn handle_act_instruction(
     if dry_run {
         return Ok(json!({
             "instruction": instruction,
-            "analysis": analysis_to_json(&analysis),
+            "analysis": analysis.to_json(),
             "plan": plan,
+            "pageModel": before_model,
             "dryRun": true,
         }));
     }
@@ -143,12 +118,26 @@ pub async fn handle_act_instruction(
     } else {
         dispatch_planned_action(page, state, &plan).await?
     };
+    let after_model = capture_instruction_page_model(page, scope).await?;
+    let verification = verify_action_effect(
+        instruction,
+        &analysis,
+        &plan,
+        &before_model,
+        &after_model,
+        &result,
+    );
 
     Ok(json!({
         "instruction": instruction,
-        "analysis": analysis_to_json(&analysis),
+        "analysis": analysis.to_json(),
         "plan": plan,
         "result": result,
+        "verification": verification,
+        "pageModel": {
+            "before": before_model,
+            "after": after_model,
+        },
         "state": capture_compact_page_state(page, false).await,
     }))
 }
@@ -168,6 +157,29 @@ fn plan_confidence(plan: &Value) -> f64 {
     plan.get("confidence")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0)
+}
+
+fn annotate_plan_context(plan: &mut Value, page_model: &Value) {
+    let summary = page_model
+        .get("summary")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let element_count = page_model
+        .get("elements")
+        .and_then(|value| value.as_array())
+        .map(|elements| elements.len())
+        .unwrap_or(0);
+    if let Some(object) = plan.as_object_mut() {
+        object.insert(
+            "planner".to_string(),
+            json!({
+                "pageModelVersion": page_model.get("version").and_then(|value| value.as_i64()).unwrap_or(1),
+                "pageModelSummary": summary,
+                "candidateCount": element_count,
+                "strategy": "intent-page-model-candidate-score-v1",
+            }),
+        );
+    }
 }
 
 async fn dispatch_planned_action(
@@ -384,17 +396,6 @@ async fn handle_discover_click(page: &Page, params: &Value) -> Result<Value, Str
             .unwrap_or("discover_click failed")
             .to_string())
     }
-}
-
-fn analysis_to_json(analysis: &InstructionAnalysis) -> Value {
-    json!({
-        "kind": analysis.kind.as_str(),
-        "value": analysis.value,
-        "targetHint": analysis.target_hint,
-        "secondaryHint": analysis.secondary_hint,
-        "checked": analysis.checked,
-        "direction": analysis.direction,
-    })
 }
 
 fn analyze_instruction(instruction: &str) -> InstructionAnalysis {
@@ -855,7 +856,7 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
     const wrappingLabel = el.closest('label');
     if (wrappingLabel) labels.push(wrappingLabel.textContent || '');
     return [
-      el.textContent || '', el.value || '', el.name || '', el.placeholder || '',
+      el.textContent || '', el.value || '', el.getAttribute('name') || '', el.placeholder || '',
       el.getAttribute('aria-label') || '', el.getAttribute('title') || '',
       el.getAttribute('role') || '', el.getAttribute('data-testid') || '',
       labels.join(' ')
@@ -892,8 +893,9 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
     if (el.id) return '#' + CSS.escape(el.id);
     const testId = el.getAttribute('data-testid');
     if (testId) return el.tagName.toLowerCase() + '[data-testid=' + JSON.stringify(testId) + ']';
-    if (el.name) {{
-      const sel = el.tagName.toLowerCase() + '[name=' + JSON.stringify(el.name) + ']';
+    const nameAttr = el.getAttribute('name');
+    if (nameAttr) {{
+      const sel = el.tagName.toLowerCase() + '[name=' + JSON.stringify(nameAttr) + ']';
       if (document.querySelectorAll(sel).length === 1) return sel;
     }}
     const type = el.getAttribute('type');

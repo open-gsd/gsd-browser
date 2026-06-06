@@ -1267,6 +1267,33 @@ pub fn format_text_act_instruction(result: &Value) -> String {
     if !reason.is_empty() {
         lines.push(format!("Reason: {reason}"));
     }
+    if let Some(planner) = plan.get("planner") {
+        if let Some(summary) = planner.get("pageModelSummary") {
+            let candidates = planner
+                .get("candidateCount")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let clickable = summary
+                .get("clickable")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let fillable = summary
+                .get("fillable")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let selectable = summary
+                .get("selectable")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let checkable = summary
+                .get("checkable")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            lines.push(format!(
+                "Page model: {candidates} candidates ({clickable} clickable, {fillable} fillable, {selectable} selectable, {checkable} checkable)"
+            ));
+        }
+    }
     if let Some(params) = plan.get("params") {
         lines.push(format!("Params: {params}"));
     }
@@ -1295,6 +1322,18 @@ pub fn format_text_act_instruction(result: &Value) -> String {
         .unwrap_or(false)
     {
         lines.push("Dry run only; no action executed.".to_string());
+    }
+    if let Some(verification) = result.get("verification") {
+        let status = verification
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let signal_count = verification
+            .get("signals")
+            .and_then(|value| value.as_array())
+            .map(|signals| signals.len())
+            .unwrap_or(0);
+        lines.push(format!("Verification: {status} ({signal_count} signals)"));
     }
     if let Some(state) = result.get("state") {
         lines.push(String::new());
