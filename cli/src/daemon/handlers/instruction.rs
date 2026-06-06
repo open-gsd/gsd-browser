@@ -1162,9 +1162,11 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
         confidence: 0.85,
         reason: 'matched slider value from instruction and slider range metadata',
         candidate: candidate(el)
-      }};
-  }}
-  function listedNumbers() {{
+	      }};
+	    }}
+	    return null;
+	  }}
+	  function listedNumbers() {{
     const bracket = instruction.match(/\[([^\]]+)\]/);
     const source = bracket ? bracket[1] : '';
     if (!source) return [];
