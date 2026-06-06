@@ -199,12 +199,130 @@ async fn dispatch_planned_action(
         "set_checked" => handlers::interaction::handle_set_checked(page, state, &params).await,
         "set_slider" => handle_set_slider(page, &params).await,
         "discover_click" => handle_discover_click(page, &params).await,
+        "click_ordered_values" => handle_click_ordered_values(page, &params).await,
         "scroll_element" => handle_scroll_element(page, &params).await,
         "drag" => handlers::interaction::handle_drag(page, state, &params).await,
         "scroll" => handlers::interaction::handle_scroll(page, state, &params).await,
         other => Err(format!(
             "act_instruction: unsupported planned action: {other}"
         )),
+    }
+}
+
+async fn handle_click_ordered_values(page: &Page, params: &Value) -> Result<Value, String> {
+    let order = params
+        .get("order")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ascending");
+    let max_clicks = params
+        .get("maxClicks")
+        .or_else(|| params.get("max_clicks"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(12)
+        .clamp(1, 50);
+    let order_json = serde_json::to_string(order).unwrap();
+    let max_clicks_json = serde_json::to_string(&max_clicks).unwrap();
+    let js = format!(
+        r#"(async () => {{
+  const order = {order_json};
+  const maxClicks = {max_clicks_json};
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  function visible(el) {{
+    if (!el || el.hidden || el.disabled) return false;
+    const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
+    return (r.width > 0 || r.height > 0) &&
+      s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) !== 0;
+  }}
+  function selector(el) {{
+    if (el.id) return '#' + CSS.escape(el.id);
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.documentElement) {{
+      let part = node.tagName.toLowerCase();
+      const parent = node.parentElement;
+      if (parent) {{
+        const siblings = Array.from(parent.children).filter(child => child.tagName === node.tagName);
+        if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')';
+      }}
+      parts.unshift(part);
+      node = parent;
+      if (parts.length >= 5) break;
+    }}
+    return parts.join(' > ');
+  }}
+  function numericValue(el) {{
+    const exactText = String(el.textContent || '').trim();
+    if (/^-?\d+(?:\.\d+)?$/.test(exactText)) return Number(exactText);
+    for (const attr of ['data-index', 'data-value', 'aria-valuenow', 'aria-posinset', 'value']) {{
+      const raw = el.getAttribute(attr);
+      if (raw != null && /^-?\d+(?:\.\d+)?$/.test(String(raw).trim())) return Number(raw);
+    }}
+    return null;
+  }}
+  function clickTarget(el) {{
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + Math.max(1, rect.width / 2);
+    const y = rect.top + Math.max(1, rect.height / 2);
+    const init = {{ bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }};
+    el.dispatchEvent(new MouseEvent('mouseover', init));
+    el.dispatchEvent(new MouseEvent('mousedown', init));
+    el.dispatchEvent(new MouseEvent('mouseup', init));
+    el.dispatchEvent(new MouseEvent('click', init));
+  }}
+  function candidates(clickedKeys) {{
+    const query = [
+      'button', 'a', '[role=button]', '[role=link]', '[onclick]', '[tabindex]',
+      'svg text', 'svg [data-index]', '[data-index]', '[data-value]', '[aria-posinset]'
+    ].join(',');
+    const out = [];
+    for (const el of Array.from(document.querySelectorAll(query))) {{
+      if (!visible(el)) continue;
+      const value = numericValue(el);
+      if (value == null || !Number.isFinite(value)) continue;
+      const rect = el.getBoundingClientRect();
+      const key = [selector(el), value, Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height)].join('|');
+      if (clickedKeys.has(key)) continue;
+      out.push({{ el, value, key, selector: selector(el), text: String(el.textContent || '').trim(), bounds: {{ x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }} }});
+    }}
+    out.sort((a, b) => order === 'descending' ? b.value - a.value : a.value - b.value);
+    return out;
+  }}
+  const clicked = [];
+  const clickedKeys = new Set();
+  for (let index = 0; index < maxClicks; index++) {{
+    const next = candidates(clickedKeys)[0];
+    if (!next) break;
+    clickedKeys.add(next.key);
+    clickTarget(next.el);
+    clicked.push({{ selector: next.selector, value: next.value, text: next.text, bounds: next.bounds }});
+    await delay(90);
+  }}
+  if (!clicked.length) return {{ ok: false, error: 'click_ordered_values found no visible numeric click targets', order, maxClicks }};
+  return {{ ok: true, order, clicked, count: clicked.length }};
+}})()"#
+    );
+    let result = timeout(PLAN_TIMEOUT, page.evaluate_expression(&js))
+        .await
+        .map_err(|_| "click_ordered_values timed out".to_string())?
+        .map_err(|e| {
+            format!(
+                "click_ordered_values failed: {}",
+                super::clean_cdp_error(&e)
+            )
+        })?;
+    let value = result.value().cloned().unwrap_or_else(|| json!({}));
+    if value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        Ok(json!({
+            "orderedValues": value,
+            "state": capture_compact_page_state(page, false).await,
+        }))
+    } else {
+        Err(value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("click_ordered_values failed")
+            .to_string())
     }
 }
 
@@ -1057,6 +1175,53 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
       reason: 'planned primary action plus follow-up click from compound instruction'
     }};
   }}
+  function planConfidence(plan) {{
+    if (!plan) return 0;
+    if (typeof plan.confidence === 'number') return plan.confidence;
+    if (Array.isArray(plan.steps) && plan.steps.length) {{
+      return Math.min(1, plan.steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / plan.steps.length);
+    }}
+    return 0.5;
+  }}
+  function normalizePlan(plan, capability, priority) {{
+    if (!plan || !plan.action) return null;
+    plan.ok = true;
+    plan.confidence = planConfidence(plan);
+    plan.capability = {{
+      name: capability,
+      priority,
+      strategy: 'candidate-generator'
+    }};
+    return plan;
+  }}
+  function chooseCapabilityPlan(capabilities) {{
+    const candidates = [];
+    for (const capability of capabilities) {{
+      let plan = null;
+      try {{
+        plan = capability.build();
+      }} catch (error) {{
+        continue;
+      }}
+      plan = normalizePlan(plan, capability.name, capability.priority || 0);
+      if (plan) candidates.push(plan);
+    }}
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => {{
+      const ap = (a.capability && a.capability.priority) || 0;
+      const bp = (b.capability && b.capability.priority) || 0;
+      if (bp !== ap) return bp - ap;
+      return planConfidence(b) - planConfidence(a);
+    }});
+    const chosen = candidates[0];
+    chosen.alternates = candidates.slice(1, 4).map(plan => ({{
+      action: plan.action,
+      confidence: planConfidence(plan),
+      reason: plan.reason || null,
+      capability: plan.capability || null
+    }}));
+    return chosen;
+  }}
   function all(selectorText) {{
     const results = Array.from(root.querySelectorAll(selectorText));
     if (root !== document && root.matches && root.matches(selectorText)) {{
@@ -1127,6 +1292,92 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
     const match = lower.match(/\b(\d+)(?:st|nd|rd|th)?\s+checkbox\b/);
     if (match) return Math.max(0, Number(match[1]) - 1);
     return null;
+  }}
+  function cleanClickHint(text) {{
+    return String(text || '')
+      .replace(/\b(?:button|link|control|item|element|labelled|labeled|called|named)\b/ig, ' ')
+      .replace(/^["'\s]+|["'.\s]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }}
+  function orderedClickHints() {{
+    const hints = [];
+    const pattern = /\b(?:click|press|tap|hit)\s+(?:the\s+)?(.+?)(?=\s*(?:,?\s*(?:then|and)\s+(?:click|press|tap|hit)\b|[.;]|$))/gi;
+    let match;
+    while ((match = pattern.exec(instruction)) !== null) {{
+      const hint = cleanClickHint(match[1]);
+      if (hint) hints.push(hint);
+    }}
+    return hints;
+  }}
+  function orderedClickSequencePlan() {{
+    const hints = orderedClickHints();
+    if (hints.length < 2) return null;
+    const used = new Set();
+    const steps = [];
+    let anchor = null;
+    for (const hint of hints) {{
+      const ranked = best(interactive.filter(el => !used.has(selector(el))), el => {{
+        const tag = el.tagName.toLowerCase();
+        const type = typeOf(el);
+        let score = Math.max(tokenScore(hint, textOf(el)), exactPhraseScore(hint, textOf(el)), semanticScore(hint, textOf(el)));
+        if (tag === 'button' || tag === 'a' || type === 'submit' || roleOf(el) === 'button') score += 0.08;
+        score += relationScore(el, anchor);
+        return score;
+      }});
+      if (!ranked.length) return null;
+      const chosen = ranked[0];
+      const key = selector(chosen.el);
+      used.add(key);
+      anchor = chosen.el;
+      steps.push({{
+        action: 'click',
+        params: {{ selector: key }},
+        confidence: Math.min(1, chosen.score),
+        reason: 'matched ordered clickable target from instruction clause',
+        candidate: candidate(chosen.el)
+      }});
+    }}
+    return {{
+      action: 'sequence',
+      steps,
+      confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
+      reason: 'planned ordered click sequence from repeated instruction clauses'
+    }};
+  }}
+  function numericClickTargetCount() {{
+    const query = [
+      'button', 'a', '[role=button]', '[role=link]', '[onclick]', '[tabindex]',
+      'svg text', 'svg [data-index]', '[data-index]', '[data-value]', '[aria-posinset]'
+    ].join(',');
+    let count = 0;
+    for (const el of all(query)) {{
+      if (!visible(el)) continue;
+      const text = String(el.textContent || '').trim();
+      const numericText = /^-?\d+(?:\.\d+)?$/.test(text);
+      const numericAttr = ['data-index', 'data-value', 'aria-valuenow', 'aria-posinset', 'value'].some(attr => {{
+        const raw = el.getAttribute(attr);
+        return raw != null && /^-?\d+(?:\.\d+)?$/.test(String(raw).trim());
+      }});
+      if (numericText || numericAttr) count++;
+    }}
+    return count;
+  }}
+  function orderedValueClickPlan() {{
+    if (!/\b(click|press|tap|hit)\b/i.test(instruction)) return null;
+    if (!/\b(numbers?|values?|items?)\b/i.test(instruction)) return null;
+    const explicitOrder = /\bdescending|decreasing|reverse\b/i.test(instruction) ? 'descending' :
+      /\bascending|increasing|smallest\s+to\s+largest|lowest\s+to\s+highest|in\s+order\b/i.test(instruction) ? 'ascending' : null;
+    if (!explicitOrder) return null;
+    const count = numericClickTargetCount();
+    if (count < 2) return null;
+    return {{
+      action: 'click_ordered_values',
+      params: {{ order: explicitOrder, maxClicks: Math.min(50, Math.max(2, count + 4)) }},
+      confidence: 0.82,
+      reason: 'matched ordered numeric click instruction and visible numeric targets',
+      evidence: {{ numericTargetCount: count, order: explicitOrder }}
+    }};
   }}
   function sliderPlan() {{
     const valueMatch = instruction.match(/\b(?:select|set|choose|move|use|enter|input)\s+(-?\d+(?:\.\d+)?)\s+(?:with|on|using|in|into)\s+(?:the\s+)?(?:slider|range)\b/i);
@@ -1213,15 +1464,8 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
       candidate: candidate(chosen.el)
     }}, chosen.el);
   }}
-  const multiSlider = multiSliderPlan();
-  if (multiSlider) return multiSlider;
-	  const directSlider = sliderPlan();
-	  if (directSlider && !/\bcheckbox\b/i.test(instruction)) {{
-	    return withFollowUp(Object.assign({{ ok: true }}, directSlider), document.querySelector(directSlider.params.selector));
-	  }}
-	  const directSpinbutton = spinbuttonPlan();
-	  if (directSpinbutton) return directSpinbutton;
-	  if (/\bslider\b/i.test(instruction) && /\bcheckbox\b/i.test(instruction)) {{
+  function sliderCheckboxPlan() {{
+    if (!(/\bslider\b/i.test(instruction) && /\bcheckbox\b/i.test(instruction))) return null;
     const steps = [];
     const slider = sliderPlan();
     if (slider) steps.push(slider);
@@ -1246,13 +1490,13 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
     if (follow) steps.push(follow);
     if (steps.length >= 2) {{
       return {{
-        ok: true,
         action: 'sequence',
         steps,
         confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
         reason: 'planned slider, checkbox, and follow-up click sequence'
       }};
     }}
+    return null;
   }}
 
   function discoverClickPlan() {{
@@ -1267,8 +1511,6 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
       reason: 'instruction asks to reveal content and click a target by text'
     }};
   }}
-  const discoveryPlan = discoverClickPlan();
-  if (discoveryPlan) return discoveryPlan;
 
   function parseDurationSeconds(text) {{
     const match = String(text || '').match(/(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?/i);
@@ -1315,8 +1557,6 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
       metric: chosen.metric
     }};
   }}
-  const extremePlan = extremeClickPlan();
-  if (extremePlan) return extremePlan;
 
   function countPlan() {{
     if (kind !== 'count') return null;
@@ -1399,8 +1639,6 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
     }}
     return null;
   }}
-  const counted = countPlan();
-  if (counted) return counted;
 
   function scrollFillPressPlan() {{
     if (kind !== 'fill' || !/\bscroll\b/i.test(instruction) || !wantedValue) return null;
@@ -1447,8 +1685,23 @@ fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&
       reason: 'planned scroll, fill, and follow-up control sequence'
     }};
   }}
-  const scrollFill = scrollFillPressPlan();
-  if (scrollFill) return scrollFill;
+  const capabilityPlan = chooseCapabilityPlan([
+    {{ name: 'ordered-click-sequence', priority: 110, build: orderedClickSequencePlan }},
+    {{ name: 'ordered-value-clicks', priority: 105, build: orderedValueClickPlan }},
+    {{ name: 'multi-slider-values', priority: 95, build: multiSliderPlan }},
+    {{ name: 'slider-checkbox-sequence', priority: 92, build: sliderCheckboxPlan }},
+    {{ name: 'single-slider-value', priority: 90, build: () => {{
+      const plan = sliderPlan();
+      if (!plan || /\bcheckbox\b/i.test(instruction)) return null;
+      return withFollowUp(plan, document.querySelector(plan.params.selector));
+    }} }},
+    {{ name: 'spinbutton-value', priority: 88, build: spinbuttonPlan }},
+    {{ name: 'discovery-click', priority: 82, build: discoverClickPlan }},
+    {{ name: 'extreme-click', priority: 80, build: extremeClickPlan }},
+    {{ name: 'count-answer', priority: 78, build: countPlan }},
+    {{ name: 'scroll-fill-press', priority: 75, build: scrollFillPressPlan }}
+  ]);
+  if (capabilityPlan) return capabilityPlan;
 
 	  if (kind === 'fill') {{
 	    const fields = interactive.filter(isFillableField);
