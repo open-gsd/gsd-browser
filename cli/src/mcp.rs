@@ -1033,6 +1033,16 @@ fn build_tool_list() -> Vec<Value> {
                 "required": ["url"]
             }
         }),
+        json!({
+            "name": "browser_reload",
+            "description": "Reload the current page. Useful for refreshing dynamic content or recovering from a stale page state. Returns structured page state like browser_navigate. Always follow with browser_snapshot for interaction.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string", "description": "Named session for parallel/isolated browser instances" }
+                }
+            }
+        }),
         // === Snapshot & Refs - This is a core differentiator ===
         json!({
             "name": "browser_snapshot",
@@ -1848,6 +1858,23 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             let resp = crate::daemon_client::send_request(
                 "navigate",
                 json!({ "url": url }),
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
+            serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
+        }
+
+        "browser_reload" => {
+            let resp = crate::daemon_client::send_request(
+                "reload",
+                json!({}),
                 cli.browser_path.as_deref(),
                 cli.cdp_url.as_deref(),
                 session,
