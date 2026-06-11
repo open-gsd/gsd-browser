@@ -1,13 +1,15 @@
+use crate::win_process::is_process_alive;
 use gsd_browser_common::session::{
     load_session_manifest, manifest_path_for, now_epoch_secs, save_session_manifest,
     SessionHealthStatus,
 };
 use gsd_browser_common::{
-    ipc, named_pipe_name_for, pid_path_for, state_dir, validate_session_name, DaemonRequest,
-    DaemonResponse,
+    ipc, lock_path_for, named_pipe_name_for, pid_path_for, state_dir, validate_session_name,
+    DaemonRequest, DaemonResponse,
 };
 use serde_json::{json, Value};
-use std::fs;
+use std::fs::{self, File};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
@@ -21,6 +23,24 @@ fn read_daemon_pid(session: Option<&str>) -> Option<u32> {
 
 fn cleanup_daemon_artifacts(session: Option<&str>) {
     let _ = fs::remove_file(pid_path_for(session));
+}
+
+fn live_daemon_recovery_error(session: Option<&str>, context: &str) -> Box<dyn std::error::Error> {
+    let stop_hint = match session {
+        Some(name) => format!("gsd-browser --session {name} daemon stop"),
+        None => "gsd-browser daemon stop".to_string(),
+    };
+
+    format!(
+        "{context}. Refusing to replace a live browser session automatically; stop it with `{stop_hint}` and retry"
+    )
+    .into()
+}
+
+/// Drop the startup lock handle before deleting `daemon.lock` (required on Windows).
+fn release_startup_lock(lock: File, lock_file: &Path) {
+    drop(lock);
+    let _ = fs::remove_file(lock_file);
 }
 
 fn write_stopped_manifest(session: Option<&str>, reason: &str) -> Result<(), String> {
@@ -149,7 +169,7 @@ async fn wait_for_spawned_daemon(
 }
 
 pub fn is_daemon_alive(session: Option<&str>) -> bool {
-    read_daemon_pid(validate_session_name(session).ok().flatten()).is_some()
+    read_daemon_pid(validate_session_name(session).ok().flatten()).is_some_and(is_process_alive)
 }
 
 pub async fn start_daemon(
@@ -171,7 +191,7 @@ pub async fn start_daemon(
         fs::create_dir_all(parent)?;
     }
 
-    let lock_file = gsd_browser_common::lock_path_for(session);
+    let lock_file = lock_path_for(session);
     if let Some(parent) = lock_file.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -180,14 +200,15 @@ pub async fn start_daemon(
         .write(true)
         .create_new(true)
         .open(&lock_file);
-    let Ok(_lock) = lock else {
+    let Ok(lock) = lock else {
+        eprintln!("[gsd-browser] waiting for daemon start by another process...");
         return connect_pipe(session, Duration::from_secs(10))
             .await
             .map(|_| ());
     };
 
     cleanup_daemon_artifacts(session);
-    let mut child = spawn_daemon_process(
+    let mut child = match spawn_daemon_process(
         browser_path,
         cdp_url,
         session,
@@ -195,10 +216,16 @@ pub async fn start_daemon(
         identity_key,
         identity_project_id,
         no_narration_delay,
-    )?;
+    ) {
+        Ok(child) => child,
+        Err(err) => {
+            release_startup_lock(lock, &lock_file);
+            return Err(err);
+        }
+    };
 
     let result = wait_for_spawned_daemon(session, &mut child, Duration::from_secs(10)).await;
-    let _ = fs::remove_file(lock_file);
+    release_startup_lock(lock, &lock_file);
     if result.is_err() {
         cleanup_daemon_artifacts(session);
     }
@@ -217,6 +244,7 @@ pub fn stop_daemon(session: Option<&str>) -> Result<(), Box<dyn std::error::Erro
     }
 
     cleanup_daemon_artifacts(session);
+    let _ = fs::remove_file(lock_path_for(session));
     let _ = write_stopped_manifest(session, "daemon stopped");
     Ok(())
 }
@@ -233,7 +261,7 @@ pub async fn collect_health(session: Option<&str>) -> Result<Value, Box<dyn std:
     manifest.session_name = session.map(str::to_string);
     manifest.socket_path = named_pipe_name_for(session);
     let pipe_connected = pipe_connectable(session).await;
-    let daemon_alive = pipe_connected || read_daemon_pid(session).is_some();
+    let daemon_alive = pipe_connected || is_daemon_alive(session);
 
     let (status, reason) = if pipe_connected {
         (SessionHealthStatus::Healthy, String::new())
@@ -304,27 +332,49 @@ pub async fn send_request(
     session: Option<&str>,
 ) -> Result<DaemonResponse, Box<dyn std::error::Error>> {
     let session = validate_session_name(session)?;
-    if let Ok(resp) = send_once(method, params.clone(), session).await {
-        return Ok(resp);
-    }
-
     let identity_scope = std::env::var("GSD_BROWSER_IDENTITY_SCOPE").ok();
     let identity_key = std::env::var("GSD_BROWSER_IDENTITY_KEY").ok();
     let identity_project_id = std::env::var("GSD_BROWSER_IDENTITY_PROJECT").ok();
     let no_narration_delay = std::env::var_os("GSD_BROWSER_NO_NARRATION_DELAY").is_some();
 
-    start_daemon(
-        browser_path,
-        cdp_url,
-        session,
-        identity_scope.as_deref(),
-        identity_key.as_deref(),
-        identity_project_id.as_deref(),
-        no_narration_delay,
-    )
-    .await?;
+    if !is_daemon_alive(session) || !pipe_connectable(session).await {
+        start_daemon(
+            browser_path,
+            cdp_url,
+            session,
+            identity_scope.as_deref(),
+            identity_key.as_deref(),
+            identity_project_id.as_deref(),
+            no_narration_delay,
+        )
+        .await?;
+    }
 
-    send_once(method, params, session).await
+    match send_once(method, params.clone(), session).await {
+        Ok(resp) => Ok(resp),
+        Err(err) => {
+            if is_daemon_alive(session) {
+                return Err(live_daemon_recovery_error(
+                    session,
+                    &format!("request failed while the daemon PID was still alive: {err}"),
+                ));
+            }
+
+            eprintln!("[gsd-browser] daemon connection failed, restarting...");
+            cleanup_daemon_artifacts(session);
+            start_daemon(
+                browser_path,
+                cdp_url,
+                session,
+                identity_scope.as_deref(),
+                identity_key.as_deref(),
+                identity_project_id.as_deref(),
+                no_narration_delay,
+            )
+            .await?;
+            send_once(method, params, session).await
+        }
+    }
 }
 
 async fn send_once(

@@ -304,10 +304,31 @@ fn cleanup_stale_transport(
 }
 
 #[cfg(windows)]
+fn is_pid_stale(pid: u32) -> bool {
+    !crate::win_process::is_process_alive(pid)
+}
+
+#[cfg(windows)]
 fn cleanup_stale_transport(
     _session: Option<&str>,
-    _pid_file_path: &Path,
+    pid_file_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !pid_file_path.exists() {
+        return Ok(());
+    }
+
+    let pid_alive = fs::read_to_string(pid_file_path)?
+        .trim()
+        .parse::<u32>()
+        .map(|pid| !is_pid_stale(pid))
+        .unwrap_or(false);
+
+    if pid_alive {
+        return Err("daemon already running (PID is alive)".into());
+    }
+
+    warn!("[gsd-browser-daemon] removing stale PID file");
+    let _ = fs::remove_file(pid_file_path);
     Ok(())
 }
 

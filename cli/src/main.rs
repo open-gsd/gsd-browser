@@ -4,6 +4,9 @@ mod cloud_methods;
 
 mod daemon;
 
+#[cfg(windows)]
+mod win_process;
+
 #[cfg(unix)]
 mod daemon_client;
 #[cfg(windows)]
