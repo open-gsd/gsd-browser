@@ -23,7 +23,7 @@ use gsd_browser_common::session::{
 use gsd_browser_common::{
     config::Config,
     identity::{identity_profile_dir, IdentityScope},
-    ipc, pid_path_for, socket_path_for, state_dir,
+    ipc, named_pipe_name_for, pid_path_for, socket_path_for, state_dir,
     types::CompactPageState,
     validate_session_name, DaemonRequest, DaemonResponse, ERR_INTERNAL, ERR_INVALID_REQUEST,
     ERR_METHOD_NOT_FOUND,
@@ -36,6 +36,10 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+#[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
@@ -256,6 +260,78 @@ fn is_agent_usable_page_url(url: &str) -> bool {
     !(url.is_empty() || url.starts_with("chrome://") || url.starts_with("devtools://"))
 }
 
+fn daemon_endpoint_for(session: Option<&str>) -> String {
+    if cfg!(windows) {
+        named_pipe_name_for(session)
+    } else {
+        socket_path_for(session).to_string_lossy().to_string()
+    }
+}
+
+#[cfg(unix)]
+fn is_pid_stale(pid: i32) -> bool {
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err()
+}
+
+#[cfg(unix)]
+fn cleanup_stale_transport(
+    session: Option<&str>,
+    pid_file_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sock_path = socket_path_for(session);
+    if !sock_path.exists() {
+        return Ok(());
+    }
+
+    let stale = if pid_file_path.exists() {
+        fs::read_to_string(pid_file_path)?
+            .trim()
+            .parse::<i32>()
+            .map(is_pid_stale)
+            .unwrap_or(true)
+    } else {
+        true
+    };
+
+    if stale {
+        warn!("[gsd-browser-daemon] removing stale socket");
+        let _ = fs::remove_file(&sock_path);
+        let _ = fs::remove_file(pid_file_path);
+        Ok(())
+    } else {
+        Err("daemon already running (socket exists and PID is alive)".into())
+    }
+}
+
+#[cfg(windows)]
+fn is_pid_stale(pid: u32) -> bool {
+    !crate::win_process::is_process_alive(pid)
+}
+
+#[cfg(windows)]
+fn cleanup_stale_transport(
+    _session: Option<&str>,
+    pid_file_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !pid_file_path.exists() {
+        return Ok(());
+    }
+
+    let pid_alive = fs::read_to_string(pid_file_path)?
+        .trim()
+        .parse::<u32>()
+        .map(|pid| !is_pid_stale(pid))
+        .unwrap_or(false);
+
+    if pid_alive {
+        return Err("daemon already running (PID is alive)".into());
+    }
+
+    warn!("[gsd-browser-daemon] removing stale PID file");
+    let _ = fs::remove_file(pid_file_path);
+    Ok(())
+}
+
 async fn select_existing_attached_page(pages: Vec<Page>) -> Option<Page> {
     let mut blank_fallback = None;
 
@@ -324,43 +400,17 @@ async fn run_daemon(
     fs::create_dir_all(&state)?;
 
     // For session mode, ensure session subdir exists
-    let sock_path = socket_path_for(session);
+    let transport_endpoint = daemon_endpoint_for(session);
     let pid_file_path = pid_path_for(session);
-    if let Some(parent) = sock_path.parent() {
+    if let Some(parent) = pid_file_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    if let Some(parent) = socket_path_for(session).parent() {
         fs::create_dir_all(parent)?;
     }
 
-    // Clean up stale socket if exists
-    if sock_path.exists() {
-        // Check if old PID is alive
-        let stale = if pid_file_path.exists() {
-            let old_pid = fs::read_to_string(&pid_file_path)?
-                .trim()
-                .parse::<i32>()
-                .ok();
-            match old_pid {
-                Some(pid) => {
-                    // Check if process is alive via kill(pid, 0)
-                    nix::sys::signal::kill(
-                        nix::unistd::Pid::from_raw(pid),
-                        None, // signal 0: check if process exists
-                    )
-                    .is_err()
-                }
-                None => true,
-            }
-        } else {
-            true
-        };
-
-        if stale {
-            warn!("[gsd-browser-daemon] removing stale socket");
-            let _ = fs::remove_file(&sock_path);
-            let _ = fs::remove_file(&pid_file_path);
-        } else {
-            return Err("daemon already running (socket exists and PID is alive)".into());
-        }
-    }
+    cleanup_stale_transport(session, &pid_file_path)?;
 
     // Write PID file
     fs::write(&pid_file_path, process::id().to_string())?;
@@ -380,7 +430,7 @@ async fn run_daemon(
         manifest_version: 1,
         session_name: session.map(str::to_string),
         daemon_pid: Some(process::id() as i32),
-        socket_path: sock_path.to_string_lossy().to_string(),
+        socket_path: transport_endpoint.clone(),
         daemon_started_at: Some(start_ts),
         browser_started_at: Some(start_ts),
         daemon_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -635,7 +685,7 @@ async fn run_daemon(
             identity_scope,
             identity_project_id: identity_project_id_arg.clone(),
             identity_key: identity_key_arg.clone(),
-            socket_path: sock_path.to_string_lossy().to_string(),
+            socket_path: transport_endpoint.clone(),
         },
         no_narration_delay,
     ));
@@ -690,9 +740,7 @@ async fn run_daemon(
         });
     }
 
-    // Bind Unix socket
-    let listener = UnixListener::bind(&sock_path)?;
-    info!("[gsd-browser-daemon] listening on {:?}", sock_path);
+    info!("[gsd-browser-daemon] listening on {}", transport_endpoint);
 
     if let Some(page) = daemon_state.pages.lock().unwrap().active_page() {
         let state = Arc::clone(&daemon_state);
@@ -707,32 +755,13 @@ async fn run_daemon(
         });
     }
 
-    // Trap termination signals so `daemon stop` can shut Chrome down cleanly.
-    let shutdown = shutdown_signal();
-    tokio::pin!(shutdown);
-
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                match accept_result {
-                    Ok((stream, _addr)) => {
-                        info!("[gsd-browser-daemon] connection accepted");
-                        let logs = Arc::clone(&daemon_logs);
-                        let state = Arc::clone(&daemon_state);
-                        let browser = Arc::clone(&browser);
-                        tokio::spawn(handle_connection(stream, logs, state, browser));
-                    }
-                    Err(e) => {
-                        error!("[gsd-browser-daemon] accept error: {e}");
-                    }
-                }
-            }
-            _ = &mut shutdown => {
-                info!("[gsd-browser-daemon] shutting down...");
-                break;
-            }
-        }
-    }
+    serve_connections(
+        session,
+        Arc::clone(&daemon_logs),
+        Arc::clone(&daemon_state),
+        Arc::clone(&browser),
+    )
+    .await?;
 
     // Clean shutdown
     if let Some(page) = daemon_state.pages.lock().unwrap().active_page() {
@@ -746,26 +775,117 @@ async fn run_daemon(
     } else {
         let _ = handlers::session::mark_session_stopped(&daemon_state, "daemon stopped").await;
     }
-    drop(listener);
     {
         let mut browser = browser.lock().await;
         let _ = browser.close().await;
         let _ = browser.wait().await;
     }
     handler_task.abort();
-    let _ = fs::remove_file(&sock_path);
+    #[cfg(unix)]
+    let _ = fs::remove_file(socket_path_for(session));
     let _ = fs::remove_file(&pid_file_path);
     info!("[gsd-browser-daemon] shutdown complete");
 
     Ok(())
 }
 
-async fn handle_connection(
-    mut stream: tokio::net::UnixStream,
+#[cfg(unix)]
+async fn serve_connections(
+    session: Option<&str>,
+    daemon_logs: Arc<DaemonLogs>,
+    daemon_state: Arc<DaemonState>,
+    browser: Arc<tokio::sync::Mutex<Browser>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sock_path = socket_path_for(session);
+    let listener = UnixListener::bind(&sock_path)?;
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            accept_result = listener.accept() => {
+                match accept_result {
+                    Ok((stream, _addr)) => {
+                        spawn_connection_handler(stream, &daemon_logs, &daemon_state, &browser);
+                    }
+                    Err(e) => {
+                        error!("[gsd-browser-daemon] accept error: {e}");
+                    }
+                }
+            }
+            _ = &mut shutdown => {
+                info!("[gsd-browser-daemon] shutting down...");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn serve_connections(
+    session: Option<&str>,
+    daemon_logs: Arc<DaemonLogs>,
+    daemon_state: Arc<DaemonState>,
+    browser: Arc<tokio::sync::Mutex<Browser>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pipe_name = named_pipe_name_for(session);
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            accept_result = accept_named_pipe(&pipe_name) => {
+                match accept_result {
+                    Ok(stream) => {
+                        spawn_connection_handler(stream, &daemon_logs, &daemon_state, &browser);
+                    }
+                    Err(e) => {
+                        error!("[gsd-browser-daemon] named pipe accept error: {e}");
+                    }
+                }
+            }
+            _ = &mut shutdown => {
+                info!("[gsd-browser-daemon] shutting down...");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn accept_named_pipe(pipe_name: &str) -> std::io::Result<NamedPipeServer> {
+    let server = ServerOptions::new().create(pipe_name)?;
+    server.connect().await?;
+    Ok(server)
+}
+
+fn spawn_connection_handler<S>(
+    stream: S,
+    daemon_logs: &Arc<DaemonLogs>,
+    daemon_state: &Arc<DaemonState>,
+    browser: &Arc<tokio::sync::Mutex<Browser>>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    info!("[gsd-browser-daemon] connection accepted");
+    let logs = Arc::clone(daemon_logs);
+    let state = Arc::clone(daemon_state);
+    let browser = Arc::clone(browser);
+    tokio::spawn(handle_connection(stream, logs, state, browser));
+}
+
+async fn handle_connection<S>(
+    mut stream: S,
     logs: Arc<DaemonLogs>,
     state: Arc<DaemonState>,
     browser: Arc<tokio::sync::Mutex<Browser>>,
-) {
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let raw = match ipc::read_message(&mut stream).await {
         Ok(data) if data.is_empty() => return,
         Ok(data) => data,

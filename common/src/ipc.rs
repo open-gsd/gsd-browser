@@ -1,11 +1,10 @@
-#[cfg(unix)]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-#[cfg(unix)]
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Write a length-prefixed message: 4-byte big-endian length + payload.
-#[cfg(unix)]
-pub async fn write_message(stream: &mut UnixStream, msg: &[u8]) -> std::io::Result<()> {
+pub async fn write_message<W>(stream: &mut W, msg: &[u8]) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let len = msg.len() as u32;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(msg).await?;
@@ -15,8 +14,10 @@ pub async fn write_message(stream: &mut UnixStream, msg: &[u8]) -> std::io::Resu
 
 /// Read a length-prefixed message: 4-byte big-endian length, then that many bytes.
 /// Returns an empty Vec on EOF (peer closed).
-#[cfg(unix)]
-pub async fn read_message(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+pub async fn read_message<R>(stream: &mut R) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
     let mut len_buf = [0u8; 4];
     match stream.read_exact(&mut len_buf).await {
         Ok(_) => {}

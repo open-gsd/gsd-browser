@@ -2,17 +2,18 @@ mod cloud_manifest;
 #[path = "daemon/handlers/cloud_methods.rs"]
 mod cloud_methods;
 
-#[cfg(unix)]
 mod daemon;
-#[cfg(not(unix))]
-#[path = "daemon_windows.rs"]
-mod daemon;
+
+#[cfg(windows)]
+mod win_process;
 
 #[cfg(unix)]
 mod daemon_client;
-#[cfg(not(unix))]
+#[cfg(windows)]
 #[path = "daemon_client_windows.rs"]
 mod daemon_client;
+#[cfg(not(any(unix, windows)))]
+compile_error!("gsd-browser daemon support requires a Unix or Windows target");
 mod mcp;
 mod output;
 
