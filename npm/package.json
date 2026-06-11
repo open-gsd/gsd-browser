@@ -26,7 +26,15 @@
     "gsd-browser": "bin/gsd-browser"
   },
   "scripts": {
-    "postinstall": "node scripts/postinstall.js"
+    "build": "node scripts/build-package.js",
+    "postinstall": "node scripts/postinstall.js",
+    "prepublishOnly": "npm test && npm run build",
+    "smoke": "node bin/gsd-browser --version",
+    "test": "node scripts/test-package.js",
+    "verify:release-tag": "node scripts/verify-release-tag.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "os": [
     "darwin",

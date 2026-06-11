@@ -3,6 +3,7 @@ mod cloud_manifest;
 mod cloud_methods;
 
 mod daemon;
+mod daemon_startup;
 
 #[cfg(windows)]
 mod win_process;
