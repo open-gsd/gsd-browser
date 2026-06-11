@@ -1,3 +1,4 @@
+use crate::daemon_startup::daemon_startup_timeout;
 use gsd_browser_common::process::{pids_using_profile, terminate_process};
 use gsd_browser_common::session::{
     load_session_manifest, manifest_path_for, now_epoch_secs, save_session_manifest,
@@ -171,6 +172,7 @@ pub async fn start_daemon(
     no_narration_delay: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let session = validate_session_name(session)?;
+    let startup_timeout = daemon_startup_timeout();
 
     // Ensure state dir exists (and session subdir if needed)
     let sock = socket_path_for(session);
@@ -198,7 +200,7 @@ pub async fn start_daemon(
     if lock_result != 0 {
         // Another process is starting the daemon — wait for socket
         eprintln!("[gsd-browser] waiting for daemon start by another process...");
-        return wait_for_socket(session, Duration::from_secs(10)).await;
+        return wait_for_socket(session, startup_timeout).await;
     }
 
     // We hold the lock — check if daemon is already alive
@@ -206,7 +208,7 @@ pub async fn start_daemon(
         let result = if sock.exists() {
             Ok(())
         } else {
-            match wait_for_socket(session, Duration::from_secs(10)).await {
+            match wait_for_socket(session, startup_timeout).await {
                 Ok(()) => Ok(()),
                 Err(_) => Err(live_daemon_recovery_error(
                     session,
@@ -266,7 +268,7 @@ pub async fn start_daemon(
         .map_err(|e| format!("failed to start daemon ({:?}): {}", exe, e))?;
 
     // Wait for socket to appear and fail fast if the daemon exits during startup.
-    let result = wait_for_spawned_daemon(session, &mut child, Duration::from_secs(10)).await;
+    let result = wait_for_spawned_daemon(session, &mut child, startup_timeout).await;
     if result.is_err() {
         cleanup_daemon_artifacts(session);
     }

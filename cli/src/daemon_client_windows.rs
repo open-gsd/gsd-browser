@@ -1,3 +1,4 @@
+use crate::daemon_startup::daemon_startup_timeout;
 use crate::win_process::is_process_alive;
 use gsd_browser_common::session::{
     load_session_manifest, manifest_path_for, now_epoch_secs, save_session_manifest,
@@ -182,6 +183,7 @@ pub async fn start_daemon(
     no_narration_delay: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let session = validate_session_name(session)?;
+    let startup_timeout = daemon_startup_timeout();
     if pipe_connectable(session).await {
         return Ok(());
     }
@@ -202,9 +204,7 @@ pub async fn start_daemon(
         .open(&lock_file);
     let Ok(lock) = lock else {
         eprintln!("[gsd-browser] waiting for daemon start by another process...");
-        return connect_pipe(session, Duration::from_secs(10))
-            .await
-            .map(|_| ());
+        return connect_pipe(session, startup_timeout).await.map(|_| ());
     };
 
     cleanup_daemon_artifacts(session);
@@ -224,7 +224,7 @@ pub async fn start_daemon(
         }
     };
 
-    let result = wait_for_spawned_daemon(session, &mut child, Duration::from_secs(10)).await;
+    let result = wait_for_spawned_daemon(session, &mut child, startup_timeout).await;
     release_startup_lock(lock, &lock_file);
     if result.is_err() {
         cleanup_daemon_artifacts(session);

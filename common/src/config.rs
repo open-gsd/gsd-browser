@@ -375,7 +375,7 @@ mod tests {
         // Screenshot quality: 80
         assert_eq!(config.screenshot.quality, 80);
         assert_eq!(config.screenshot.format, "jpeg");
-        assert_eq!(config.screenshot.full_page, false);
+        assert!(!config.screenshot.full_page);
 
         // Browser
         assert!(config.browser.path.is_none());

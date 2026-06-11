@@ -11,10 +11,13 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
+    permissions:
+      contents: read
+
     strategy:
       matrix:
         include:
@@ -38,6 +41,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -188,9 +193,13 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -208,3 +217,40 @@ jobs:
             artifacts/gsd-browser-linux-arm64/gsd-browser-linux-arm64
             artifacts/gsd-browser-linux-x64/gsd-browser-linux-x64
             artifacts/gsd-browser-windows-x64.exe/gsd-browser-windows-x64.exe
+
+  npm-publish:
+    name: publish npm package
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Use npm 11
+        run: npm install -g npm@11
+
+      - name: Verify release tag
+        run: npm --prefix npm run verify:release-tag -- "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+      - name: Test npm package
+        run: npm --prefix npm test
+
+      - name: Build npm package
+        run: npm --prefix npm run build
+
+      - name: Publish to npm
+        working-directory: npm
+        run: npm publish --access public --provenance
