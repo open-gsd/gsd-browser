@@ -116,7 +116,7 @@ gsd-browser assert --checks '[
 gsd-browser batch --steps '[ ... array of step objects ... ]' --stop-on-failure --summary-only
 ```
 
-**Supported batch actions:** navigate, click, type, key_press, wait_for, assert, click_ref, fill_ref.
+**Supported batch actions:** navigate, reload, click, type, select_option, key_press, press, wait_for, assert, click_ref, fill_ref, hover, hover_ref, scroll, snapshot, diff.
 
 **MCP:** `browser_batch` is one of the highest-value tools for reliable long-horizon agent workflows (atomicity + fewer roundtrips). See best-practices guide.
 

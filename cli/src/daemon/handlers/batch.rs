@@ -103,6 +103,7 @@ async fn dispatch_step(
 ) -> Result<Value, String> {
     let result = match action {
         "navigate" => handlers::navigate::handle_navigate(page, step, state).await,
+        "reload" => handlers::navigate::handle_reload(page, state).await,
         "click" => handlers::interaction::handle_click(page, state, step).await,
         "type" => handlers::interaction::handle_type_text(page, state, step).await,
         "select_option" => handlers::interaction::handle_select_option(page, state, step).await,
