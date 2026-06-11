@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +61,38 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+struct RedactionRule {
+    regex: Regex,
+    replacement: &'static str,
+}
+
+static REDACTION_RULES: LazyLock<[RedactionRule; 5]> = LazyLock::new(|| {
+    [
+        RedactionRule {
+            regex: Regex::new(r"(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}")
+                .expect("valid redaction regex"),
+            replacement: "[redacted:email]",
+        },
+        RedactionRule {
+            regex: Regex::new(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+").expect("valid redaction regex"),
+            replacement: "bearer [redacted:token]",
+        },
+        RedactionRule {
+            regex: Regex::new(r"(?i)(token|secret|key|code|otp)=([^&\s]+)")
+                .expect("valid redaction regex"),
+            replacement: "[redacted:token]",
+        },
+        RedactionRule {
+            regex: Regex::new(r#"(?i)data-token=["'][^"']+["']"#).expect("valid redaction regex"),
+            replacement: "data-token=\"[redacted:token]\"",
+        },
+        RedactionRule {
+            regex: Regex::new(r"[A-Za-z0-9_-]{32,}").expect("valid redaction regex"),
+            replacement: "[redacted:token]",
+        },
+    ]
+});
 
 impl RecordingStore {
     pub fn new(root: PathBuf) -> Self {
@@ -827,28 +859,13 @@ pub fn export_recording_bundle(
 
 pub fn redact_text(text: &str) -> String {
     let mut value = text.to_string();
-    let rules = [
-        (
-            r"(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",
-            "[redacted:email]",
-        ),
-        (
-            r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+",
-            "bearer [redacted:token]",
-        ),
-        (
-            r"(?i)(token|secret|key|code|otp)=([^&\s]+)",
-            "[redacted:token]",
-        ),
-        (
-            r#"(?i)data-token=["'][^"']+["']"#,
-            "data-token=\"[redacted:token]\"",
-        ),
-        (r"[A-Za-z0-9_-]{32,}", "[redacted:token]"),
-    ];
-    for (pattern, replacement) in rules {
-        let regex = Regex::new(pattern).expect("valid redaction regex");
-        value = regex.replace_all(&value, replacement).to_string();
+    for rule in REDACTION_RULES.iter() {
+        if rule.regex.is_match(&value) {
+            value = rule
+                .regex
+                .replace_all(&value, rule.replacement)
+                .into_owned();
+        }
     }
     value
 }
