@@ -140,13 +140,14 @@ pub async fn handle_analyze_form(page: &Page, params: &Value) -> Result<Value, S
         return tag;
     }}
 
-    const elements = form.querySelectorAll('input, select, textarea, button');
+    const elements = form.querySelectorAll('input, select, textarea, button, [contenteditable]:not([contenteditable="false"]), [role~="textbox"], [role~="searchbox"], [role~="spinbutton"], [role~="slider"], [role~="combobox"], [aria-haspopup]');
     const fields = [];
     const submitButtons = [];
 
     elements.forEach(el => {{
         const tag = el.tagName.toLowerCase();
-        const type = (el.getAttribute('type') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textarea' : 'text')).toLowerCase();
+        const role = (el.getAttribute('role') || '').toLowerCase();
+        const type = (el.getAttribute('type') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textarea' : role || 'text')).toLowerCase();
 
         // Submit buttons go to a separate list
         if (tag === 'button' || type === 'submit' || type === 'image') {{
@@ -272,7 +273,7 @@ pub async fn handle_fill_form(
         r#"(() => {{
     const formSel = {form_sel_json};
     const keys = {keys_json};
-    const fieldSelector = 'input:not([type=hidden]), select, textarea, [contenteditable]:not([contenteditable="false"]), [role~="textbox"]';
+    const fieldSelector = 'input:not([type=hidden]), select, textarea, [contenteditable]:not([contenteditable="false"]), [role~="textbox"], [role~="searchbox"], [role~="spinbutton"], [role~="slider"], [role~="combobox"], [aria-haspopup]';
 
     let form;
     if (formSel) {{
@@ -466,7 +467,7 @@ pub async fn handle_fill_form(
         };
 
         let result = match field_type {
-            "select" | "select-one" | "select-multiple" => {
+            "select" | "select-one" | "select-multiple" | "combobox" | "listbox" | "menu" => {
                 let option_str = value.as_str().unwrap_or("");
                 let p = json!({ "selector": selector, "option": option_str });
                 handle_select_option(page, state, &p).await

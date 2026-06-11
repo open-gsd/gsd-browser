@@ -477,6 +477,23 @@ enum Commands {
         #[arg(long)]
         scope: Option<String>,
     },
+    /// Execute a natural-language browser instruction using generic page affordances
+    ActInstruction {
+        /// Natural-language instruction, e.g. "click Continue" or "enter 'alice@example.com' into Email"
+        instruction: String,
+        /// Plan the action without executing it
+        #[arg(long)]
+        dry_run: bool,
+        /// CSS selector to constrain planning to a page region, form, dialog, or panel
+        #[arg(long)]
+        scope: Option<String>,
+        /// Block execution when the inferred plan confidence is below this threshold
+        #[arg(long)]
+        min_confidence: Option<f64>,
+        /// Maximum number of primitive steps an instruction may execute
+        #[arg(long)]
+        max_steps: Option<u64>,
+    },
     /// Set or clear the goal banner
     Goal {
         /// Goal text to display
@@ -1149,6 +1166,23 @@ async fn main() {
         } => cmd_fill_form(&cli, values, selector.as_deref(), *submit).await,
         Commands::FindBest { intent, scope } => cmd_find_best(&cli, intent, scope.as_deref()).await,
         Commands::Act { intent, scope } => cmd_act(&cli, intent, scope.as_deref()).await,
+        Commands::ActInstruction {
+            instruction,
+            dry_run,
+            scope,
+            min_confidence,
+            max_steps,
+        } => {
+            cmd_act_instruction(
+                &cli,
+                instruction,
+                *dry_run,
+                scope.as_deref(),
+                *min_confidence,
+                *max_steps,
+            )
+            .await
+        }
         Commands::Goal { text, clear } => cmd_goal(&cli, text.as_deref(), *clear).await,
         Commands::Pause => cmd_control(&cli, "pause").await,
         Commands::Resume => cmd_control(&cli, "resume").await,
@@ -2241,6 +2275,35 @@ async fn cmd_act(cli: &Cli, intent: &str, scope: Option<&str>) -> CmdResult {
     )
     .await?;
     handle_response(cli, resp, output::format_text_act)
+}
+
+async fn cmd_act_instruction(
+    cli: &Cli,
+    instruction: &str,
+    dry_run: bool,
+    scope: Option<&str>,
+    min_confidence: Option<f64>,
+    max_steps: Option<u64>,
+) -> CmdResult {
+    let mut params = serde_json::json!({"instruction": instruction, "dry_run": dry_run});
+    if let Some(scope) = scope {
+        params["scope"] = serde_json::json!(scope);
+    }
+    if let Some(min_confidence) = min_confidence {
+        params["min_confidence"] = serde_json::json!(min_confidence);
+    }
+    if let Some(max_steps) = max_steps {
+        params["max_steps"] = serde_json::json!(max_steps);
+    }
+    let resp = daemon_client::send_request(
+        "act_instruction",
+        params,
+        cli.browser_path.as_deref(),
+        cli.cdp_url.as_deref(),
+        cli.session.as_deref(),
+    )
+    .await?;
+    handle_response(cli, resp, output::format_text_act_instruction)
 }
 
 async fn cmd_goal(cli: &Cli, text: Option<&str>, clear: bool) -> CmdResult {

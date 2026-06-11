@@ -245,6 +245,10 @@ pub const CLOUD_TOOL_METHODS: &[CloudToolMethod] = &[
         category: CloudToolCategory::ExternalEffect,
     },
     CloudToolMethod {
+        name: "act_instruction",
+        category: CloudToolCategory::ExternalEffect,
+    },
+    CloudToolMethod {
         name: "mock_route",
         category: CloudToolCategory::NetworkMutation,
     },
@@ -353,6 +357,7 @@ mod tests {
                 "eval",
                 "fill_form",
                 "act",
+                "act_instruction",
                 "mock_route",
                 "block_urls",
                 "clear_routes",

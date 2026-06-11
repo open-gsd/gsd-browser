@@ -454,6 +454,36 @@ mod tests {
     }
 
     #[test]
+    fn tool_list_includes_generic_instruction_action() {
+        let tools = build_tool_list();
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "browser_act_instruction")
+            .expect("browser_act_instruction should be advertised");
+
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            json!(["instruction"]),
+            "instruction should be the only required field"
+        );
+        assert!(tool["description"]
+            .as_str()
+            .expect("description")
+            .contains("generic natural-language browser instruction"));
+    }
+
+    #[test]
+    fn tool_call_session_defaults_to_mcp_session() {
+        let cli = Cli::parse_from(["gsd-browser", "mcp", "--session", "bench-session"]);
+
+        assert_eq!(tool_call_session(&json!({}), &cli), Some("bench-session"));
+        assert_eq!(
+            tool_call_session(&json!({"session": "call-session"}), &cli),
+            Some("call-session")
+        );
+    }
+
+    #[test]
     fn ipv6_bind_addresses_are_bracketed() {
         assert_eq!(format_bind_address("::1", 8788), "[::1]:8788");
         assert_eq!(format_bind_address("[::1]", 8788), "[::1]:8788");
@@ -1100,6 +1130,22 @@ fn build_tool_list() -> Vec<Value> {
                     "session": { "type": "string" }
                 },
                 "required": ["intent"]
+            }
+        }),
+        json!({
+            "name": "browser_act_instruction",
+            "description": "Perform a generic natural-language browser instruction by planning against live DOM affordances, then dispatching existing primitives such as click, type, select_option, set_checked, drag, or scroll. Use dry_run to inspect the selected target first. Use scope/min_confidence/max_steps when the page has repeated controls or the action should be guarded.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "instruction": { "type": "string", "description": "Short action-oriented instruction, such as \"enter 'alice@example.com' into email\", \"click Continue\", or \"choose California from State\"" },
+                    "dry_run": { "type": "boolean", "default": false, "description": "Return the inferred action plan without executing it" },
+                    "scope": { "type": "string", "description": "Optional CSS selector that constrains planning to a form, dialog, panel, or other page region" },
+                    "min_confidence": { "type": "number", "description": "Optional threshold that blocks execution if the plan confidence is lower than this value" },
+                    "max_steps": { "type": "integer", "description": "Maximum primitive steps the instruction may execute; defaults to a small bounded sequence" },
+                    "session": { "type": "string" }
+                },
+                "required": ["instruction"]
             }
         }),
         json!({
@@ -1790,7 +1836,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
     // We reuse the exact same daemon_client::send_request path that the real CLI uses.
     // This gives us auto-start, session handling, JSON output, error formatting, etc. for free.
 
-    let session = arguments.get("session").and_then(|v| v.as_str());
+    let session = tool_call_session(&arguments, cli);
 
     let result = match name {
         "browser_navigate" => {
@@ -2047,6 +2093,51 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
 
             let resp = crate::daemon_client::send_request(
                 "act",
+                params,
+                cli.browser_path.as_deref(),
+                cli.cdp_url.as_deref(),
+                session,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+            if let Some(err) = resp.error {
+                return Err(err.message);
+            }
+            serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
+        }
+
+        "browser_act_instruction" => {
+            let instruction = arguments
+                .get("instruction")
+                .and_then(|v| v.as_str())
+                .ok_or("instruction is required")?;
+            let dry_run = arguments
+                .get("dry_run")
+                .or_else(|| arguments.get("dryRun"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut params = json!({ "instruction": instruction, "dry_run": dry_run });
+            if let Some(scope) = arguments.get("scope").and_then(|v| v.as_str()) {
+                params["scope"] = json!(scope);
+            }
+            if let Some(min_confidence) = arguments
+                .get("min_confidence")
+                .or_else(|| arguments.get("minConfidence"))
+                .and_then(|v| v.as_f64())
+            {
+                params["min_confidence"] = json!(min_confidence);
+            }
+            if let Some(max_steps) = arguments
+                .get("max_steps")
+                .or_else(|| arguments.get("maxSteps"))
+                .and_then(|v| v.as_u64())
+            {
+                params["max_steps"] = json!(max_steps);
+            }
+
+            let resp = crate::daemon_client::send_request(
+                "act_instruction",
                 params,
                 cli.browser_path.as_deref(),
                 cli.cdp_url.as_deref(),
@@ -3071,4 +3162,11 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
     };
 
     Ok(result)
+}
+
+fn tool_call_session<'a>(arguments: &'a Value, cli: &'a Cli) -> Option<&'a str> {
+    arguments
+        .get("session")
+        .and_then(|v| v.as_str())
+        .or(cli.session.as_deref())
 }

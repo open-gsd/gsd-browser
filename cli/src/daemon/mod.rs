@@ -842,6 +842,7 @@ async fn dispatch(
             | "wait_for"
             | "batch"
             | "fill_form"
+            | "act_instruction"
             | "act"
     );
 
@@ -906,6 +907,7 @@ async fn dispatch(
             | "hover_ref"
             | "fill_ref"
             | "fill_form"
+            | "act_instruction"
             | "act"
     ) {
         let before_state = capture::capture_compact_page_state(page, false).await;
@@ -962,6 +964,7 @@ async fn dispatch(
             | "hover_ref"
             | "fill_ref"
             | "fill_form"
+            | "act_instruction"
             | "act"
     ) {
         let after_state = capture::capture_compact_page_state(page, false).await;
@@ -1210,6 +1213,7 @@ fn should_sync_session_manifest(method: &str) -> bool {
             | "hover_ref"
             | "fill_ref"
             | "fill_form"
+            | "act_instruction"
             | "act"
             | "batch"
             | "cloud_user_input"
@@ -1638,6 +1642,17 @@ pub(crate) async fn dispatch_inner(
                 json!({"retryHint": "Check intent is valid and matching elements exist on page"}),
             ),
         },
+        "act_instruction" => {
+            match handlers::instruction::handle_act_instruction(page, state, &req.params).await {
+                Ok(result) => DaemonResponse::success(req.id, result),
+                Err(msg) => DaemonResponse::error_with_data(
+                    req.id,
+                    ERR_INTERNAL,
+                    &msg,
+                    json!({"retryHint": "Use an action-oriented instruction, or inspect the page with snapshot/analyze-form first"}),
+                ),
+            }
+        }
         "session_summary" => {
             match handlers::session::handle_session_summary(page, logs, state).await {
                 Ok(result) => DaemonResponse::success(req.id, result),

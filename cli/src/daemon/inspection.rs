@@ -525,8 +525,11 @@ function dispatchKeyTriplet(context, el, key) {
 function valuesEquivalent(el, actual, expected) {
   if (actual === expected) return true;
   const type = String(el.getAttribute("type") || "").toLowerCase();
-  if (type === "number" && actual !== "" && expected !== "") {
+  if ((type === "number" || type === "range") && actual !== "" && expected !== "") {
     return Number(actual) === Number(expected);
+  }
+  if (type === "color" && actual && expected) {
+    return actual.toLowerCase() === expected.toLowerCase();
   }
   return false;
 }
@@ -844,48 +847,159 @@ function dispatchValueEvents(el) {
   el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
 }
 
-function setRangeOrNumberValue(el, rawValue) {
-  if (!el || !el.tagName || el.tagName.toLowerCase() !== "input") return null;
+function parseDateValue(raw) {
+  const text = String(raw || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  let match = text.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/);
+  if (match) {
+    const month = match[1].padStart(2, "0");
+    const day = match[2].padStart(2, "0");
+    let year = match[3];
+    if (year.length === 2) year = Number(year) >= 70 ? "19" + year : "20" + year;
+    return `${year}-${month}-${day}`;
+  }
+  match = text.match(/^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/);
+  if (match) {
+    const months = {
+      january: 1, jan: 1, february: 2, feb: 2, march: 3, mar: 3, april: 4, apr: 4,
+      may: 5, june: 6, jun: 6, july: 7, jul: 7, august: 8, aug: 8, september: 9, sep: 9,
+      sept: 9, october: 10, oct: 10, november: 11, nov: 11, december: 12, dec: 12,
+    };
+    const month = months[match[1].toLowerCase()];
+    if (month) return `${match[3]}-${String(month).padStart(2, "0")}-${match[2].padStart(2, "0")}`;
+  }
+  return text;
+}
+
+function parseTimeValue(raw) {
+  const text = String(raw || "").trim();
+  if (/^\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(text)) return text;
+  const match = text.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i);
+  if (!match) return text;
+  let hour = Number(match[1]);
+  const minute = match[2] || "00";
+  const period = match[3].toLowerCase();
+  if (period === "pm" && hour < 12) hour += 12;
+  if (period === "am" && hour === 12) hour = 0;
+  return `${String(hour).padStart(2, "0")}:${minute}`;
+}
+
+function parseMonthValue(raw) {
+  const text = String(raw || "").trim();
+  if (/^\d{4}-\d{2}$/.test(text)) return text;
+  const match = text.match(/^([A-Za-z]+)\s+(\d{4})$/);
+  if (!match) return text;
+  const months = {
+    january: 1, jan: 1, february: 2, feb: 2, march: 3, mar: 3, april: 4, apr: 4,
+    may: 5, june: 6, jun: 6, july: 7, jul: 7, august: 8, aug: 8, september: 9, sep: 9,
+    sept: 9, october: 10, oct: 10, november: 11, nov: 11, december: 12, dec: 12,
+  };
+  const month = months[match[1].toLowerCase()];
+  return month ? `${match[2]}-${String(month).padStart(2, "0")}` : text;
+}
+
+function parseColorValue(raw) {
+  const text = String(raw || "").trim().toLowerCase();
+  if (/^#[0-9a-f]{6}$/i.test(text)) return text;
+  if (/^#[0-9a-f]{3}$/i.test(text)) {
+    return "#" + text.slice(1).split("").map((ch) => ch + ch).join("");
+  }
+  const colors = {
+    black: "#000000", white: "#ffffff", red: "#ff0000", green: "#008000", blue: "#0000ff",
+    yellow: "#ffff00", orange: "#ffa500", purple: "#800080", magenta: "#ff00ff",
+    fuchsia: "#ff00ff", cyan: "#00ffff", aqua: "#00ffff", gray: "#808080", grey: "#808080",
+  };
+  return colors[text] || String(raw || "");
+}
+
+function typedValueForInput(el, rawValue) {
   const type = String(el.getAttribute("type") || "text").toLowerCase();
-  if (type !== "range" && type !== "number") return null;
+  const wanted = String(rawValue ?? "");
+  if (type === "date") return parseDateValue(wanted);
+  if (type === "time") return parseTimeValue(wanted);
+  if (type === "month") return parseMonthValue(wanted);
+  if (type === "week") return wanted.trim();
+  if (type === "datetime-local") {
+    const text = wanted.trim();
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text)) return text;
+    const parts = text.split(/\s+(?:at\s+)?/i);
+    if (parts.length >= 2) return `${parseDateValue(parts[0])}T${parseTimeValue(parts.slice(1).join(" "))}`;
+    return text;
+  }
+  if (type === "color") return parseColorValue(wanted);
+  return wanted;
+}
+
+function setTypedControlValue(el, rawValue) {
+  if (!el || !el.tagName) return null;
+  const tag = el.tagName.toLowerCase();
+  const role = String(el.getAttribute("role") || "").toLowerCase();
+  const type = tag === "input" ? String(el.getAttribute("type") || "text").toLowerCase() : "";
+  const supportedInputTypes = new Set(["range", "number", "date", "time", "month", "week", "datetime-local", "color"]);
+  const supportedRole = role === "slider" || role === "spinbutton";
+  if (!(tag === "input" && supportedInputTypes.has(type)) && !supportedRole) return null;
 
   const wanted = String(rawValue ?? "");
+  const kind = type || role;
   if (wanted.trim() === "") {
     if (type === "number") {
       setNativeValue(el, "");
       dispatchValueEvents(el);
-      return { ok: el.value === "", kind: type, expected: "", actual: String(el.value || ""), method: "numeric-empty" };
+      return { ok: el.value === "", kind, expected: "", actual: String(el.value || ""), method: "typed-empty" };
     }
-    return { ok: false, kind: type, expected: wanted, actual: String(el.value || ""), error: "range value cannot be empty" };
+    return { ok: false, kind, expected: wanted, actual: String(el.value || ""), error: kind + " value cannot be empty" };
   }
 
-  const numeric = Number(wanted);
-  if (!Number.isFinite(numeric)) {
-    return { ok: false, kind: type, expected: wanted, actual: String(el.value || ""), error: "value is not numeric" };
+  if (type === "range" || type === "number" || supportedRole) {
+    const numeric = Number(wanted);
+    if (!Number.isFinite(numeric)) {
+      return { ok: false, kind, expected: wanted, actual: String(el.value || el.getAttribute("aria-valuenow") || ""), error: "value is not numeric" };
+    }
+    let next = numeric;
+    const min = el.getAttribute("min") ?? el.getAttribute("aria-valuemin");
+    const max = el.getAttribute("max") ?? el.getAttribute("aria-valuemax");
+    if (min !== null && min !== "" && Number.isFinite(Number(min))) next = Math.max(next, Number(min));
+    if (max !== null && max !== "" && Number.isFinite(Number(max))) next = Math.min(next, Number(max));
+    if (tag === "input") {
+      setNativeValue(el, String(next));
+    } else {
+      el.setAttribute("aria-valuenow", String(next));
+      if ("value" in el) {
+        try { el.value = String(next); } catch (_) {}
+      }
+    }
+    dispatchValueEvents(el);
+    const actual = tag === "input" ? String(el.value || "") : String(el.getAttribute("aria-valuenow") || "");
+    const actualNumber = Number(actual);
+    const ok = Number.isFinite(actualNumber) && Math.abs(actualNumber - next) < 1e-9;
+    return {
+      ok,
+      kind,
+      expected: String(next),
+      actual,
+      method: "typed-direct",
+      min: min ?? null,
+      max: max ?? null,
+      step: el.getAttribute("step") ?? null,
+      error: ok ? null : "numeric value verification failed",
+    };
   }
 
-  let next = numeric;
-  const min = el.getAttribute("min");
-  const max = el.getAttribute("max");
-  if (min !== null && min !== "" && Number.isFinite(Number(min))) next = Math.max(next, Number(min));
-  if (max !== null && max !== "" && Number.isFinite(Number(max))) next = Math.min(next, Number(max));
-
+  const next = typedValueForInput(el, wanted);
   setNativeValue(el, String(next));
   dispatchValueEvents(el);
-
   const actual = String(el.value || "");
-  const actualNumber = Number(actual);
-  const ok = Number.isFinite(actualNumber) && Math.abs(actualNumber - next) < 1e-9;
+  const ok = valuesEquivalent(el, actual, String(next));
   return {
     ok,
-    kind: type,
+    kind,
     expected: String(next),
     actual,
-    method: "numeric-direct",
-    min: min ?? null,
-    max: max ?? null,
+    method: "typed-direct",
+    min: el.getAttribute("min"),
+    max: el.getAttribute("max"),
     step: el.getAttribute("step"),
-    error: ok ? null : "numeric value verification failed",
+    error: ok ? null : "typed value verification failed",
   };
 }
 "##;
@@ -1166,10 +1280,10 @@ pub async fn perform_selector_action(
         break;
       }}
       case "type": {{
-        const numeric = setRangeOrNumberValue(el, String(options.text || ""));
-        if (numeric) {{
-          target.valueResult = numeric;
-          if (!numeric.ok) throw new Error(numeric.error || "numeric value failed");
+        const typedValue = setTypedControlValue(el, String(options.text || ""));
+        if (typedValue) {{
+          target.valueResult = typedValue;
+          if (!typedValue.ok) throw new Error(typedValue.error || "typed value failed");
         }} else {{
           const fillResult = robustFillElement(context, el, options);
           target.fillResult = fillResult;
@@ -1184,12 +1298,22 @@ pub async fn perform_selector_action(
         break;
       }}
       case "set_checked": {{
-        if (!("checked" in el)) {{
-          throw new Error("element does not support checked state");
+        const desired = !!options.checked;
+        if ("checked" in el) {{
+          el.checked = desired;
+          el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+          el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+        }} else {{
+          const role = String(el.getAttribute("role") || "").toLowerCase();
+          if (!["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"].includes(role)) {{
+            throw new Error("element does not support checked state");
+          }}
+          const before = String(el.getAttribute("aria-checked") || "false").toLowerCase() === "true";
+          if (before !== desired && typeof el.click === "function") el.click();
+          el.setAttribute("aria-checked", String(desired));
+          el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+          el.dispatchEvent(new Event("input", {{ bubbles: true }}));
         }}
-        el.checked = !!options.checked;
-        el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-        el.dispatchEvent(new Event("input", {{ bubbles: true }}));
         break;
       }}
       default:
@@ -1714,10 +1838,10 @@ pub async fn act_on_snapshot_node(
         el.dispatchEvent(new MouseEvent(eventName, {{ bubbles: true, cancelable: true, view: context.win }}));
       }}
     }} else if (action === "fill") {{
-      const numeric = setRangeOrNumberValue(el, String(options.text || ""));
-      if (numeric) {{
-        valueResult = numeric;
-        if (!numeric.ok) throw new Error(numeric.error || "numeric value failed");
+      const typedValue = setTypedControlValue(el, String(options.text || ""));
+      if (typedValue) {{
+        valueResult = typedValue;
+        if (!typedValue.ok) throw new Error(typedValue.error || "typed value failed");
       }} else {{
         fillResult = robustFillElement(context, el, options);
         if (!fillResult.ok) throw new Error(fillResult.error || "fill failed");

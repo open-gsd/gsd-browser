@@ -40,6 +40,20 @@ gsd-browser set-viewport --preset mobile                   # mobile, tablet, des
 gsd-browser set-viewport --width 1920 --height 1080
 ```
 
+Natural-language instruction actions:
+
+```bash
+gsd-browser act-instruction <instruction>
+gsd-browser act-instruction --dry-run <instruction>
+gsd-browser act-instruction --scope <selector> <instruction>
+gsd-browser act-instruction --min-confidence 0.7 <instruction>
+gsd-browser act-instruction --max-steps 3 <instruction>
+```
+
+`act-instruction` plans against live DOM affordances and executes existing primitives such as click, type, select-option, set-checked, drag, scroll, typed control values (number/spinner, range/slider, date/time/month/week, color), reveal-and-click discovery, simple repeated-row choices, DOM-visible counts, and short bounded sequences. Use it for short instructions like "enter 'Alice' into Name and click Save", "choose California from State", "select 42 with the slider", "use the spinner to select 7", "check Red, Green, and Blue", "expand sections to find and click the link", or "buy the shortest duration". Use `--dry-run` to inspect the selected plan, `--scope` to constrain repeated controls to a form/dialog/panel, `--min-confidence` to block weak matches, and `--max-steps` to cap compound actions.
+
+**MCP note:** `browser_act_instruction` exposes the same controls (`instruction`, `dry_run`, `scope`, `min_confidence`, `max_steps`). Prefer this for concise natural-language actions; prefer refs, `browser_fill_form`, or `browser_batch` when exact element identity, full form semantics, or longer workflows matter.
+
 </interaction>
 
 <snapshot_and_refs>
