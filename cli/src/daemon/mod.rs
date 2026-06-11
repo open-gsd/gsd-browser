@@ -502,6 +502,25 @@ async fn run_daemon(
         )
         .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
         fs::create_dir_all(&profile_dir)?;
+        // An orphaned Chrome still bound to this profile would make the new
+        // launch fail its CDP handshake — kill it before clearing singletons.
+        match gsd_browser_common::process::kill_processes_using_profile(
+            &profile_dir.display().to_string(),
+        ) {
+            Ok(killed) if !killed.is_empty() => {
+                warn!(
+                    "[gsd-browser-daemon] killed orphaned processes {:?} still using profile {:?}",
+                    killed, profile_dir
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!(
+                    "[gsd-browser-daemon] failed to clean up processes using profile {:?}: {}",
+                    profile_dir, err
+                );
+            }
+        }
         cleanup_browser_profile_singletons(&profile_dir);
 
         let mut builder = BrowserConfig::builder()

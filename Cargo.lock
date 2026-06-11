@@ -854,6 +854,7 @@ name = "gsd-browser-common"
 version = "0.1.28"
 dependencies = [
  "dirs",
+ "nix",
  "serde",
  "serde_json",
  "tempfile",

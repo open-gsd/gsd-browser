@@ -1,3 +1,4 @@
+use gsd_browser_common::process::{pids_using_profile, terminate_process};
 use gsd_browser_common::session::{
     load_session_manifest, manifest_path_for, now_epoch_secs, save_session_manifest,
     SessionHealthStatus, SessionManifest,
@@ -10,8 +11,8 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Child, Stdio};
+use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::time::{sleep, timeout};
 
@@ -77,7 +78,23 @@ fn refuse_implicit_named_session_replacement(
     if is_daemon_alive(session) {
         return Ok(());
     }
-    Err(replacement_refused_error(session, &manifest))
+    // The daemon PID is provably dead, so nothing live would be clobbered.
+    // Self-heal the stale session the same way `daemon stop` does instead of
+    // forcing the user to run it manually.
+    if let Err(err) = cleanup_session_browser_processes(Some(&manifest)) {
+        return Err(format!(
+            "{}; automatic recovery failed: {err}",
+            replacement_refused_error(session, &manifest)
+        )
+        .into());
+    }
+    cleanup_daemon_artifacts(session);
+    write_stopped_manifest(session, "recovered stale session before restart")?;
+    eprintln!(
+        "[gsd-browser] session '{}' had no live daemon; cleaned up stale state, continuing start",
+        session.unwrap_or("default")
+    );
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -116,67 +133,6 @@ pub fn is_daemon_alive(session: Option<&str>) -> bool {
     read_daemon_pid(session)
         .map(|pid| nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok())
         .unwrap_or(false)
-}
-
-fn wait_for_process_exit(pid: i32, max_wait: Duration) -> bool {
-    let pid = nix::unistd::Pid::from_raw(pid);
-    let start = Instant::now();
-    while start.elapsed() < max_wait {
-        match nix::sys::signal::kill(pid, None) {
-            Err(nix::errno::Errno::ESRCH) => return true,
-            _ => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
-    matches!(
-        nix::sys::signal::kill(pid, None),
-        Err(nix::errno::Errno::ESRCH)
-    )
-}
-
-fn terminate_process(pid: i32, label: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let raw_pid = nix::unistd::Pid::from_raw(pid);
-    match nix::sys::signal::kill(raw_pid, nix::sys::signal::Signal::SIGTERM) {
-        Ok(()) => {
-            if !wait_for_process_exit(pid, Duration::from_secs(3)) {
-                nix::sys::signal::kill(raw_pid, nix::sys::signal::Signal::SIGKILL)
-                    .map_err(|e| format!("failed to force stop {label} (PID {pid}): {e}"))?;
-                if !wait_for_process_exit(pid, Duration::from_secs(1)) {
-                    return Err(format!("failed to stop {label} (PID {pid}): still alive").into());
-                }
-            }
-            Ok(())
-        }
-        Err(nix::errno::Errno::ESRCH) => Ok(()),
-        Err(e) => Err(format!("failed to stop {label} (PID {pid}): {e}").into()),
-    }
-}
-
-fn pids_using_profile(profile_dir: &str) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,command="])
-        .output()?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    let current_pid = std::process::id() as i32;
-    let processes = String::from_utf8_lossy(&output.stdout);
-    let mut pids = Vec::new();
-    for line in processes.lines() {
-        if !line.contains(profile_dir) {
-            continue;
-        }
-        let Some(pid_str) = line.split_whitespace().next() else {
-            continue;
-        };
-        let Ok(pid) = pid_str.parse::<i32>() else {
-            continue;
-        };
-        if pid != current_pid {
-            pids.push(pid);
-        }
-    }
-    Ok(pids)
 }
 
 fn cleanup_session_browser_processes(
@@ -323,10 +279,60 @@ pub async fn start_daemon(
 
 #[cfg(test)]
 mod tests {
-    use super::configure_detached_daemon_process;
+    use super::{cleanup_session_browser_processes, configure_detached_daemon_process};
+    use gsd_browser_common::session::SessionManifest;
     use std::process::Command;
     use std::thread;
     use std::time::Duration;
+
+    /// Self-heal path: a stale manifest pointing at a profile dir held by an
+    /// orphaned process should get that process killed. The holder is spawned
+    /// through a shell that exits so it is not our child (a direct child would
+    /// linger as a zombie after SIGTERM and defeat the liveness check).
+    #[test]
+    fn cleanup_session_browser_processes_kills_profile_holders() {
+        let dir = tempfile::Builder::new()
+            .prefix("gsd-browser-test-selfheal-")
+            .tempdir()
+            .expect("create temp profile dir");
+        let marker = dir.path().join("browser-profile").display().to_string();
+        std::fs::create_dir_all(&marker).expect("create marker dir");
+        let marker_file = format!("{marker}/SingletonLock");
+        std::fs::write(&marker_file, b"").expect("create marker file");
+
+        let output = Command::new("sh")
+            .args([
+                "-c",
+                &format!("tail -f '{marker_file}' >/dev/null 2>&1 & echo $!"),
+            ])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("spawn orphaned profile holder");
+        let pid: i32 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("parse holder PID");
+        thread::sleep(Duration::from_millis(200));
+
+        let manifest = SessionManifest {
+            browser_user_data_dir: Some(marker.clone()),
+            ..SessionManifest::default()
+        };
+        let result = cleanup_session_browser_processes(Some(&manifest));
+        if result.is_err() {
+            // Best-effort cleanup so the holder never leaks on failure.
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        result.expect("cleanup should succeed");
+
+        assert!(
+            gsd_browser_common::process::wait_for_process_exit(pid, Duration::from_secs(2)),
+            "orphaned profile holder should be terminated"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

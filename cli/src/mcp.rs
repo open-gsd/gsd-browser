@@ -44,8 +44,42 @@ struct HttpState {
     http_client: reqwest::Client,
 }
 
+/// True when the server has been orphaned: its original parent exited and the
+/// kernel reparented it (to PID 1 or a subreaper).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parent_has_exited(initial_ppid: i32, current_ppid: i32) -> bool {
+    current_ppid != initial_ppid
+}
+
+/// Watch the parent process and exit if it dies. MCP clients are supposed to
+/// close our stdin on shutdown, but a crashed parent can leave stdin open
+/// forever, accumulating orphaned `gsd-browser mcp` processes.
+#[cfg(unix)]
+fn spawn_parent_liveness_watchdog() {
+    let initial_ppid = unsafe { libc::getppid() };
+    if initial_ppid <= 1 {
+        // Already parented to init (e.g. launched detached) — nothing to watch.
+        return;
+    }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let current_ppid = unsafe { libc::getppid() };
+        if parent_has_exited(initial_ppid, current_ppid) {
+            eprintln!(
+                "MCP: parent process exited (ppid {initial_ppid} -> {current_ppid}); shutting down orphaned server"
+            );
+            std::process::exit(0);
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_parent_liveness_watchdog() {}
+
 /// Top-level entry point called from the `mcp` subcommand.
 pub async fn run_stdio_server(cli: &Cli) -> crate::CmdResult {
+    spawn_parent_liveness_watchdog();
+
     // Run the stdio MCP loop in a dedicated thread. We keep error handling
     // simple for the prototype (any panic or error becomes a string).
     let cli = cli.clone();
@@ -358,6 +392,16 @@ fn negotiated_protocol_version(request: &Value) -> &'static str {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn parent_has_exited_detects_reparenting() {
+        // Parent died: kernel reparented us to init (PID 1).
+        assert!(parent_has_exited(4242, 1));
+        // Parent died under a subreaper: reparented to a different PID.
+        assert!(parent_has_exited(4242, 999));
+        // Parent still alive: ppid unchanged.
+        assert!(!parent_has_exited(4242, 4242));
+    }
 
     #[test]
     fn public_http_bind_requires_auth_by_default() {
