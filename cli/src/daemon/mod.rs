@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod handlers;
 pub mod helpers;
+pub mod idle;
 pub mod input_dispatch;
 pub mod inspection;
 pub mod logs;
@@ -761,6 +762,30 @@ async fn run_daemon(
 
     info!("[gsd-browser-daemon] listening on {}", transport_endpoint);
 
+    // Idle shutdown: trigger the same graceful-shutdown path as SIGTERM/Ctrl-C
+    // when no IPC request has been handled for the configured window.
+    let idle_tracker = Arc::new(idle::IdleTracker::new());
+    let idle_shutdown = Arc::new(tokio::sync::Notify::new());
+    if let Some(idle_limit) = idle::idle_shutdown_timeout() {
+        let tracker = Arc::clone(&idle_tracker);
+        let notify = Arc::clone(&idle_shutdown);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let idle_for = tracker.idle_for();
+                if idle_for >= idle_limit {
+                    info!(
+                        "[gsd-browser-daemon] idle for {}s (limit {}s); shutting down",
+                        idle_for.as_secs(),
+                        idle_limit.as_secs()
+                    );
+                    notify.notify_one();
+                    break;
+                }
+            }
+        });
+    }
+
     if let Some(page) = daemon_state.pages.lock().unwrap().active_page() {
         let state = Arc::clone(&daemon_state);
         tokio::spawn(async move {
@@ -779,6 +804,8 @@ async fn run_daemon(
         Arc::clone(&daemon_logs),
         Arc::clone(&daemon_state),
         Arc::clone(&browser),
+        idle_tracker,
+        idle_shutdown,
     )
     .await?;
 
@@ -814,6 +841,8 @@ async fn serve_connections(
     daemon_logs: Arc<DaemonLogs>,
     daemon_state: Arc<DaemonState>,
     browser: Arc<tokio::sync::Mutex<Browser>>,
+    idle_tracker: Arc<idle::IdleTracker>,
+    idle_shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sock_path = socket_path_for(session);
     let listener = UnixListener::bind(&sock_path)?;
@@ -825,12 +854,16 @@ async fn serve_connections(
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _addr)) => {
-                        spawn_connection_handler(stream, &daemon_logs, &daemon_state, &browser);
+                        spawn_connection_handler(stream, &daemon_logs, &daemon_state, &browser, &idle_tracker);
                     }
                     Err(e) => {
                         error!("[gsd-browser-daemon] accept error: {e}");
                     }
                 }
+            }
+            _ = idle_shutdown.notified() => {
+                info!("[gsd-browser-daemon] shutting down...");
+                break;
             }
             _ = &mut shutdown => {
                 info!("[gsd-browser-daemon] shutting down...");
@@ -848,6 +881,8 @@ async fn serve_connections(
     daemon_logs: Arc<DaemonLogs>,
     daemon_state: Arc<DaemonState>,
     browser: Arc<tokio::sync::Mutex<Browser>>,
+    idle_tracker: Arc<idle::IdleTracker>,
+    idle_shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pipe_name = named_pipe_name_for(session);
     let shutdown = shutdown_signal();
@@ -858,12 +893,16 @@ async fn serve_connections(
             accept_result = accept_named_pipe(&pipe_name) => {
                 match accept_result {
                     Ok(stream) => {
-                        spawn_connection_handler(stream, &daemon_logs, &daemon_state, &browser);
+                        spawn_connection_handler(stream, &daemon_logs, &daemon_state, &browser, &idle_tracker);
                     }
                     Err(e) => {
                         error!("[gsd-browser-daemon] named pipe accept error: {e}");
                     }
                 }
+            }
+            _ = idle_shutdown.notified() => {
+                info!("[gsd-browser-daemon] shutting down...");
+                break;
             }
             _ = &mut shutdown => {
                 info!("[gsd-browser-daemon] shutting down...");
@@ -887,6 +926,7 @@ fn spawn_connection_handler<S>(
     daemon_logs: &Arc<DaemonLogs>,
     daemon_state: &Arc<DaemonState>,
     browser: &Arc<tokio::sync::Mutex<Browser>>,
+    idle_tracker: &Arc<idle::IdleTracker>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -894,7 +934,14 @@ fn spawn_connection_handler<S>(
     let logs = Arc::clone(daemon_logs);
     let state = Arc::clone(daemon_state);
     let browser = Arc::clone(browser);
-    tokio::spawn(handle_connection(stream, logs, state, browser));
+    let idle_tracker = Arc::clone(idle_tracker);
+    tokio::spawn(handle_connection(
+        stream,
+        logs,
+        state,
+        browser,
+        idle_tracker,
+    ));
 }
 
 async fn handle_connection<S>(
@@ -902,6 +949,7 @@ async fn handle_connection<S>(
     logs: Arc<DaemonLogs>,
     state: Arc<DaemonState>,
     browser: Arc<tokio::sync::Mutex<Browser>>,
+    idle_tracker: Arc<idle::IdleTracker>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -928,6 +976,7 @@ async fn handle_connection<S>(
         "[gsd-browser-daemon] request: method={} id={}",
         request.method, request.id
     );
+    idle_tracker.touch();
 
     // Resolve the active page from the registry
     let page = {
@@ -948,6 +997,8 @@ async fn handle_connection<S>(
     if let Err(e) = ipc::write_message(&mut stream, &payload).await {
         error!("[gsd-browser-daemon] write error: {e}");
     }
+    // Long-running requests should not count toward idle time.
+    idle_tracker.touch();
 }
 
 async fn dispatch(

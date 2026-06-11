@@ -3,16 +3,11 @@ mod cloud_manifest;
 mod cloud_methods;
 
 mod daemon;
-mod daemon_startup;
+mod lifecycle;
 
 #[cfg(windows)]
 mod win_process;
 
-#[cfg(unix)]
-mod daemon_client;
-#[cfg(windows)]
-#[path = "daemon_client_windows.rs"]
-mod daemon_client;
 #[cfg(not(any(unix, windows)))]
 compile_error!("gsd-browser daemon support requires a Unix or Windows target");
 mod mcp;
@@ -1487,7 +1482,7 @@ fn exit_with_validation_error(cli: &Cli, message: impl Into<String>) -> ! {
 }
 
 async fn cmd_daemon_start(cli: &Cli) -> CmdResult {
-    daemon_client::start_daemon(
+    lifecycle::start_daemon(
         cli.browser_path.as_deref(),
         cli.cdp_url.as_deref(),
         cli.session.as_deref(),
@@ -1506,7 +1501,7 @@ async fn cmd_daemon_start(cli: &Cli) -> CmdResult {
 }
 
 async fn cmd_daemon_stop(cli: &Cli) -> CmdResult {
-    daemon_client::stop_daemon(cli.session.as_deref())?;
+    lifecycle::stop_daemon(cli.session.as_deref())?;
     if cli.json {
         println!("{}", serde_json::json!({"status": "stopped"}));
     } else {
@@ -1516,7 +1511,7 @@ async fn cmd_daemon_stop(cli: &Cli) -> CmdResult {
 }
 
 async fn cmd_daemon_health(cli: &Cli) -> CmdResult {
-    let result = daemon_client::collect_health(cli.session.as_deref()).await?;
+    let result = lifecycle::collect_health(cli.session.as_deref()).await?;
     if cli.json {
         println!("{}", output::format_json(&result));
     } else if let Some(session) = result.get("session") {
@@ -1538,7 +1533,7 @@ async fn cmd_daemon_health(cli: &Cli) -> CmdResult {
 }
 
 async fn cmd_navigate(cli: &Cli, url: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "navigate",
         serde_json::json!({"url": url}),
         cli.browser_path.as_deref(),
@@ -1550,7 +1545,7 @@ async fn cmd_navigate(cli: &Cli, url: &str) -> CmdResult {
 }
 
 async fn cmd_back(cli: &Cli) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "back",
         serde_json::json!({}),
         cli.browser_path.as_deref(),
@@ -1562,7 +1557,7 @@ async fn cmd_back(cli: &Cli) -> CmdResult {
 }
 
 async fn cmd_forward(cli: &Cli) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "forward",
         serde_json::json!({}),
         cli.browser_path.as_deref(),
@@ -1574,7 +1569,7 @@ async fn cmd_forward(cli: &Cli) -> CmdResult {
 }
 
 async fn cmd_reload(cli: &Cli) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "reload",
         serde_json::json!({}),
         cli.browser_path.as_deref(),
@@ -1586,7 +1581,7 @@ async fn cmd_reload(cli: &Cli) -> CmdResult {
 }
 
 async fn cmd_console(cli: &Cli, clear: bool) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "console",
         serde_json::json!({"clear": clear}),
         cli.browser_path.as_deref(),
@@ -1598,7 +1593,7 @@ async fn cmd_console(cli: &Cli, clear: bool) -> CmdResult {
 }
 
 async fn cmd_network(cli: &Cli, clear: bool, filter: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "network",
         serde_json::json!({"clear": clear, "filter": filter}),
         cli.browser_path.as_deref(),
@@ -1610,7 +1605,7 @@ async fn cmd_network(cli: &Cli, clear: bool, filter: &str) -> CmdResult {
 }
 
 async fn cmd_dialog(cli: &Cli, clear: bool) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "dialog",
         serde_json::json!({"clear": clear}),
         cli.browser_path.as_deref(),
@@ -1622,7 +1617,7 @@ async fn cmd_dialog(cli: &Cli, clear: bool) -> CmdResult {
 }
 
 async fn cmd_eval(cli: &Cli, expression: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "eval",
         serde_json::json!({"expression": expression}),
         cli.browser_path.as_deref(),
@@ -1644,7 +1639,7 @@ async fn cmd_click(cli: &Cli, selector: Option<&str>, x: Option<f64>, y: Option<
     if let Some(yv) = y {
         params["y"] = serde_json::json!(yv);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "click",
         params,
         cli.browser_path.as_deref(),
@@ -1663,7 +1658,7 @@ async fn cmd_type(
     clear_first: bool,
     submit: bool,
 ) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "type",
         serde_json::json!({
             "selector": selector,
@@ -1681,7 +1676,7 @@ async fn cmd_type(
 }
 
 async fn cmd_press(cli: &Cli, key: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "press",
         serde_json::json!({"key": key}),
         cli.browser_path.as_deref(),
@@ -1693,7 +1688,7 @@ async fn cmd_press(cli: &Cli, key: &str) -> CmdResult {
 }
 
 async fn cmd_hover(cli: &Cli, selector: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "hover",
         serde_json::json!({"selector": selector}),
         cli.browser_path.as_deref(),
@@ -1705,7 +1700,7 @@ async fn cmd_hover(cli: &Cli, selector: &str) -> CmdResult {
 }
 
 async fn cmd_scroll(cli: &Cli, direction: &str, amount: i32) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "scroll",
         serde_json::json!({"direction": direction, "amount": amount}),
         cli.browser_path.as_deref(),
@@ -1717,7 +1712,7 @@ async fn cmd_scroll(cli: &Cli, direction: &str, amount: i32) -> CmdResult {
 }
 
 async fn cmd_select_option(cli: &Cli, selector: &str, option: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "select_option",
         serde_json::json!({"selector": selector, "option": option}),
         cli.browser_path.as_deref(),
@@ -1729,7 +1724,7 @@ async fn cmd_select_option(cli: &Cli, selector: &str, option: &str) -> CmdResult
 }
 
 async fn cmd_set_checked(cli: &Cli, selector: &str, checked: bool) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "set_checked",
         serde_json::json!({"selector": selector, "checked": checked}),
         cli.browser_path.as_deref(),
@@ -1774,7 +1769,7 @@ async fn cmd_drag(
         params["to_y"] = serde_json::json!(to_y);
     }
 
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "drag",
         params,
         cli.browser_path.as_deref(),
@@ -1801,7 +1796,7 @@ async fn cmd_set_viewport(
     if let Some(h) = height {
         params["height"] = serde_json::json!(h);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "set_viewport",
         params,
         cli.browser_path.as_deref(),
@@ -1813,7 +1808,7 @@ async fn cmd_set_viewport(
 }
 
 async fn cmd_upload_file(cli: &Cli, selector: &str, files: &[String]) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "upload_file",
         serde_json::json!({"selector": selector, "files": files}),
         cli.browser_path.as_deref(),
@@ -1841,7 +1836,7 @@ async fn cmd_screenshot(
         params["selector"] = serde_json::json!(sel);
     }
 
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "screenshot",
         params,
         cli.browser_path.as_deref(),
@@ -1901,7 +1896,7 @@ async fn cmd_accessibility_tree(
     if let Some(sel) = selector {
         params["selector"] = serde_json::json!(sel);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "accessibility_tree",
         params,
         cli.browser_path.as_deref(),
@@ -1929,7 +1924,7 @@ async fn cmd_find(
     if let Some(sel) = selector {
         params["selector"] = serde_json::json!(sel);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "find",
         params,
         cli.browser_path.as_deref(),
@@ -1945,7 +1940,7 @@ async fn cmd_page_source(cli: &Cli, selector: Option<&str>) -> CmdResult {
     if let Some(sel) = selector {
         params["selector"] = serde_json::json!(sel);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "page_source",
         params,
         cli.browser_path.as_deref(),
@@ -1973,7 +1968,7 @@ async fn cmd_wait_for(
     if let Some(ms) = timeout {
         params["timeout"] = serde_json::json!(ms);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "wait_for",
         params,
         cli.browser_path.as_deref(),
@@ -1985,7 +1980,7 @@ async fn cmd_wait_for(
 }
 
 async fn cmd_timeline(cli: &Cli, write_to_disk: bool) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "timeline",
         serde_json::json!({"write_to_disk": write_to_disk}),
         cli.browser_path.as_deref(),
@@ -2013,7 +2008,7 @@ async fn cmd_snapshot(
     if let Some(m) = mode {
         params["mode"] = serde_json::json!(m);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "snapshot",
         params,
         cli.browser_path.as_deref(),
@@ -2025,7 +2020,7 @@ async fn cmd_snapshot(
 }
 
 async fn cmd_get_ref(cli: &Cli, ref_str: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "get_ref",
         serde_json::json!({"ref": ref_str}),
         cli.browser_path.as_deref(),
@@ -2037,7 +2032,7 @@ async fn cmd_get_ref(cli: &Cli, ref_str: &str) -> CmdResult {
 }
 
 async fn cmd_click_ref(cli: &Cli, ref_str: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "click_ref",
         serde_json::json!({"ref": ref_str}),
         cli.browser_path.as_deref(),
@@ -2049,7 +2044,7 @@ async fn cmd_click_ref(cli: &Cli, ref_str: &str) -> CmdResult {
 }
 
 async fn cmd_hover_ref(cli: &Cli, ref_str: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "hover_ref",
         serde_json::json!({"ref": ref_str}),
         cli.browser_path.as_deref(),
@@ -2068,7 +2063,7 @@ async fn cmd_fill_ref(
     submit: bool,
     slowly: bool,
 ) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "fill_ref",
         serde_json::json!({
             "ref": ref_str,
@@ -2089,7 +2084,7 @@ async fn cmd_assert(cli: &Cli, checks: &str) -> CmdResult {
     // Parse the checks JSON to validate it before sending
     let checks_value: serde_json::Value =
         serde_json::from_str(checks).map_err(|e| format!("invalid checks JSON: {e}"))?;
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "assert",
         serde_json::json!({"checks": checks_value}),
         cli.browser_path.as_deref(),
@@ -2105,7 +2100,7 @@ async fn cmd_diff(cli: &Cli, since: Option<u64>) -> CmdResult {
     if let Some(id) = since {
         params["sinceActionId"] = serde_json::json!(id);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "diff",
         params,
         cli.browser_path.as_deref(),
@@ -2120,7 +2115,7 @@ async fn cmd_batch(cli: &Cli, steps: &str, stop_on_failure: bool, summary_only: 
     // Parse the steps JSON to validate it before sending
     let steps_value: serde_json::Value =
         serde_json::from_str(steps).map_err(|e| format!("invalid steps JSON: {e}"))?;
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "batch",
         serde_json::json!({
             "steps": steps_value,
@@ -2136,7 +2131,7 @@ async fn cmd_batch(cli: &Cli, steps: &str, stop_on_failure: bool, summary_only: 
 }
 
 async fn cmd_list_pages(cli: &Cli) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "list_pages",
         serde_json::json!({}),
         cli.browser_path.as_deref(),
@@ -2148,7 +2143,7 @@ async fn cmd_list_pages(cli: &Cli) -> CmdResult {
 }
 
 async fn cmd_switch_page(cli: &Cli, id: u64) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "switch_page",
         serde_json::json!({"id": id}),
         cli.browser_path.as_deref(),
@@ -2160,7 +2155,7 @@ async fn cmd_switch_page(cli: &Cli, id: u64) -> CmdResult {
 }
 
 async fn cmd_close_page(cli: &Cli, id: u64) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "close_page",
         serde_json::json!({"id": id}),
         cli.browser_path.as_deref(),
@@ -2172,7 +2167,7 @@ async fn cmd_close_page(cli: &Cli, id: u64) -> CmdResult {
 }
 
 async fn cmd_list_frames(cli: &Cli) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "list_frames",
         serde_json::json!({}),
         cli.browser_path.as_deref(),
@@ -2199,7 +2194,7 @@ async fn cmd_select_frame(
     if let Some(pat) = url_pattern {
         params["urlPattern"] = serde_json::json!(pat);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "select_frame",
         params,
         cli.browser_path.as_deref(),
@@ -2215,7 +2210,7 @@ async fn cmd_analyze_form(cli: &Cli, selector: Option<&str>) -> CmdResult {
     if let Some(sel) = selector {
         params["selector"] = serde_json::json!(sel);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "analyze_form",
         params,
         cli.browser_path.as_deref(),
@@ -2236,7 +2231,7 @@ async fn cmd_fill_form(cli: &Cli, values: &str, selector: Option<&str>, submit: 
     if let Some(sel) = selector {
         params["selector"] = serde_json::json!(sel);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "fill_form",
         params,
         cli.browser_path.as_deref(),
@@ -2252,7 +2247,7 @@ async fn cmd_find_best(cli: &Cli, intent: &str, scope: Option<&str>) -> CmdResul
     if let Some(s) = scope {
         params["scope"] = serde_json::json!(s);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "find_best",
         params,
         cli.browser_path.as_deref(),
@@ -2268,7 +2263,7 @@ async fn cmd_act(cli: &Cli, intent: &str, scope: Option<&str>) -> CmdResult {
     if let Some(s) = scope {
         params["scope"] = serde_json::json!(s);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "act",
         params,
         cli.browser_path.as_deref(),
@@ -2297,7 +2292,7 @@ async fn cmd_act_instruction(
     if let Some(max_steps) = max_steps {
         params["max_steps"] = serde_json::json!(max_steps);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "act_instruction",
         params,
         cli.browser_path.as_deref(),
@@ -2316,7 +2311,7 @@ async fn cmd_goal(cli: &Cli, text: Option<&str>, clear: bool) -> CmdResult {
     } else {
         return Err("usage: gsd-browser goal <text> | gsd-browser goal --clear".into());
     };
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "goal",
         params,
         cli.browser_path.as_deref(),
@@ -2328,7 +2323,7 @@ async fn cmd_goal(cli: &Cli, text: Option<&str>, clear: bool) -> CmdResult {
 }
 
 async fn cmd_control(cli: &Cli, method: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         method,
         serde_json::json!({}),
         cli.browser_path.as_deref(),
@@ -2340,7 +2335,7 @@ async fn cmd_control(cli: &Cli, method: &str) -> CmdResult {
 }
 
 async fn cmd_json_method(cli: &Cli, method: &str, params: serde_json::Value) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         method,
         params,
         cli.browser_path.as_deref(),
@@ -2352,7 +2347,7 @@ async fn cmd_json_method(cli: &Cli, method: &str, params: serde_json::Value) -> 
 }
 
 async fn cmd_view(cli: &Cli, print_only: bool, history: bool) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "view",
         serde_json::json!({}),
         cli.browser_path.as_deref(),
@@ -2476,7 +2471,7 @@ mod cli_output_tests {
 }
 
 async fn cmd_session_summary(cli: &Cli) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "session_summary",
         serde_json::json!({}),
         cli.browser_path.as_deref(),
@@ -2492,7 +2487,7 @@ async fn cmd_debug_bundle(cli: &Cli, name: Option<&str>) -> CmdResult {
     if let Some(n) = name {
         params["name"] = serde_json::json!(n);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "debug_bundle",
         params,
         cli.browser_path.as_deref(),
@@ -2522,7 +2517,7 @@ async fn cmd_visual_diff(
     if let Some(t) = threshold {
         params["threshold"] = serde_json::json!(t);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "visual_diff",
         params,
         cli.browser_path.as_deref(),
@@ -2541,7 +2536,7 @@ async fn cmd_zoom_region(
     height: f64,
     scale: f64,
 ) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "zoom_region",
         serde_json::json!({
             "x": x,
@@ -2575,7 +2570,7 @@ async fn cmd_save_pdf(
     if let Some(o) = output {
         params["output"] = serde_json::json!(o);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "save_pdf",
         params,
         cli.browser_path.as_deref(),
@@ -2596,7 +2591,7 @@ async fn cmd_extract(cli: &Cli, schema: &str, selector: Option<&str>, multiple: 
     if let Some(sel) = selector {
         params["selector"] = serde_json::json!(sel);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "extract",
         params,
         cli.browser_path.as_deref(),
@@ -2634,7 +2629,7 @@ async fn cmd_mock_route(
             serde_json::from_str(h).map_err(|e| format!("invalid headers JSON: {e}"))?;
         params["headers"] = headers_value;
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "mock_route",
         params,
         cli.browser_path.as_deref(),
@@ -2646,7 +2641,7 @@ async fn cmd_mock_route(
 }
 
 async fn cmd_block_urls(cli: &Cli, patterns: &[String]) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "block_urls",
         serde_json::json!({"patterns": patterns}),
         cli.browser_path.as_deref(),
@@ -2658,7 +2653,7 @@ async fn cmd_block_urls(cli: &Cli, patterns: &[String]) -> CmdResult {
 }
 
 async fn cmd_clear_routes(cli: &Cli) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "clear_routes",
         serde_json::json!({}),
         cli.browser_path.as_deref(),
@@ -2670,7 +2665,7 @@ async fn cmd_clear_routes(cli: &Cli) -> CmdResult {
 }
 
 async fn cmd_emulate_device(cli: &Cli, device: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "emulate_device",
         serde_json::json!({"device": device}),
         cli.browser_path.as_deref(),
@@ -2682,7 +2677,7 @@ async fn cmd_emulate_device(cli: &Cli, device: &str) -> CmdResult {
 }
 
 async fn cmd_save_state(cli: &Cli, name: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "save_state",
         serde_json::json!({"name": name}),
         cli.browser_path.as_deref(),
@@ -2694,7 +2689,7 @@ async fn cmd_save_state(cli: &Cli, name: &str) -> CmdResult {
 }
 
 async fn cmd_restore_state(cli: &Cli, name: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "restore_state",
         serde_json::json!({"name": name}),
         cli.browser_path.as_deref(),
@@ -2724,7 +2719,7 @@ async fn cmd_vault_save(
             serde_json::from_str(ef).map_err(|e| format!("invalid extra_fields JSON: {e}"))?;
         params["extra_fields"] = ef_value;
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "vault_save",
         params,
         cli.browser_path.as_deref(),
@@ -2736,7 +2731,7 @@ async fn cmd_vault_save(
 }
 
 async fn cmd_vault_login(cli: &Cli, profile: &str) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "vault_login",
         serde_json::json!({"profile": profile}),
         cli.browser_path.as_deref(),
@@ -2748,7 +2743,7 @@ async fn cmd_vault_login(cli: &Cli, profile: &str) -> CmdResult {
 }
 
 async fn cmd_vault_list(cli: &Cli) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "vault_list",
         serde_json::json!({}),
         cli.browser_path.as_deref(),
@@ -2776,7 +2771,7 @@ async fn cmd_action_cache(
     if let Some(sc) = score {
         params["score"] = serde_json::json!(sc);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "action_cache",
         params,
         cli.browser_path.as_deref(),
@@ -2788,7 +2783,7 @@ async fn cmd_action_cache(
 }
 
 async fn cmd_check_injection(cli: &Cli, include_hidden: bool) -> CmdResult {
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "check_injection",
         serde_json::json!({"includeHidden": include_hidden}),
         cli.browser_path.as_deref(),
@@ -2812,7 +2807,7 @@ async fn cmd_generate_test(
     if let Some(o) = output_path {
         params["outputPath"] = serde_json::json!(o);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "generate_test",
         params,
         cli.browser_path.as_deref(),
@@ -2828,7 +2823,7 @@ async fn cmd_har_export(cli: &Cli, filename: Option<&str>) -> CmdResult {
     if let Some(f) = filename {
         params["filename"] = serde_json::json!(f);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "har_export",
         params,
         cli.browser_path.as_deref(),
@@ -2844,7 +2839,7 @@ async fn cmd_trace_start(cli: &Cli, name: Option<&str>) -> CmdResult {
     if let Some(n) = name {
         params["name"] = serde_json::json!(n);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "trace_start",
         params,
         cli.browser_path.as_deref(),
@@ -2860,7 +2855,7 @@ async fn cmd_trace_stop(cli: &Cli, name: Option<&str>) -> CmdResult {
     if let Some(n) = name {
         params["name"] = serde_json::json!(n);
     }
-    let resp = daemon_client::send_request(
+    let resp = lifecycle::send_request(
         "trace_stop",
         params,
         cli.browser_path.as_deref(),
