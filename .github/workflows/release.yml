@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to publish
-        required: true
+        description: "Release tag to publish; leave blank to create v<npm package version> from this workflow ref"
+        required: false
+        default: ""
   push:
     tags:
       - "v*"
@@ -17,12 +18,18 @@ jobs:
   release_input:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     outputs:
       checkout_ref: ${{ steps.release_ref.outputs.checkout_ref }}
       tag_name: ${{ steps.release_ref.outputs.tag_name }}
 
     steps:
+      - name: Checkout release source for auto-tagging
+        if: github.event_name == 'workflow_dispatch' && inputs.tag == ''
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Resolve release tag
         id: release_ref
         env:
@@ -31,8 +38,18 @@ jobs:
           tag="${RAW_TAG#refs/tags/}"
 
           if [[ -z "$tag" ]]; then
-            echo "::error::Release tag is required."
-            exit 1
+            version="$(node -p 'require("./npm/package.json").version')"
+            tag="v${version}"
+
+            if git ls-remote --exit-code --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "refs/tags/${tag}" >/dev/null; then
+              echo "::error::Auto tag '${tag}' already exists. Pass an explicit tag if you meant to rebuild an existing release."
+              exit 1
+            fi
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "$tag"
+            git push origin "refs/tags/${tag}"
           fi
 
           if [[ ! "$tag" =~ ^v ]]; then
