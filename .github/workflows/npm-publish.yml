@@ -1,0 +1,338 @@
+name: NPM Publish
+
+# Manual/reusable npm publish. npm trusted publishing accepts one configured
+# workflow filename per package, so dev, next, and latest publishes all live here.
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: "npm dist-tag or release path to publish; latest publishes/verifies @dev first, then waits for prod approval"
+        required: true
+        type: string
+      tag:
+        description: "Release tag to publish"
+        required: true
+        type: string
+      dry_run:
+        description: "Validate the package without publishing to npm"
+        required: false
+        default: false
+        type: boolean
+      publish_auth:
+        description: "npm auth fallback: token uses NPM_TOKEN for dist-tag promotion; trusted uses OIDC for first publish"
+        required: false
+        default: "trusted"
+        type: string
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "npm dist-tag or release path to publish; latest publishes/verifies @dev first, then waits for prod approval"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - next
+          - latest
+      tag:
+        description: "Release tag to publish"
+        required: true
+      dry_run:
+        description: "Validate the package without publishing to npm"
+        required: false
+        default: false
+        type: boolean
+      publish_auth:
+        description: "npm auth fallback: token uses NPM_TOKEN for dist-tag promotion; trusted uses OIDC for first publish"
+        required: false
+        default: "trusted"
+        type: choice
+        options:
+          - "trusted"
+          - "token"
+
+concurrency:
+  group: npm-publish-${{ inputs.channel == 'latest' && 'dev' || inputs.channel }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  NPM_CONFIG_AUDIT: "false"
+  NPM_CONFIG_FUND: "false"
+  NPM_CONFIG_LOGLEVEL: "error"
+
+jobs:
+  release-input:
+    name: Resolve Release Tag
+    runs-on: ubuntu-latest
+    outputs:
+      checkout_ref: ${{ steps.release_ref.outputs.checkout_ref }}
+      tag_name: ${{ steps.release_ref.outputs.tag_name }}
+      version: ${{ steps.release_ref.outputs.version }}
+    steps:
+      - name: Resolve release tag
+        id: release_ref
+        env:
+          RAW_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${RAW_TAG#refs/tags/}"
+
+          if [[ -z "$tag" ]]; then
+            echo "::error::Release tag is required."
+            exit 1
+          fi
+
+          if [[ ! "$tag" =~ ^v ]]; then
+            tag="v${tag}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag '$RAW_TAG' must be a semver tag like v0.1.29."
+            exit 1
+          fi
+
+          ref="refs/tags/${tag}"
+          if ! git ls-remote --exit-code --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$ref" >/dev/null; then
+            echo "::error::Release tag '$tag' does not exist. Create and push '$tag' before publishing to npm."
+            exit 1
+          fi
+
+          echo "checkout_ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+  prerelease-publish:
+    name: Publish @${{ inputs.channel == 'latest' && 'dev' || inputs.channel }}
+    needs: release-input
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.channel == 'latest' && 'dev' || inputs.channel }}
+    outputs:
+      version: ${{ needs.release-input.outputs.version }}
+      channel: ${{ steps.channel.outputs.channel }}
+    steps:
+      - name: Resolve npm channel
+        id: channel
+        run: echo "channel=${{ inputs.channel == 'latest' && 'dev' || inputs.channel }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-input.outputs.checkout_ref }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+        env:
+          NODE_AUTH_TOKEN: ${{ inputs.publish_auth == 'token' && secrets.NPM_TOKEN || '' }}
+
+      - name: Use npm 11
+        run: npm install -g npm@11
+
+      - name: Verify npm publish toolchain
+        run: |
+          node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 14)) { throw new Error('npm publish requires Node >= 22.14.0'); }"
+          node -e "const v=require('child_process').execSync('npm --version',{encoding:'utf8'}).trim().split('.').map(Number); if (v[0] < 11 || (v[0] === 11 && v[1] < 5) || (v[0] === 11 && v[1] === 5 && v[2] < 1)) { throw new Error('npm publish requires npm >= 11.5.1'); }"
+
+      - name: Verify NPM_TOKEN for token publish
+        if: inputs.publish_auth == 'token'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::publish_auth=token requires the NPM_TOKEN repository secret."
+            exit 1
+          fi
+          npm whoami
+
+      - name: Verify release tag
+        run: npm --prefix npm run verify:release-tag -- "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ needs.release-input.outputs.tag_name }}
+
+      - name: Verify GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-input.outputs.tag_name }}
+        run: |
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets,isDraft)"
+
+          if [[ "$(jq -r '.isDraft' <<<"$release_json")" == "true" ]]; then
+            echo "::error::GitHub release '$RELEASE_TAG' is still a draft."
+            exit 1
+          fi
+
+          required_assets=(
+            "gsd-browser-darwin-arm64"
+            "gsd-browser-darwin-x64"
+            "gsd-browser-linux-arm64"
+            "gsd-browser-linux-x64"
+            "gsd-browser-windows-x64.exe"
+          )
+
+          for asset in "${required_assets[@]}"; do
+            if ! jq -e --arg asset "$asset" '.assets[] | select(.name == $asset)' <<<"$release_json" >/dev/null; then
+              echo "::error::GitHub release '$RELEASE_TAG' is missing asset '$asset'."
+              exit 1
+            fi
+          done
+
+      - name: Test npm package
+        run: npm --prefix npm test
+
+      - name: Build npm package
+        run: npm --prefix npm run build
+
+      - name: Pack dry run
+        if: inputs.dry_run
+        working-directory: npm
+        run: npm pack --dry-run
+
+      - name: Publish @${{ steps.channel.outputs.channel }}
+        if: ${{ !inputs.dry_run }}
+        working-directory: npm
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+          NODE_AUTH_TOKEN: ${{ inputs.publish_auth == 'token' && secrets.NPM_TOKEN || '' }}
+        run: |
+          VERSION=$(node -e 'process.stdout.write(require("./package.json").version)')
+          EXISTING=$(npm view "@opengsd/gsd-browser@${VERSION}" version 2>/dev/null || true)
+          if [ -n "${EXISTING}" ]; then
+            TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.${CHANNEL}" 2>/dev/null || true)
+            if [ "${TAGGED}" = "${VERSION}" ]; then
+              echo "Version ${VERSION} is already published and @${CHANNEL} points to it - skipping publish."
+              exit 0
+            fi
+            echo "::error::Version ${VERSION} already exists but @${CHANNEL} points to '${TAGGED:-<unset>}'."
+            echo "::error::Move the tag manually if intended: npm dist-tag add @opengsd/gsd-browser@${VERSION} ${CHANNEL}"
+            exit 1
+          fi
+
+          if OUTPUT=$(npm publish --access public --provenance --tag "${CHANNEL}" 2>&1); then
+            echo "$OUTPUT"
+          else
+            if echo "$OUTPUT" | grep -q "cannot publish over the previously published\|You cannot publish over"; then
+              echo "Version ${VERSION} was published concurrently - verifying @${CHANNEL} tag."
+              TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.${CHANNEL}" 2>/dev/null || true)
+              if [ "${TAGGED}" != "${VERSION}" ]; then
+                echo "::error::@${CHANNEL} points to '${TAGGED:-<unset>}' not ${VERSION} after concurrent publish."
+                echo "::error::Move the tag manually if intended: npm dist-tag add @opengsd/gsd-browser@${VERSION} ${CHANNEL}"
+                exit 1
+              fi
+              echo "Confirmed: @${CHANNEL} -> ${VERSION} (from concurrent publish)."
+            else
+              echo "$OUTPUT"
+              exit 1
+            fi
+          fi
+
+  prerelease-verify:
+    name: Verify @${{ needs.prerelease-publish.outputs.channel }} package
+    needs: prerelease-publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Use npm 11
+        run: npm install -g npm@11
+
+      - name: Install published @opengsd/gsd-browser@${{ needs.prerelease-publish.outputs.version }}
+        if: ${{ !inputs.dry_run }}
+        env:
+          PUBLISH_VERSION: ${{ needs.prerelease-publish.outputs.version }}
+          CHANNEL: ${{ needs.prerelease-publish.outputs.channel }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if npm install -g "@opengsd/gsd-browser@${PUBLISH_VERSION}"; then
+              exit 0
+            fi
+            echo "Attempt ${attempt} failed - waiting 10s for npm registry propagation..."
+            sleep 10
+          done
+          echo "::error::Failed to install @opengsd/gsd-browser@${PUBLISH_VERSION} after 6 attempts."
+          echo "::error::Recommended actions: (1) investigate the failing step above, (2) if the version exists on npm, deprecate it with 'npm deprecate @opengsd/gsd-browser@${PUBLISH_VERSION} \"broken ${CHANNEL} build; see Actions run\"', (3) cut a fix and re-run NPM Publish."
+          exit 1
+
+      - name: Smoke installed package
+        if: ${{ !inputs.dry_run }}
+        run: gsd-browser --version
+
+      - name: Skip published-package verification for dry run
+        if: inputs.dry_run
+        run: echo "dry_run=true; skipping npm install verification."
+
+  prod-release-plan:
+    name: Plan Production Release
+    if: ${{ inputs.channel == 'latest' }}
+    needs:
+      - prerelease-publish
+      - prerelease-verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Confirm production version
+        id: release
+        run: echo "version=${{ needs.prerelease-publish.outputs.version }}" >> "$GITHUB_OUTPUT"
+
+  prod-release:
+    name: Production Release
+    if: ${{ inputs.channel == 'latest' && !inputs.dry_run }}
+    needs:
+      - prerelease-publish
+      - prerelease-verify
+      - prod-release-plan
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Use npm 11
+        run: npm install -g npm@11
+
+      - name: Verify NPM_TOKEN for production dist-tag promotion
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::Production promotion needs NPM_TOKEN because npm cannot publish the same version twice and trusted publishing does not authenticate dist-tag mutation."
+            exit 1
+          fi
+          npm whoami
+
+      - name: Promote verified package to @latest
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.prod-release-plan.outputs.version }}
+        run: |
+          npm dist-tag add "@opengsd/gsd-browser@${VERSION}" latest
+          TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.latest" 2>/dev/null || true)
+          if [ "${TAGGED}" != "${VERSION}" ]; then
+            echo "::error::@latest points to '${TAGGED:-<unset>}' not ${VERSION} after promotion."
+            exit 1
+          fi
+          echo "Confirmed: @latest -> ${VERSION}."
+
+  prod-dry-run:
+    name: Production Release Dry Run
+    if: ${{ inputs.channel == 'latest' && inputs.dry_run }}
+    needs:
+      - prerelease-verify
+      - prod-release-plan
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Confirm dry-run approval path
+        run: echo "dry_run=true; production approval path reached without npm promotion."

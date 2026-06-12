@@ -265,10 +265,12 @@ jobs:
     needs:
       - release_input
       - release
-    uses: ./.github/workflows/npm-release.yml
+    uses: ./.github/workflows/npm-publish.yml
     permissions:
       contents: read
       id-token: write
+    secrets: inherit
     with:
+      channel: latest
       tag: ${{ needs.release_input.outputs.tag_name }}
       dry_run: false

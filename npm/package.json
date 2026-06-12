@@ -34,7 +34,8 @@
     "verify:release-tag": "node scripts/verify-release-tag.js"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "os": [
     "darwin",
