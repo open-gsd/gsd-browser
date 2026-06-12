@@ -1,6 +1,4 @@
 mod cloud_manifest;
-#[path = "daemon/handlers/cloud_methods.rs"]
-mod cloud_methods;
 
 mod daemon;
 mod lifecycle;
