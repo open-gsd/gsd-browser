@@ -14,7 +14,47 @@ permissions:
   contents: read
 
 jobs:
+  release_input:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      checkout_ref: ${{ steps.release_ref.outputs.checkout_ref }}
+      tag_name: ${{ steps.release_ref.outputs.tag_name }}
+
+    steps:
+      - name: Resolve release tag
+        id: release_ref
+        env:
+          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          tag="${RAW_TAG#refs/tags/}"
+
+          if [[ -z "$tag" ]]; then
+            echo "::error::Release tag is required."
+            exit 1
+          fi
+
+          if [[ ! "$tag" =~ ^v ]]; then
+            tag="v${tag}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag '$RAW_TAG' must be a semver tag like v0.1.29."
+            exit 1
+          fi
+
+          ref="refs/tags/${tag}"
+          if ! git ls-remote --exit-code --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$ref" >/dev/null; then
+            echo "::error::Release tag '$tag' does not exist. Create and push '$tag' before running this workflow."
+            exit 1
+          fi
+
+          echo "checkout_ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: release_input
     permissions:
       contents: read
 
@@ -42,7 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.release_input.outputs.checkout_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -191,7 +231,9 @@ jobs:
           path: ${{ matrix.artifact }}
 
   release:
-    needs: build
+    needs:
+      - release_input
+      - build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -199,7 +241,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.release_input.outputs.checkout_ref }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -209,7 +251,7 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.release_input.outputs.tag_name }}
           generate_release_notes: true
           files: |
             artifacts/gsd-browser-darwin-arm64/gsd-browser-darwin-arm64
@@ -220,7 +262,9 @@ jobs:
 
   npm-publish:
     name: publish npm package
-    needs: release
+    needs:
+      - release_input
+      - release
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -229,7 +273,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.release_input.outputs.checkout_ref }}
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -243,7 +287,7 @@ jobs:
       - name: Verify release tag
         run: npm --prefix npm run verify:release-tag -- "$RELEASE_TAG"
         env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ needs.release_input.outputs.tag_name }}
 
       - name: Test npm package
         run: npm --prefix npm test
