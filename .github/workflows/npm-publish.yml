@@ -91,6 +91,8 @@ jobs:
       tag_name: ${{ steps.release_ref.outputs.tag_name }}
       version: ${{ steps.release_ref.outputs.version }}
       auto_tagged: ${{ steps.release_ref.outputs.auto_tagged }}
+      dry_run_preview: ${{ steps.release_ref.outputs.dry_run_preview }}
+      release_assets_ready: ${{ steps.release_ref.outputs.release_assets_ready }}
     steps:
       - name: Checkout release source for auto-tagging
         if: github.event_name == 'workflow_dispatch' && inputs.tag == ''
@@ -106,6 +108,7 @@ jobs:
           RAW_TAG: ${{ inputs.tag }}
           VERSION_BUMP: ${{ github.event_name == 'workflow_dispatch' && inputs.version_bump || 'patch' }}
           RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
+          DRY_RUN: ${{ inputs.dry_run }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           tag="${RAW_TAG#refs/tags/}"
@@ -119,6 +122,19 @@ jobs:
               exit 1
             fi
 
+            if [[ "${DRY_RUN}" == "true" ]]; then
+              echo "::notice::dry_run=true with blank tag; would auto-bump to ${tag} but skipping commit, push, tag, release, and npm publish."
+              git checkout -- npm/package.json cli/Cargo.toml common/Cargo.toml Cargo.lock
+              {
+                echo "auto_tagged=false"
+                echo "dry_run_preview=true"
+                echo "checkout_ref=${GITHUB_REF}"
+                echo "tag_name=${tag}"
+                echo "version=${version}"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add npm/package.json cli/Cargo.toml common/Cargo.toml Cargo.lock
@@ -130,6 +146,8 @@ jobs:
           else
             echo "auto_tagged=false" >> "$GITHUB_OUTPUT"
           fi
+
+          echo "dry_run_preview=false" >> "$GITHUB_OUTPUT"
 
           if [[ ! "$tag" =~ ^v ]]; then
             tag="v${tag}"
@@ -146,14 +164,36 @@ jobs:
             exit 1
           fi
 
+          required_assets=(
+            "gsd-browser-darwin-arm64"
+            "gsd-browser-darwin-x64"
+            "gsd-browser-linux-arm64"
+            "gsd-browser-linux-x64"
+            "gsd-browser-windows-x64.exe"
+          )
+
+          release_assets_ready=false
+          if release_json="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets,isDraft 2>/dev/null)"; then
+            release_assets_ready=true
+            if [[ "$(jq -r '.isDraft' <<<"$release_json")" == "true" ]]; then
+              release_assets_ready=false
+            fi
+            for asset in "${required_assets[@]}"; do
+              if ! jq -e --arg asset "$asset" '.assets[] | select(.name == $asset)' <<<"$release_json" >/dev/null; then
+                release_assets_ready=false
+              fi
+            done
+          fi
+
           echo "checkout_ref=$ref" >> "$GITHUB_OUTPUT"
           echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "release_assets_ready=${release_assets_ready}" >> "$GITHUB_OUTPUT"
 
   build-release-assets:
     name: Build release asset (${{ matrix.target }})
     needs: release-input
-    if: needs.release-input.outputs.auto_tagged == 'true'
+    if: ${{ !inputs.dry_run && needs.release-input.outputs.dry_run_preview != 'true' && needs.release-input.outputs.release_assets_ready != 'true' }}
     permissions:
       contents: read
 
@@ -326,7 +366,7 @@ jobs:
     needs:
       - release-input
       - build-release-assets
-    if: needs.release-input.outputs.auto_tagged == 'true'
+    if: ${{ !inputs.dry_run && needs.release-input.outputs.dry_run_preview != 'true' && needs.release-input.outputs.release_assets_ready != 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -346,6 +386,7 @@ jobs:
         with:
           tag_name: ${{ needs.release-input.outputs.tag_name }}
           generate_release_notes: true
+          prerelease: true
           files: |
             artifacts/gsd-browser-darwin-arm64/gsd-browser-darwin-arm64
             artifacts/gsd-browser-darwin-x64/gsd-browser-darwin-x64
@@ -358,7 +399,7 @@ jobs:
     needs:
       - release-input
       - create-github-release
-    if: ${{ always() && needs.release-input.result == 'success' && (needs.create-github-release.result == 'success' || needs.create-github-release.result == 'skipped') }}
+    if: ${{ always() && needs.release-input.result == 'success' && needs.release-input.outputs.dry_run_preview != 'true' && (needs.create-github-release.result == 'success' || needs.create-github-release.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.channel == 'latest' && 'dev' || inputs.channel }}
     outputs:
@@ -607,6 +648,23 @@ jobs:
             exit 1
           fi
           echo "Confirmed: @latest -> ${VERSION}."
+
+  finalize-github-release:
+    name: Finalize GitHub Release
+    needs:
+      - release-input
+      - prod-release
+    if: ${{ inputs.channel == 'latest' && !inputs.dry_run && needs.prod-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Mark GitHub release as stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-input.outputs.tag_name }}
+        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --draft=false
 
   prod-dry-run:
     name: Production Release Dry Run
