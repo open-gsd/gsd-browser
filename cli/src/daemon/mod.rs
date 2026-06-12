@@ -976,7 +976,18 @@ async fn handle_connection<S>(
         "[gsd-browser-daemon] request: method={} id={}",
         request.method, request.id
     );
-    idle_tracker.touch();
+    idle_tracker.begin_request();
+    struct IdleRequestGuard<'a> {
+        tracker: &'a idle::IdleTracker,
+    }
+    impl Drop for IdleRequestGuard<'_> {
+        fn drop(&mut self) {
+            self.tracker.end_request();
+        }
+    }
+    let _idle_guard = IdleRequestGuard {
+        tracker: &idle_tracker,
+    };
 
     // Resolve the active page from the registry
     let page = {
@@ -997,8 +1008,6 @@ async fn handle_connection<S>(
     if let Err(e) = ipc::write_message(&mut stream, &payload).await {
         error!("[gsd-browser-daemon] write error: {e}");
     }
-    // Long-running requests should not count toward idle time.
-    idle_tracker.touch();
 }
 
 async fn dispatch(

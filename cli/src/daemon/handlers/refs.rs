@@ -280,7 +280,11 @@ pub async fn handle_click_ref(
                 .get("reason")
                 .and_then(|value| value.as_str())
                 .unwrap_or("click failed");
-            let label = if double_click { "double-click" } else { "click" };
+            let label = if double_click {
+                "double-click"
+            } else {
+                "click"
+            };
             return Err(format!("ref {ref_str} {label} failed: {reason}"));
         }
 

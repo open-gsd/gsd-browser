@@ -24,6 +24,7 @@ fn idle_shutdown_timeout_from_env(value: Option<&str>) -> Option<Duration> {
 pub struct IdleTracker {
     epoch: Instant,
     last_request_ms: AtomicU64,
+    in_flight: AtomicU64,
 }
 
 impl IdleTracker {
@@ -31,6 +32,7 @@ impl IdleTracker {
         Self {
             epoch: Instant::now(),
             last_request_ms: AtomicU64::new(0),
+            in_flight: AtomicU64::new(0),
         }
     }
 
@@ -39,7 +41,24 @@ impl IdleTracker {
             .store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
     }
 
+    /// Mark the start of an IPC request. While any request is in flight the
+    /// daemon is never considered idle, even if dispatch runs longer than the
+    /// configured shutdown window.
+    pub fn begin_request(&self) {
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        self.touch();
+    }
+
+    /// Mark the end of an IPC request.
+    pub fn end_request(&self) {
+        self.touch();
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+
     pub fn idle_for(&self) -> Duration {
+        if self.in_flight.load(Ordering::Acquire) > 0 {
+            return Duration::ZERO;
+        }
         let elapsed_ms = self.epoch.elapsed().as_millis() as u64;
         let last_ms = self.last_request_ms.load(Ordering::Relaxed);
         Duration::from_millis(elapsed_ms.saturating_sub(last_ms))
@@ -85,6 +104,18 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         assert!(tracker.idle_for() >= Duration::from_millis(10));
         tracker.touch();
+        assert!(tracker.idle_for() < Duration::from_millis(10));
+    }
+
+    #[test]
+    fn tracker_not_idle_while_request_in_flight() {
+        let tracker = IdleTracker::new();
+        std::thread::sleep(Duration::from_millis(20));
+        tracker.begin_request();
+        assert!(tracker.idle_for().is_zero());
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(tracker.idle_for().is_zero());
+        tracker.end_request();
         assert!(tracker.idle_for() < Duration::from_millis(10));
     }
 }
