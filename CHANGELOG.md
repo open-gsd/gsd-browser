@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.31] - 2026-06-12
+
+### Added
+
+- Generic instruction actions for agent-driven browser control, including hardened form, option, visibility, value, drag, and editable-field primitives.
+- MCP support for `browser_reload`, browser eval aliasing, double-click ref actions, and additional cloud method metadata.
+- Native Windows browser daemon support with Windows lock, IPC restart, duplicate-startup hardening, and release smoke coverage.
+- npm package build, test, release-tag verification, and trusted-publishing workflow coverage for `@opengsd/gsd-browser`.
+- Automated release version bumping and GitHub release asset recovery for interrupted publish runs.
+
+### Changed
+
+- Consolidated daemon lifecycle handling into a shared lifecycle module with explicit platform startup paths.
+- Release automation now creates recoverable GitHub release assets before npm publish, then supports reruns against an existing release tag.
+- GitHub Releases now publish the full binary matrix for macOS, Linux, and Windows from the npm publish flow.
+- npm release publishing now supports trusted publishing for the first publish step; `0.1.31` is currently published on the npm `dev` dist-tag while `latest` remains `0.1.29` until promotion.
+
+### Fixed
+
+- Prevented idle shutdown while IPC work is in flight.
+- Removed duplicate cloud-method module wiring that caused build warnings.
+- Recovered orphaned Chrome instances bound to a session browser profile.
+- Made npm publish reruns idempotent when a version already exists or a previous run left a partial GitHub release.
+- Fixed trusted publishing setup so the GitHub Actions workflow matches npm's publisher configuration.
+
 ## [0.1.28] - 2026-06-03
 
 ### Added

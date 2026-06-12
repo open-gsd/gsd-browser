@@ -44,6 +44,18 @@ Run `gsd-browser mcp` and unleash one of the most powerful browser surfaces avai
 npm install -g @opengsd/gsd-browser
 ```
 
+Current release status:
+
+- GitHub latest release: [`v0.1.31`](https://github.com/open-gsd/gsd-browser/releases/tag/v0.1.31)
+- npm `dev` dist-tag: `@opengsd/gsd-browser@0.1.31`
+- npm `latest` dist-tag: `@opengsd/gsd-browser@0.1.29`
+
+To install the current GitHub release from npm before `latest` is promoted:
+
+```bash
+npm install -g @opengsd/gsd-browser@dev
+```
+
 ### Pre-built binaries
 
 Download from [GitHub Releases](https://github.com/open-gsd/gsd-browser/releases):
