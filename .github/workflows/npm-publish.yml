@@ -1,7 +1,7 @@
 name: NPM Publish
 
-# Reusable npm publish. npm trusted publishing accepts one configured workflow
-# filename per package, so dev, next, and latest publishes all live here.
+# Manual/reusable npm publish. npm trusted publishing accepts one configured
+# workflow filename per package, so dev, next, and latest publishes all live here.
 
 on:
   workflow_call:
@@ -24,6 +24,35 @@ on:
         required: false
         default: "trusted"
         type: string
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "npm dist-tag or release path to publish; latest publishes/verifies @dev first, then waits for prod approval"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - next
+          - latest
+      tag:
+        description: "Optional release tag override; leave blank to publish the latest GitHub release"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "Validate the package without publishing to npm"
+        required: false
+        default: false
+        type: boolean
+      publish_auth:
+        description: "npm auth fallback: token uses NPM_TOKEN for dist-tag promotion; trusted uses OIDC for first publish"
+        required: false
+        default: "trusted"
+        type: choice
+        options:
+          - "trusted"
+          - "token"
 concurrency:
   group: npm-publish-${{ inputs.channel == 'latest' && 'dev' || inputs.channel }}-${{ inputs.tag }}
   cancel-in-progress: false
@@ -54,8 +83,11 @@ jobs:
           tag="${RAW_TAG#refs/tags/}"
 
           if [[ -z "$tag" ]]; then
-            echo "::error::Release tag is required."
-            exit 1
+            tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName,isDraft --jq 'if .isDraft then "" else .tagName end')"
+            if [[ -z "$tag" ]]; then
+              echo "::error::Could not resolve a latest non-draft GitHub release. Pass a release tag explicitly."
+              exit 1
+            fi
           fi
 
           if [[ ! "$tag" =~ ^v ]]; then
