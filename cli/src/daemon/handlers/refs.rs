@@ -260,8 +260,17 @@ pub async fn handle_click_ref(
         .map_err(|_| "aborted".to_string())?;
     state.narrator.sleep_lead(&probe).await;
 
+    let double_click = params
+        .get("double_click")
+        .or_else(|| params.get("doubleClick"))
+        .or_else(|| params.get("double"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let click_action = if double_click { "dblclick" } else { "click" };
+
     let result = async {
-        let action = inspection::act_on_snapshot_node(page, &node, "click", &json!({})).await?;
+        let action =
+            inspection::act_on_snapshot_node(page, &node, click_action, &json!({})).await?;
         let ok = action
             .get("ok")
             .and_then(|value| value.as_bool())
@@ -271,7 +280,8 @@ pub async fn handle_click_ref(
                 .get("reason")
                 .and_then(|value| value.as_str())
                 .unwrap_or("click failed");
-            return Err(format!("ref {ref_str} click failed: {reason}"));
+            let label = if double_click { "double-click" } else { "click" };
+            return Err(format!("ref {ref_str} {label} failed: {reason}"));
         }
 
         let (state_json, settle) = settle_and_capture(page).await;
@@ -280,6 +290,7 @@ pub async fn handle_click_ref(
             "settle": settle,
             "clicked": {
                 "ref": ref_str,
+                "doubleClick": double_click,
                 "actionability": action.get("actionability").cloned().unwrap_or(Value::Null),
             },
             "ref_resolution": ref_resolution_json(ref_str, &node, &resolution),

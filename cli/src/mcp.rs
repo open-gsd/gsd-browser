@@ -1116,11 +1116,12 @@ fn build_tool_list() -> Vec<Value> {
         // === Precise Interaction via Refs ===
         json!({
             "name": "browser_click_ref",
-            "description": "Click using a versioned ref from a recent snapshot. Preferred over CSS selectors for reliability. Re-snapshot afterward if the page changes.",
+            "description": "Click using a versioned ref from a recent snapshot. Preferred over CSS selectors for reliability. Set double_click for inline edit flows that listen for dblclick. Re-snapshot afterward if the page changes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "ref": { "type": "string" },
+                    "double_click": { "type": "boolean", "default": false, "description": "Dispatch a DOM dblclick event instead of a single click" },
                     "session": { "type": "string" }
                 },
                 "required": ["ref"]
@@ -1445,6 +1446,18 @@ fn build_tool_list() -> Vec<Value> {
         json!({
             "name": "browser_evaluate",
             "description": "Evaluate arbitrary JavaScript in the page context and return the result (safely handles non-serializable values like Window objects).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "expression": { "type": "string", "description": "JavaScript expression to evaluate" },
+                    "session": { "type": "string" }
+                },
+                "required": ["expression"]
+            }
+        }),
+        json!({
+            "name": "browser_eval",
+            "description": "Alias for browser_evaluate — evaluate JavaScript in the page context.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1962,10 +1975,20 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("ref")
                 .and_then(|v| v.as_str())
                 .ok_or("ref is required")?;
+            let mut params = json!({ "ref": r#ref });
+            if arguments
+                .get("double_click")
+                .or_else(|| arguments.get("doubleClick"))
+                .or_else(|| arguments.get("double"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                params["double_click"] = json!(true);
+            }
 
             let resp = crate::lifecycle::send_request(
                 "click_ref",
-                json!({ "ref": r#ref }),
+                params,
                 cli.browser_path.as_deref(),
                 cli.cdp_url.as_deref(),
                 session,
@@ -2525,7 +2548,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
-        "browser_evaluate" => {
+        "browser_evaluate" | "browser_eval" => {
             let expression = arguments
                 .get("expression")
                 .and_then(|v| v.as_str())
