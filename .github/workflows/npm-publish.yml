@@ -78,6 +78,7 @@ jobs:
       - name: Resolve release tag
         id: release_ref
         env:
+          GH_TOKEN: ${{ github.token }}
           RAW_TAG: ${{ inputs.tag }}
         run: |
           tag="${RAW_TAG#refs/tags/}"
