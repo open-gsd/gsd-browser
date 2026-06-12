@@ -265,36 +265,10 @@ jobs:
     needs:
       - release_input
       - release
-    runs-on: ubuntu-latest
+    uses: ./.github/workflows/npm-release.yml
     permissions:
       contents: read
       id-token: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.release_input.outputs.checkout_ref }}
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-
-      - name: Use npm 11
-        run: npm install -g npm@11
-
-      - name: Verify release tag
-        run: npm --prefix npm run verify:release-tag -- "$RELEASE_TAG"
-        env:
-          RELEASE_TAG: ${{ needs.release_input.outputs.tag_name }}
-
-      - name: Test npm package
-        run: npm --prefix npm test
-
-      - name: Build npm package
-        run: npm --prefix npm run build
-
-      - name: Publish to npm
-        working-directory: npm
-        run: npm publish --access public --provenance
+    with:
+      tag: ${{ needs.release_input.outputs.tag_name }}
+      dry_run: false
