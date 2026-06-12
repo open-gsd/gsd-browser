@@ -4,9 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to publish; leave blank to create v<npm package version> from this workflow ref"
+        description: "Optional release tag override; leave blank to create v<npm package version> from this workflow ref"
         required: false
         default: ""
+        type: string
   push:
     tags:
       - "v*"
