@@ -490,9 +490,15 @@ jobs:
         env:
           CHANNEL: ${{ steps.channel.outputs.channel }}
           NODE_AUTH_TOKEN: ${{ inputs.publish_auth == 'token' && secrets.NPM_TOKEN || '' }}
+          PUBLISH_AUTH: ${{ inputs.publish_auth }}
           REPAIR_NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           REQUESTED_CHANNEL: ${{ inputs.channel }}
         run: |
+          if [ "${PUBLISH_AUTH}" = "trusted" ]; then
+            unset NODE_AUTH_TOKEN
+            npm config delete //registry.npmjs.org/:_authToken || true
+          fi
+
           VERSION=$(node -e 'process.stdout.write(require("./package.json").version)')
           EXISTING=$(npm view "@opengsd/gsd-browser@${VERSION}" version 2>/dev/null || true)
           if [ -n "${EXISTING}" ]; then
