@@ -5,7 +5,7 @@ use gsd_browser_common::cloud::{
 };
 use serde_json::{to_value, Value};
 
-use crate::cloud_methods::CLOUD_TOOL_METHODS;
+use crate::daemon::handlers::cloud_methods::CLOUD_TOOL_METHODS;
 
 pub fn build_cloud_methods_manifest() -> CloudToolManifest {
     CloudToolManifest {

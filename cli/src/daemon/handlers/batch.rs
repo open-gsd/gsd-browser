@@ -118,6 +118,7 @@ async fn dispatch_step(
         "press" => handlers::interaction::handle_press(page, state, step).await,
         "snapshot" => handlers::refs::handle_snapshot(page, state, step).await,
         "diff" => handlers::assert_cmd::handle_diff(page, state, step).await,
+        "eval" => handlers::inspect::handle_eval(page, state, step).await,
         _ => Err(format!("unknown batch action: {action}")),
     }?;
 

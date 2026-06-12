@@ -1832,6 +1832,9 @@ pub async fn act_on_snapshot_node(
       }} else {{
         el.dispatchEvent(new MouseEvent("click", {{ bubbles: true, cancelable: true, view: context.win }}));
       }}
+    }} else if (action === "dblclick") {{
+      if (el.focus) el.focus();
+      el.dispatchEvent(new MouseEvent("dblclick", {{ bubbles: true, cancelable: true, view: context.win }}));
     }} else if (action === "hover") {{
       const hoverEvents = ["pointerover", "mouseover", "mouseenter", "pointermove", "mousemove"];
       for (const eventName of hoverEvents) {{

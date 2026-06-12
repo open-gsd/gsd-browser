@@ -5,7 +5,7 @@
 //! automatically.
 //!
 //! Design goals for the prototype:
-//! - Reuse the existing daemon_client for all real work (auto-start, sessions,
+//! - Reuse the existing lifecycle module for all real work (auto-start, sessions,
 //!   JSON output, error handling, etc.).
 //! - Keep the implementation small and dependency-light for the first slice.
 //! - Make the most valuable commands available as tools on day one.
@@ -807,7 +807,7 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
                 // Make it real: perform snapshot and return the actual structured data with refs
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let params = json!({ "limit": 30, "interactive_only": true });
-                let resp = rt.block_on(crate::daemon_client::send_request(
+                let resp = rt.block_on(crate::lifecycle::send_request(
                     "snapshot",
                     params,
                     cli.browser_path.as_deref(),
@@ -840,7 +840,7 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
             } else if uri == "gsd-browser://current-state" {
                 // Rich current state via debug bundle (blocking)
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let resp = rt.block_on(crate::daemon_client::send_request(
+                let resp = rt.block_on(crate::lifecycle::send_request(
                     "debug_bundle",
                     json!({}),
                     cli.browser_path.as_deref(),
@@ -866,7 +866,7 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
                 })
             } else if uri == "gsd-browser://current-refs" {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let resp = rt.block_on(crate::daemon_client::send_request(
+                let resp = rt.block_on(crate::lifecycle::send_request(
                     "snapshot",
                     json!({"limit": 20}),
                     cli.browser_path.as_deref(),
@@ -892,7 +892,7 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
             } else if uri == "gsd-browser://active-recordings" {
                 // Real data via blocking call (resources/read is sync)
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let resp = rt.block_on(crate::daemon_client::send_request(
+                let resp = rt.block_on(crate::lifecycle::send_request(
                     "recordings",
                     json!({}),
                     cli.browser_path.as_deref(),
@@ -924,7 +924,7 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
                 })
             } else if uri == "gsd-browser://timeline" {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let resp = rt.block_on(crate::daemon_client::send_request(
+                let resp = rt.block_on(crate::lifecycle::send_request(
                     "timeline",
                     json!({}),
                     cli.browser_path.as_deref(),
@@ -1116,11 +1116,12 @@ fn build_tool_list() -> Vec<Value> {
         // === Precise Interaction via Refs ===
         json!({
             "name": "browser_click_ref",
-            "description": "Click using a versioned ref from a recent snapshot. Preferred over CSS selectors for reliability. Re-snapshot afterward if the page changes.",
+            "description": "Click using a versioned ref from a recent snapshot. Preferred over CSS selectors for reliability. Set double_click for inline edit flows that listen for dblclick. Re-snapshot afterward if the page changes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "ref": { "type": "string" },
+                    "double_click": { "type": "boolean", "default": false, "description": "Dispatch a DOM dblclick event instead of a single click" },
                     "session": { "type": "string" }
                 },
                 "required": ["ref"]
@@ -1445,6 +1446,18 @@ fn build_tool_list() -> Vec<Value> {
         json!({
             "name": "browser_evaluate",
             "description": "Evaluate arbitrary JavaScript in the page context and return the result (safely handles non-serializable values like Window objects).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "expression": { "type": "string", "description": "JavaScript expression to evaluate" },
+                    "session": { "type": "string" }
+                },
+                "required": ["expression"]
+            }
+        }),
+        json!({
+            "name": "browser_eval",
+            "description": "Alias for browser_evaluate — evaluate JavaScript in the page context.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1887,7 +1900,7 @@ fn handle_tool_call_blocking(name: &str, arguments: Value, cli: &Cli) -> Result<
 /// Execute a tool call by mapping it to the existing daemon command surface.
 async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<String, String> {
     // Build CLI-equivalent flags from the MCP arguments.
-    // We reuse the exact same daemon_client::send_request path that the real CLI uses.
+    // We reuse the exact same lifecycle::send_request path that the real CLI uses.
     // This gives us auto-start, session handling, JSON output, error formatting, etc. for free.
 
     let session = tool_call_session(&arguments, cli);
@@ -1899,7 +1912,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .and_then(|v| v.as_str())
                 .ok_or("url is required")?;
 
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "navigate",
                 json!({ "url": url }),
                 cli.browser_path.as_deref(),
@@ -1916,7 +1929,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
         }
 
         "browser_reload" => {
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "reload",
                 json!({}),
                 cli.browser_path.as_deref(),
@@ -1941,7 +1954,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 params["mode"] = json!(mode);
             }
 
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "snapshot",
                 params,
                 cli.browser_path.as_deref(),
@@ -1962,10 +1975,20 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("ref")
                 .and_then(|v| v.as_str())
                 .ok_or("ref is required")?;
+            let mut params = json!({ "ref": r#ref });
+            if arguments
+                .get("double_click")
+                .or_else(|| arguments.get("doubleClick"))
+                .or_else(|| arguments.get("double"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                params["double_click"] = json!(true);
+            }
 
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "click_ref",
-                json!({ "ref": r#ref }),
+                params,
                 cli.browser_path.as_deref(),
                 cli.cdp_url.as_deref(),
                 session,
@@ -1988,7 +2011,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                     params[key] = value.clone();
                 }
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "drag",
                 params,
                 cli.browser_path.as_deref(),
@@ -2030,7 +2053,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 params["submit"] = json!(true);
             }
 
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "fill_ref",
                 params,
                 cli.browser_path.as_deref(),
@@ -2060,7 +2083,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 return Err("option must be a string or array of strings".to_string());
             }
 
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "select_option",
                 json!({ "selector": selector, "option": option }),
                 cli.browser_path.as_deref(),
@@ -2090,7 +2113,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 params["timeout"] = json!(timeout);
             }
 
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "wait_for",
                 params,
                 cli.browser_path.as_deref(),
@@ -2112,7 +2135,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .ok_or("checks array is required")?
                 .clone();
 
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "assert",
                 json!({ "checks": checks }),
                 cli.browser_path.as_deref(),
@@ -2136,7 +2159,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 params["selector"] = json!(sel);
             }
 
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "screenshot",
                 params,
                 cli.browser_path.as_deref(),
@@ -2162,7 +2185,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 params["scope"] = json!(scope);
             }
 
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "act",
                 params,
                 cli.browser_path.as_deref(),
@@ -2207,7 +2230,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 params["max_steps"] = json!(max_steps);
             }
 
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "act_instruction",
                 params,
                 cli.browser_path.as_deref(),
@@ -2230,7 +2253,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .unwrap_or(true);
             let params = json!({ "print_only": print_only });
 
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "view",
                 params,
                 cli.browser_path.as_deref(),
@@ -2251,7 +2274,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("ref")
                 .and_then(|v| v.as_str())
                 .ok_or("ref is required")?;
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "get_ref",
                 json!({ "ref": r#ref }),
                 cli.browser_path.as_deref(),
@@ -2271,7 +2294,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("ref")
                 .and_then(|v| v.as_str())
                 .ok_or("ref is required")?;
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "hover_ref",
                 json!({ "ref": r#ref }),
                 cli.browser_path.as_deref(),
@@ -2295,7 +2318,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(scope) = arguments.get("scope").and_then(|v| v.as_str()) {
                 params["scope"] = json!(scope);
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "find_best",
                 params,
                 cli.browser_path.as_deref(),
@@ -2315,7 +2338,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(sel) = arguments.get("selector").and_then(|v| v.as_str()) {
                 params["selector"] = json!(sel);
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "analyze_form",
                 params,
                 cli.browser_path.as_deref(),
@@ -2339,7 +2362,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(sel) = arguments.get("selector").and_then(|v| v.as_str()) {
                 params["selector"] = json!(sel);
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "fill_form",
                 params,
                 cli.browser_path.as_deref(),
@@ -2359,7 +2382,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("default");
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "save_state",
                 json!({ "name": name }),
                 cli.browser_path.as_deref(),
@@ -2379,7 +2402,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("default");
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "restore_state",
                 json!({ "name": name }),
                 cli.browser_path.as_deref(),
@@ -2399,7 +2422,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("profile")
                 .and_then(|v| v.as_str())
                 .ok_or("profile is required")?;
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "vault_login",
                 json!({ "profile": profile }),
                 cli.browser_path.as_deref(),
@@ -2419,7 +2442,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(name) = arguments.get("name").and_then(|v| v.as_str()) {
                 params["name"] = json!(name);
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "debug_bundle",
                 params,
                 cli.browser_path.as_deref(),
@@ -2439,7 +2462,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("clear")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "console",
                 json!({ "clear": clear }),
                 cli.browser_path.as_deref(),
@@ -2463,7 +2486,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("clear")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "network",
                 json!({ "filter": filter, "clear": clear }),
                 cli.browser_path.as_deref(),
@@ -2491,7 +2514,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             {
                 params["multiple"] = json!(true);
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "extract",
                 params,
                 cli.browser_path.as_deref(),
@@ -2511,7 +2534,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("include_hidden")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "check_injection",
                 json!({ "include_hidden": include_hidden }),
                 cli.browser_path.as_deref(),
@@ -2525,12 +2548,12 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             }
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
-        "browser_evaluate" => {
+        "browser_evaluate" | "browser_eval" => {
             let expression = arguments
                 .get("expression")
                 .and_then(|v| v.as_str())
                 .ok_or("expression is required")?;
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "eval",
                 json!({ "expression": expression }),
                 cli.browser_path.as_deref(),
@@ -2551,7 +2574,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("name")
                 .and_then(|v| v.as_str())
                 .ok_or("name is required")?;
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "record_start",
                 json!({ "name": name }),
                 cli.browser_path.as_deref(),
@@ -2566,7 +2589,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_record_stop" => {
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "record_stop",
                 json!({}),
                 cli.browser_path.as_deref(),
@@ -2581,7 +2604,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_recordings" => {
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "recordings",
                 json!({}),
                 cli.browser_path.as_deref(),
@@ -2600,7 +2623,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("id")
                 .and_then(|v| v.as_str())
                 .ok_or("id is required")?;
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "recording_get",
                 json!({ "id": id }),
                 cli.browser_path.as_deref(),
@@ -2623,7 +2646,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("output")
                 .and_then(|v| v.as_str())
                 .ok_or("output path is required")?;
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "recording_export",
                 json!({ "id": id, "output": output }),
                 cli.browser_path.as_deref(),
@@ -2640,7 +2663,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
 
         // Annotation tools
         "browser_annotations" => {
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "annotations",
                 json!({}),
                 cli.browser_path.as_deref(),
@@ -2659,7 +2682,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("note")
                 .and_then(|v| v.as_str())
                 .ok_or("note is required")?;
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "annotation_request",
                 json!({ "note": note }),
                 cli.browser_path.as_deref(),
@@ -2695,7 +2718,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(h) = arguments.get("headers") {
                 params["headers"] = h.clone();
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "mock_route",
                 params,
                 cli.browser_path.as_deref(),
@@ -2714,7 +2737,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("patterns")
                 .ok_or("patterns array required")?
                 .clone();
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "block_urls",
                 json!({ "patterns": patterns }),
                 cli.browser_path.as_deref(),
@@ -2729,7 +2752,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             "URLs blocked".to_string()
         }
         "browser_clear_routes" => {
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "clear_routes",
                 json!({}),
                 cli.browser_path.as_deref(),
@@ -2756,7 +2779,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 params["output"] = o.clone();
                 params["outputPath"] = o.clone(); // normalize for daemon handler (which reads outputPath)
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "generate_test",
                 params,
                 cli.browser_path.as_deref(),
@@ -2795,7 +2818,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 params["output"] = o.clone();
                 params["outputPath"] = o.clone(); // normalize for daemon handler
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "generate_replayable_test",
                 params,
                 cli.browser_path.as_deref(),
@@ -2830,7 +2853,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(extra) = arguments.get("extra_fields") {
                 params["extra_fields"] = extra.clone();
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "vault_save",
                 params,
                 cli.browser_path.as_deref(),
@@ -2845,7 +2868,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             format!("Credentials saved to vault profile '{}'", profile)
         }
         "browser_vault_list" => {
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "vault_list",
                 json!({}),
                 cli.browser_path.as_deref(),
@@ -2875,7 +2898,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(sc) = arguments.get("score") {
                 params["score"] = sc.clone();
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "action_cache",
                 params,
                 cli.browser_path.as_deref(),
@@ -2897,7 +2920,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(o) = arguments.get("output") {
                 params["output"] = o.clone();
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "save_pdf",
                 params,
                 cli.browser_path.as_deref(),
@@ -2938,7 +2961,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 }
             }
             let params = json!({ "steps": steps, "stop_on_failure": arguments.get("stop_on_failure").and_then(|v| v.as_bool()).unwrap_or(true), "summary_only": arguments.get("summary_only").and_then(|v| v.as_bool()).unwrap_or(false) });
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "batch",
                 params,
                 cli.browser_path.as_deref(),
@@ -2957,7 +2980,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(s) = arguments.get("since") {
                 params["since"] = s.clone();
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "diff",
                 params,
                 cli.browser_path.as_deref(),
@@ -2972,7 +2995,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             serde_json::to_string_pretty(&resp.result.unwrap_or(json!({}))).unwrap()
         }
         "browser_list_pages" => {
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "list_pages",
                 json!({}),
                 cli.browser_path.as_deref(),
@@ -2991,7 +3014,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("id")
                 .and_then(|v| v.as_i64())
                 .ok_or("id required")?;
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "switch_page",
                 json!({ "id": id }),
                 cli.browser_path.as_deref(),
@@ -3010,7 +3033,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 .get("id")
                 .and_then(|v| v.as_i64())
                 .ok_or("id required")?;
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "close_page",
                 json!({ "id": id }),
                 cli.browser_path.as_deref(),
@@ -3025,7 +3048,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             "Page closed".to_string()
         }
         "browser_list_frames" => {
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "list_frames",
                 json!({}),
                 cli.browser_path.as_deref(),
@@ -3050,7 +3073,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(u) = arguments.get("url_pattern") {
                 params["urlPattern"] = u.clone();
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "select_frame",
                 params,
                 cli.browser_path.as_deref(),
@@ -3072,7 +3095,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(c) = arguments.get("clear") {
                 params["clear"] = c.clone();
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "goal",
                 params,
                 cli.browser_path.as_deref(),
@@ -3087,7 +3110,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             "Goal updated".to_string()
         }
         "browser_step" => {
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "step",
                 json!({}),
                 cli.browser_path.as_deref(),
@@ -3102,7 +3125,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             "Step allowed".to_string()
         }
         "browser_abort" => {
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "abort",
                 json!({}),
                 cli.browser_path.as_deref(),
@@ -3117,7 +3140,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             "Action aborted".to_string()
         }
         "browser_control_state" => {
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 "control_state",
                 json!({}),
                 cli.browser_path.as_deref(),
@@ -3163,7 +3186,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
             if let Some(obj) = params.as_object_mut() {
                 obj.remove("session");
             }
-            let resp = crate::daemon_client::send_request(
+            let resp = crate::lifecycle::send_request(
                 method,
                 params,
                 cli.browser_path.as_deref(),
@@ -3185,7 +3208,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 if let Some(selector) = arguments.get("selector").and_then(|v| v.as_str()) {
                     params["scope"] = json!(selector);
                 }
-                let resp = crate::daemon_client::send_request(
+                let resp = crate::lifecycle::send_request(
                     "find_best",
                     params,
                     cli.browser_path.as_deref(),
@@ -3208,7 +3231,7 @@ async fn handle_tool_call(name: &str, arguments: Value, cli: &Cli) -> Result<Str
                 if let Some(selector) = arguments.get("selector").and_then(|v| v.as_str()) {
                     params["selector"] = json!(selector);
                 }
-                let resp = crate::daemon_client::send_request(
+                let resp = crate::lifecycle::send_request(
                     "find",
                     params,
                     cli.browser_path.as_deref(),
