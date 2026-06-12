@@ -1,7 +1,7 @@
 name: NPM Publish
 
-# Manual/reusable npm publish. npm trusted publishing accepts one configured
-# workflow filename per package, so dev, next, and latest publishes all live here.
+# Reusable npm publish. npm trusted publishing accepts one configured workflow
+# filename per package, so dev, next, and latest publishes all live here.
 
 on:
   workflow_call:
@@ -24,34 +24,6 @@ on:
         required: false
         default: "trusted"
         type: string
-  workflow_dispatch:
-    inputs:
-      channel:
-        description: "npm dist-tag or release path to publish; latest publishes/verifies @dev first, then waits for prod approval"
-        required: true
-        default: "dev"
-        type: choice
-        options:
-          - dev
-          - next
-          - latest
-      tag:
-        description: "Release tag to publish"
-        required: true
-      dry_run:
-        description: "Validate the package without publishing to npm"
-        required: false
-        default: false
-        type: boolean
-      publish_auth:
-        description: "npm auth fallback: token uses NPM_TOKEN for dist-tag promotion; trusted uses OIDC for first publish"
-        required: false
-        default: "trusted"
-        type: choice
-        options:
-          - "trusted"
-          - "token"
-
 concurrency:
   group: npm-publish-${{ inputs.channel == 'latest' && 'dev' || inputs.channel }}-${{ inputs.tag }}
   cancel-in-progress: false
