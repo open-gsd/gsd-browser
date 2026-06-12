@@ -4,7 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Optional release tag override; leave blank to create v<npm package version> from this workflow ref"
+        description: "Optional release tag override; leave blank to bump the version, commit it, and tag that commit"
+        required: false
+        default: ""
+        type: string
+      version_bump:
+        description: "Version bump to apply when tag is blank"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      version:
+        description: "Optional explicit version when tag is blank; overrides version_bump"
         required: false
         default: ""
         type: string
@@ -30,16 +44,95 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || github.token }}
 
       - name: Resolve release tag
         id: release_ref
         env:
           RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          VERSION_BUMP: ${{ github.event_name == 'workflow_dispatch' && inputs.version_bump || 'patch' }}
+          RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
         run: |
           tag="${RAW_TAG#refs/tags/}"
 
           if [[ -z "$tag" ]]; then
-            version="$(node -p 'require("./npm/package.json").version')"
+            version="$(node -e '
+              const fs = require("fs");
+              const releaseVersion = process.env.RELEASE_VERSION.trim();
+              const bump = process.env.VERSION_BUMP.trim() || "patch";
+              const current = require("./npm/package.json").version;
+
+              function fail(message) {
+                console.error(message);
+                process.exit(1);
+              }
+
+              function parseVersion(version) {
+                const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+                if (!match) fail(`Version ${version} must be stable semver like 0.1.30.`);
+                return match.slice(1).map(Number);
+              }
+
+              function compareVersions(left, right) {
+                const leftParts = parseVersion(left);
+                const rightParts = parseVersion(right);
+                for (let index = 0; index < leftParts.length; index += 1) {
+                  if (leftParts[index] !== rightParts[index]) {
+                    return leftParts[index] - rightParts[index];
+                  }
+                }
+                return 0;
+              }
+
+              function nextVersion() {
+                if (releaseVersion) {
+                  parseVersion(releaseVersion);
+                  return releaseVersion;
+                }
+
+                const [major, minor, patch] = parseVersion(current);
+                if (bump === "major") return `${major + 1}.0.0`;
+                if (bump === "minor") return `${major}.${minor + 1}.0`;
+                if (bump === "patch") return `${major}.${minor}.${patch + 1}`;
+                fail(`Unsupported version_bump ${bump}.`);
+              }
+
+              function updatePackageJson(file, version) {
+                const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+                pkg.version = version;
+                fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`);
+              }
+
+              function updateManifest(file, version) {
+                const text = fs.readFileSync(file, "utf8");
+                const updated = text.replace(/^(version = ")[^"]+(")$/m, `$1${version}$2`);
+                if (updated === text) fail(`Could not update ${file}.`);
+                fs.writeFileSync(file, updated);
+              }
+
+              function updateLockPackage(lockText, packageName, version) {
+                const pattern = new RegExp(`(\\[\\[package\\]\\]\\nname = "${packageName}"\\nversion = ")[^"]+(")`, "m");
+                const updated = lockText.replace(pattern, `$1${version}$2`);
+                if (updated === lockText) fail(`Could not update ${packageName} in Cargo.lock.`);
+                return updated;
+              }
+
+              const version = nextVersion();
+              if (compareVersions(version, current) <= 0) {
+                fail(`Resolved version ${version} must be greater than current version ${current}.`);
+              }
+
+              updatePackageJson("npm/package.json", version);
+              updateManifest("cli/Cargo.toml", version);
+              updateManifest("common/Cargo.toml", version);
+
+              let lockText = fs.readFileSync("Cargo.lock", "utf8");
+              lockText = updateLockPackage(lockText, "gsd-browser", version);
+              lockText = updateLockPackage(lockText, "gsd-browser-common", version);
+              fs.writeFileSync("Cargo.lock", lockText);
+
+              process.stdout.write(version);
+            ')"
             tag="v${version}"
 
             if git ls-remote --exit-code --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "refs/tags/${tag}" >/dev/null; then
@@ -49,6 +142,9 @@ jobs:
 
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add npm/package.json cli/Cargo.toml common/Cargo.toml Cargo.lock
+            git commit -m "chore: release ${tag}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
             git tag "$tag"
             git push origin "refs/tags/${tag}"
           fi
