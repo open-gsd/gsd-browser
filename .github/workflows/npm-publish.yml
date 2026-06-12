@@ -401,7 +401,6 @@ jobs:
       - create-github-release
     if: ${{ always() && needs.release-input.result == 'success' && needs.release-input.outputs.dry_run_preview != 'true' && (needs.create-github-release.result == 'success' || needs.create-github-release.result == 'skipped') }}
     runs-on: ubuntu-latest
-    environment: ${{ inputs.channel == 'latest' && 'dev' || inputs.channel }}
     outputs:
       version: ${{ needs.release-input.outputs.version }}
       channel: ${{ steps.channel.outputs.channel }}
