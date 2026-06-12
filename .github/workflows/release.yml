@@ -52,6 +52,7 @@ jobs:
           RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           VERSION_BUMP: ${{ github.event_name == 'workflow_dispatch' && inputs.version_bump || 'patch' }}
           RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           tag="${RAW_TAG#refs/tags/}"
 
@@ -146,7 +147,11 @@ jobs:
             git commit -m "chore: release ${tag}"
             git push origin "HEAD:${GITHUB_REF_NAME}"
             git tag "$tag"
-            git push origin "refs/tags/${tag}"
+            # Push the tag with GITHUB_TOKEN (not the PAT) so it does not retrigger
+            # this workflow via the `push: tags` trigger. Pushes authenticated with
+            # GITHUB_TOKEN do not create new workflow runs, while pushes made with a
+            # PAT do. The current run continues building and publishing this tag.
+            git push "https://x-access-token:${GITHUB_TOKEN}@${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git" "refs/tags/${tag}"
           fi
 
           if [[ ! "$tag" =~ ^v ]]; then
