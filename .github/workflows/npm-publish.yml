@@ -36,7 +36,21 @@ on:
           - next
           - latest
       tag:
-        description: "Optional release tag override; leave blank to publish the latest GitHub release"
+        description: "Optional release tag override; leave blank to bump the version, create a release, and publish it"
+        required: false
+        default: ""
+        type: string
+      version_bump:
+        description: "Version bump to apply when tag is blank"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      version:
+        description: "Optional explicit version when tag is blank; overrides version_bump"
         required: false
         default: ""
         type: string
@@ -58,7 +72,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 env:
@@ -70,25 +84,51 @@ jobs:
   release-input:
     name: Resolve Release Tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       checkout_ref: ${{ steps.release_ref.outputs.checkout_ref }}
       tag_name: ${{ steps.release_ref.outputs.tag_name }}
       version: ${{ steps.release_ref.outputs.version }}
+      auto_tagged: ${{ steps.release_ref.outputs.auto_tagged }}
     steps:
+      - name: Checkout release source for auto-tagging
+        if: github.event_name == 'workflow_dispatch' && inputs.tag == ''
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || github.token }}
+
       - name: Resolve release tag
         id: release_ref
         env:
           GH_TOKEN: ${{ github.token }}
           RAW_TAG: ${{ inputs.tag }}
+          VERSION_BUMP: ${{ github.event_name == 'workflow_dispatch' && inputs.version_bump || 'patch' }}
+          RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           tag="${RAW_TAG#refs/tags/}"
 
           if [[ -z "$tag" ]]; then
-            tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName,isDraft --jq 'if .isDraft then "" else .tagName end')"
-            if [[ -z "$tag" ]]; then
-              echo "::error::Could not resolve a latest non-draft GitHub release. Pass a release tag explicitly."
+            version="$(node scripts/bump-release-version.js)"
+            tag="v${version}"
+
+            if git ls-remote --exit-code --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "refs/tags/${tag}" >/dev/null; then
+              echo "::error::Auto tag '${tag}' already exists. Pass an explicit tag if you meant to rebuild an existing release."
               exit 1
             fi
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add npm/package.json cli/Cargo.toml common/Cargo.toml Cargo.lock
+            git commit -m "chore: release ${tag}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+            git tag "$tag"
+            git push "https://x-access-token:${GITHUB_TOKEN}@${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git" "refs/tags/${tag}"
+            echo "auto_tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "auto_tagged=false" >> "$GITHUB_OUTPUT"
           fi
 
           if [[ ! "$tag" =~ ^v ]]; then
@@ -110,9 +150,215 @@ jobs:
           echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
+  build-release-assets:
+    name: Build release asset (${{ matrix.target }})
+    needs: release-input
+    if: needs.release-input.outputs.auto_tagged == 'true'
+    permissions:
+      contents: read
+
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: gsd-browser-darwin-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: gsd-browser-darwin-arm64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: gsd-browser-linux-x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: gsd-browser-linux-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: gsd-browser-windows-x64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-input.outputs.checkout_ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/gsd-browser ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
+
+      - name: Rename binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item "target/${{ matrix.target }}/release/gsd-browser.exe" "${{ matrix.artifact }}"
+          ./${{ matrix.artifact }} --version
+
+      - name: Smoke test Windows daemon
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./${{ matrix.artifact }} daemon health --json
+
+          $browser = (Get-Command chrome -ErrorAction SilentlyContinue).Source
+          if (-not $browser) {
+            $browser = Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"
+          }
+          if (-not (Test-Path $browser)) {
+            $browser = Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe"
+          }
+          if (-not (Test-Path $browser)) {
+            $browser = Join-Path $env:ProgramFiles "Microsoft\Edge\Application\msedge.exe"
+          }
+          if (-not (Test-Path $browser)) {
+            $browser = Join-Path ${env:ProgramFiles(x86)} "Microsoft\Edge\Application\msedge.exe"
+          }
+          if (-not (Test-Path $browser)) {
+            Write-Host "Chrome or Edge not found; skipping launched browser smoke."
+            exit 0
+          }
+
+          $profile = Join-Path $env:RUNNER_TEMP "gsd-browser-release-smoke"
+          $browserProcess = Start-Process `
+            -FilePath $browser `
+            -ArgumentList "--remote-debugging-port=9222", "--user-data-dir=$profile", "--no-first-run", "--no-default-browser-check", "about:blank" `
+            -PassThru
+
+          try {
+            Start-Sleep -Seconds 3
+            ./${{ matrix.artifact }} --cdp-url http://127.0.0.1:9222 --session release-smoke daemon start
+            ./${{ matrix.artifact }} --session release-smoke daemon health --json
+            ./${{ matrix.artifact }} --session release-smoke snapshot --json
+          } finally {
+            ./${{ matrix.artifact }} --session release-smoke daemon stop
+            Stop-Process -Id $browserProcess.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Sign macOS binary
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          if [ -z "${APPLE_CERTIFICATE_BASE64:-}" ] || [ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ] || [ -z "${APPLE_KEYCHAIN_PASSWORD:-}" ]; then
+            echo "Apple signing secrets are not configured; publishing unsigned macOS binary."
+            ./${{ matrix.artifact }} --version
+            exit 0
+          fi
+
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > certificate.p12
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import certificate.p12 \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          codesign --sign "Developer ID Application" \
+            --options runtime \
+            --timestamp \
+            --force \
+            "${{ matrix.artifact }}"
+
+          codesign --verify --deep --strict "${{ matrix.artifact }}"
+          ./${{ matrix.artifact }} --version
+
+          rm -f certificate.p12
+
+      - name: Notarize macOS binary
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_ID_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "Apple notarization secrets are not configured; skipping notarization."
+            ./${{ matrix.artifact }} --version
+            exit 0
+          fi
+
+          ditto -c -k --keepParent "${{ matrix.artifact }}" "${{ matrix.artifact }}.zip"
+
+          xcrun notarytool submit "${{ matrix.artifact }}.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          rm -f "${{ matrix.artifact }}.zip"
+          codesign --verify --deep --strict "${{ matrix.artifact }}"
+          ./${{ matrix.artifact }} --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  create-github-release:
+    name: Create GitHub Release
+    needs:
+      - release-input
+      - build-release-assets
+    if: needs.release-input.outputs.auto_tagged == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-input.outputs.checkout_ref }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-input.outputs.tag_name }}
+          generate_release_notes: true
+          files: |
+            artifacts/gsd-browser-darwin-arm64/gsd-browser-darwin-arm64
+            artifacts/gsd-browser-darwin-x64/gsd-browser-darwin-x64
+            artifacts/gsd-browser-linux-arm64/gsd-browser-linux-arm64
+            artifacts/gsd-browser-linux-x64/gsd-browser-linux-x64
+            artifacts/gsd-browser-windows-x64.exe/gsd-browser-windows-x64.exe
+
   prerelease-publish:
     name: Publish @${{ inputs.channel == 'latest' && 'dev' || inputs.channel }}
-    needs: release-input
+    needs:
+      - release-input
+      - create-github-release
+    if: ${{ always() && needs.release-input.result == 'success' && (needs.create-github-release.result == 'success' || needs.create-github-release.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.channel == 'latest' && 'dev' || inputs.channel }}
     outputs:
