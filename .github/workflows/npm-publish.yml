@@ -203,6 +203,7 @@ jobs:
         env:
           CHANNEL: ${{ steps.channel.outputs.channel }}
           NODE_AUTH_TOKEN: ${{ inputs.publish_auth == 'token' && secrets.NPM_TOKEN || '' }}
+          REQUESTED_CHANNEL: ${{ inputs.channel }}
         run: |
           VERSION=$(node -e 'process.stdout.write(require("./package.json").version)')
           EXISTING=$(npm view "@opengsd/gsd-browser@${VERSION}" version 2>/dev/null || true)
@@ -210,6 +211,22 @@ jobs:
             TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.${CHANNEL}" 2>/dev/null || true)
             if [ "${TAGGED}" = "${VERSION}" ]; then
               echo "Version ${VERSION} is already published and @${CHANNEL} points to it - skipping publish."
+              exit 0
+            fi
+            LATEST_TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.latest" 2>/dev/null || true)
+            if [ "${REQUESTED_CHANNEL}" = "latest" ] && [ "${LATEST_TAGGED}" = "${VERSION}" ]; then
+              echo "Version ${VERSION} is already published and @latest points to it - skipping @${CHANNEL} prerelease publish."
+              exit 0
+            fi
+            if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+              echo "Version ${VERSION} is already published; moving @${CHANNEL} to it with token auth."
+              npm dist-tag add "@opengsd/gsd-browser@${VERSION}" "${CHANNEL}"
+              TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.${CHANNEL}" 2>/dev/null || true)
+              if [ "${TAGGED}" != "${VERSION}" ]; then
+                echo "::error::@${CHANNEL} points to '${TAGGED:-<unset>}' not ${VERSION} after dist-tag update."
+                exit 1
+              fi
+              echo "Confirmed: @${CHANNEL} -> ${VERSION}."
               exit 0
             fi
             echo "::error::Version ${VERSION} already exists but @${CHANNEL} points to '${TAGGED:-<unset>}'."
@@ -310,7 +327,13 @@ jobs:
       - name: Verify NPM_TOKEN for production dist-tag promotion
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.prod-release-plan.outputs.version }}
         run: |
+          TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.latest" 2>/dev/null || true)
+          if [ "${TAGGED}" = "${VERSION}" ]; then
+            echo "@latest already points to ${VERSION}; no token needed."
+            exit 0
+          fi
           if [ -z "${NODE_AUTH_TOKEN}" ]; then
             echo "::error::Production promotion needs NPM_TOKEN because npm cannot publish the same version twice and trusted publishing does not authenticate dist-tag mutation."
             exit 1
@@ -322,6 +345,11 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.prod-release-plan.outputs.version }}
         run: |
+          TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.latest" 2>/dev/null || true)
+          if [ "${TAGGED}" = "${VERSION}" ]; then
+            echo "Confirmed: @latest already points to ${VERSION}."
+            exit 0
+          fi
           npm dist-tag add "@opengsd/gsd-browser@${VERSION}" latest
           TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.latest" 2>/dev/null || true)
           if [ "${TAGGED}" != "${VERSION}" ]; then
