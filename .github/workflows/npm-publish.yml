@@ -203,6 +203,7 @@ jobs:
         env:
           CHANNEL: ${{ steps.channel.outputs.channel }}
           NODE_AUTH_TOKEN: ${{ inputs.publish_auth == 'token' && secrets.NPM_TOKEN || '' }}
+          REPAIR_NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           REQUESTED_CHANNEL: ${{ inputs.channel }}
         run: |
           VERSION=$(node -e 'process.stdout.write(require("./package.json").version)')
@@ -218,7 +219,10 @@ jobs:
               echo "Version ${VERSION} is already published and @latest points to it - skipping @${CHANNEL} prerelease publish."
               exit 0
             fi
-            if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            if [ -n "${NODE_AUTH_TOKEN:-}" ] || [ -n "${REPAIR_NODE_AUTH_TOKEN:-}" ]; then
+              if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+                npm config set //registry.npmjs.org/:_authToken "${REPAIR_NODE_AUTH_TOKEN}"
+              fi
               echo "Version ${VERSION} is already published; moving @${CHANNEL} to it with token auth."
               npm dist-tag add "@opengsd/gsd-browser@${VERSION}" "${CHANNEL}"
               TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.${CHANNEL}" 2>/dev/null || true)
