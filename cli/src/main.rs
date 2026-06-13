@@ -9,6 +9,7 @@ mod win_process;
 #[cfg(not(any(unix, windows)))]
 compile_error!("gsd-browser daemon support requires a Unix or Windows target");
 mod mcp;
+mod moonshot_tool_schema;
 mod output;
 
 #[cfg(feature = "bidi")]
