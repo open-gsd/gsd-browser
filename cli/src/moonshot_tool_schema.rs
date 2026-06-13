@@ -155,7 +155,9 @@ fn normalize_additional_properties(value: &Value) -> Option<Value> {
     Some(value.clone())
 }
 
-fn convert_pattern_properties_to_additional_properties(obj: &Map<String, Value>) -> Map<String, Value> {
+fn convert_pattern_properties_to_additional_properties(
+    obj: &Map<String, Value>,
+) -> Map<String, Value> {
     if !obj.contains_key("patternProperties") {
         return obj.clone();
     }
@@ -205,10 +207,7 @@ pub fn normalize_claude_tool_schema_for_google(schema: &Value) -> Value {
                 .filter_map(|candidate| {
                     candidate.as_object().and_then(|obj| {
                         if obj.get("type") == Some(&json!("object"))
-                            && obj
-                                .get("properties")
-                                .and_then(|p| p.as_object())
-                                .is_some()
+                            && obj.get("properties").and_then(|p| p.as_object()).is_some()
                         {
                             Some(obj)
                         } else {
@@ -234,12 +233,7 @@ pub fn normalize_claude_tool_schema_for_google(schema: &Value) -> Value {
         let required: Vec<Value> = without_unions
             .get("required")
             .and_then(|r| r.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter(|key| key.is_string())
-                    .cloned()
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter(|key| key.is_string()).cloned().collect())
             .unwrap_or_default();
 
         without_unions.insert("type".to_string(), json!("object"));
@@ -299,10 +293,17 @@ fn simplify_non_const_union(obj: &Map<String, Value>, union_key_name: &str) -> M
     let variants: Vec<Value> = obj
         .get(union_key_name)
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().map(sanitize_for_claude_input_schema_deep).collect())
+        .map(|arr| {
+            arr.iter()
+                .map(sanitize_for_claude_input_schema_deep)
+                .collect()
+        })
         .unwrap_or_default();
 
-    let description = obj.get("description").and_then(|d| d.as_str()).map(str::to_string);
+    let description = obj
+        .get("description")
+        .and_then(|d| d.as_str())
+        .map(str::to_string);
     let mut rest = obj.clone();
     rest.remove(union_key_name);
     rest.remove("type");
@@ -369,11 +370,11 @@ fn simplify_non_const_union(obj: &Map<String, Value>, union_key_name: &str) -> M
     if let (Some(object_variant), Some(_)) = (object_variants.first(), string_variant) {
         let mut result = (*object_variant).clone();
         result.extend(rest);
-        let desc = description.map(|desc| {
-            format!("{desc}. A plain string fallback is also accepted.")
-        }).unwrap_or_else(|| {
-            "Structured object preferred; a plain string fallback is also accepted.".to_string()
-        });
+        let desc = description
+            .map(|desc| format!("{desc}. A plain string fallback is also accepted."))
+            .unwrap_or_else(|| {
+                "Structured object preferred; a plain string fallback is also accepted.".to_string()
+            });
         result.insert("description".to_string(), json!(desc));
         return result;
     }
@@ -427,10 +428,7 @@ fn sanitize_for_claude_input_schema_deep(schema: &Value) -> Value {
             let mut with_union = obj.clone();
             with_union.remove(union_key_name);
             with_union.remove("type");
-            with_union.insert(
-                collapsed_union_key.to_string(),
-                Value::Array(variants),
-            );
+            with_union.insert(collapsed_union_key.to_string(), Value::Array(variants));
             let collapsed = collapse_const_union(&with_union, collapsed_union_key);
             return sanitize_for_claude_input_schema_deep(&Value::Object(collapsed));
         }
@@ -473,16 +471,14 @@ fn sanitize_for_claude_input_schema_deep(schema: &Value) -> Value {
                 continue;
             }
         }
-        result.insert(
-            key.clone(),
-            sanitize_for_claude_input_schema_deep(value),
-        );
+        result.insert(key.clone(), sanitize_for_claude_input_schema_deep(value));
     }
     Value::Object(result)
 }
 
 fn to_claude_input_schema_root(schema: &Value) -> Value {
-    let sanitized = sanitize_for_claude_input_schema_deep(&normalize_claude_tool_schema_for_google(schema));
+    let sanitized =
+        sanitize_for_claude_input_schema_deep(&normalize_claude_tool_schema_for_google(schema));
     let sanitized_obj = sanitized.as_object().cloned().unwrap_or_default();
 
     let mut root = Map::new();

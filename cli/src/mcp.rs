@@ -510,9 +510,7 @@ mod tests {
         );
 
         for tool in &tools {
-            let name = tool["name"]
-                .as_str()
-                .expect("tool name");
+            let name = tool["name"].as_str().expect("tool name");
             let input_schema = &tool["inputSchema"];
             assert_eq!(
                 input_schema["type"], "object",
@@ -545,9 +543,7 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "browser_generate_replayable_test")
             .expect("browser_generate_replayable_test should be advertised");
-        assert!(
-            collect_forbidden_union_schema_paths(&replayable["inputSchema"], "$").is_empty()
-        );
+        assert!(collect_forbidden_union_schema_paths(&replayable["inputSchema"], "$").is_empty());
     }
 
     #[test]
