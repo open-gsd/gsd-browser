@@ -178,6 +178,25 @@ impl PageRegistry {
         }
     }
 
+    /// Replace a registered page handle after reconnecting to the same logical browser page.
+    pub fn replace_page_handle(
+        &mut self,
+        id: u64,
+        page: Arc<Page>,
+        title: String,
+        url: String,
+    ) -> bool {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.target_id = page.target_id().as_ref().to_string();
+            entry.page = page;
+            entry.title = title;
+            entry.url = url;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Number of open pages.
     #[allow(dead_code)]
     pub fn len(&self) -> usize {

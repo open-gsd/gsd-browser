@@ -10,9 +10,9 @@
 //! - Keep the implementation small and dependency-light for the first slice.
 //! - Make the most valuable commands available as tools on day one.
 
-use crate::moonshot_tool_schema::{
-    collect_forbidden_union_schema_paths, sanitize_tool_list_for_moonshot,
-};
+#[cfg(test)]
+use crate::moonshot_tool_schema::collect_forbidden_union_schema_paths;
+use crate::moonshot_tool_schema::sanitize_tool_list_for_moonshot;
 use crate::Cli;
 use axum::{
     extract::State,

@@ -489,7 +489,7 @@ pub async fn handle_act(page: &Page, state: &DaemonState, params: &Value) -> Res
             }
             action_performed = "focus";
         } else {
-            click_selector(page, state, selector).await?;
+            click_selector(page, state, selector, "left", 1).await?;
             action_performed = "click";
         }
 

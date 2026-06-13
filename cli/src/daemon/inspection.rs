@@ -24,6 +24,7 @@ function accessibleName(el) {
 }
 
 function isVisible(el) {
+  if (hasHiddenAncestor(el)) return false;
   if (pi.isVisible) return pi.isVisible(el);
   const style = window.getComputedStyle(el);
   if (style.display === "none" || style.visibility === "hidden") return false;
@@ -32,8 +33,44 @@ function isVisible(el) {
 }
 
 function isEnabled(el) {
+  if (hasDisabledAncestor(el)) return false;
   if (pi.isEnabled) return pi.isEnabled(el);
-  return !el.disabled;
+  return !el.disabled &&
+    !(el.hasAttribute && el.hasAttribute("disabled")) &&
+    String(el.getAttribute("aria-disabled") || "false").toLowerCase() !== "true";
+}
+
+function attrTrue(el, attr) {
+  return String(el && el.getAttribute && el.getAttribute(attr) || "false").toLowerCase() === "true";
+}
+
+function parentElementOrHost(el) {
+  if (!el) return null;
+  if (el.parentElement) return el.parentElement;
+  const root = el.getRootNode && el.getRootNode();
+  return root && root.host ? root.host : null;
+}
+
+function isInsideFirstLegend(el, fieldset) {
+  const firstLegend = fieldset && Array.from(fieldset.children || [])
+    .find(child => child.tagName && child.tagName.toLowerCase() === "legend");
+  return !!(firstLegend && firstLegend.contains(el));
+}
+
+function hasHiddenAncestor(el) {
+  for (let node = el; node && node.nodeType === Node.ELEMENT_NODE; node = parentElementOrHost(node)) {
+    if (node.hidden || node.inert || attrTrue(node, "aria-hidden")) return true;
+  }
+  return false;
+}
+
+function hasDisabledAncestor(el) {
+  for (let node = el; node && node.nodeType === Node.ELEMENT_NODE; node = parentElementOrHost(node)) {
+    const tag = node.tagName && node.tagName.toLowerCase();
+    if (tag === "fieldset" && node.disabled && !isInsideFirstLegend(el, node)) return true;
+    if (tag !== "fieldset" && (node.disabled || node.hasAttribute && node.hasAttribute("disabled") || attrTrue(node, "aria-disabled"))) return true;
+  }
+  return false;
 }
 
 function selectorHint(el) {
@@ -346,7 +383,9 @@ function elementSummary(el, context) {
     frameLabel: context.label,
     frameUrl: context.url,
     value: el.value !== undefined ? String(el.value) : null,
-    checked: !!el.checked,
+    checked: ("checked" in el)
+      ? !!el.checked
+      : String(el.getAttribute("aria-checked") || el.getAttribute("aria-pressed") || "false").toLowerCase() === "true",
   };
 }
 
@@ -455,14 +494,62 @@ function isTextInputType(el) {
   ].includes(type);
 }
 
+function isCustomWritableValueElement(el) {
+  if (!el || !el.tagName || !("value" in el)) return false;
+  const tag = el.tagName.toLowerCase();
+  if (!tag.includes("-")) return false;
+  if (el.readOnly || el.getAttribute("readonly") !== null || el.getAttribute("aria-readonly") === "true") return false;
+  const valueType = typeof el.value;
+  if (valueType === "function" || valueType === "symbol") return false;
+  return true;
+}
+
+function customValueSemanticKind(el) {
+  if (!isCustomWritableValueElement(el)) return false;
+  const metadata = [
+    el.tagName,
+    el.id,
+    el.className,
+    el.getAttribute("name"),
+    el.getAttribute("data-field"),
+    el.getAttribute("data-field-name"),
+    el.getAttribute("data-control"),
+    el.getAttribute("inputmode"),
+    el.getAttribute("aria-label"),
+    el.getAttribute("title"),
+    accessibleName(el),
+  ].filter(Boolean).join(" ");
+  if (/\b(date[\s-]?time|datetime|timestamp)\b/i.test(metadata)) return "datetime-local";
+  if (/\bmonth\b/i.test(metadata)) return "month";
+  if (/\bweek\b/i.test(metadata)) return "week";
+  if (/\btime\b/i.test(metadata)) return "time";
+  if (/\b(date|day|calendar|birthday|birthdate|departure|arrival)\b/i.test(metadata)) return "date";
+  if (/\b(dropdown|select|listbox|menu|choice|options?)\b/i.test(metadata)) return "select";
+  if (/\b(colou?r|hex|palette)\b/i.test(metadata)) return "color";
+  if (/\b(spinner|spinbutton|stepper|numeric|number|quantity|count|amount|limit|retries)\b/i.test(metadata)) return "custom-number";
+  return "";
+}
+
+function isCustomNumericValueElement(el) {
+  return customValueSemanticKind(el) === "custom-number";
+}
+
+function isCustomSelectableValueElement(el) {
+  return customValueSemanticKind(el) === "select";
+}
+
 function editableKind(el) {
   if ("value" in el && isTextInputType(el)) {
     return "value";
   }
+  if (isCustomWritableValueElement(el)) {
+    return "value";
+  }
   const contentEditable = el.getAttribute("contenteditable");
   const hasEditableAttr = contentEditable !== null && contentEditable.toLowerCase() !== "false";
-  const hasTextboxRole = String(el.getAttribute("role") || "").split(/\s+/).includes("textbox");
-  if (el.isContentEditable || hasEditableAttr || hasTextboxRole) {
+  const roles = String(el.getAttribute("role") || "").split(/\s+/);
+  const hasEditableTextRole = roles.some((role) => ["textbox", "searchbox", "combobox"].includes(role));
+  if (el.isContentEditable || hasEditableAttr || hasEditableTextRole) {
     return "contenteditable";
   }
   return "";
@@ -647,6 +734,11 @@ function optionTextCandidates(el) {
   ].filter((value) => value !== undefined && value !== null && String(value).trim() !== "");
 }
 
+function optionDisplayText(el) {
+  const candidates = optionTextCandidates(el);
+  return normalizeText(candidates.length ? candidates[0] : "");
+}
+
 function optionMatchScore(option, wanted) {
   const rawWanted = String(wanted);
   const normalizedWanted = normalizeText(rawWanted);
@@ -668,7 +760,7 @@ function selectedOptionSnapshot(selectEl) {
   return Array.from(selectEl.selectedOptions || []).map((option) => ({
     value: String(option.value || ""),
     label: String(option.label || ""),
-    text: normalizeText(option.textContent || ""),
+    text: optionDisplayText(option),
   }));
 }
 
@@ -737,7 +829,7 @@ function selectNativeOption(context, el, wantedValues) {
       wanted: entry.wanted,
       value: String(entry.option.value || ""),
       label: String(entry.option.label || ""),
-      text: normalizeText(entry.option.textContent || ""),
+      text: optionDisplayText(entry.option),
       score: entry.score,
     })),
   };
@@ -749,17 +841,23 @@ function customOptionRoots(context, el) {
   const add = (node) => {
     if (node && !roots.includes(node)) roots.push(node);
   };
+  const byOwnedId = (id) => {
+    const cleanId = String(id || "").replace(/^#/, "");
+    const rootNode = el && el.getRootNode && el.getRootNode();
+    return (rootNode && rootNode.getElementById && rootNode.getElementById(cleanId)) ||
+      doc.getElementById(cleanId);
+  };
 
   add(el);
   const controls = el.getAttribute && el.getAttribute("aria-controls");
   if (controls) {
-    for (const id of controls.split(/\s+/)) add(doc.getElementById(id));
+    for (const id of controls.split(/\s+/)) add(byOwnedId(id));
   }
   const owns = el.getAttribute && el.getAttribute("aria-owns");
   if (owns) {
-    for (const id of owns.split(/\s+/)) add(doc.getElementById(id));
+    for (const id of owns.split(/\s+/)) add(byOwnedId(id));
   }
-  add(el.closest && el.closest("[role=listbox], [role=menu], [role=radiogroup], form, body"));
+  add(el.closest && el.closest("[role=listbox], [role=menu], [role=tree], [role=radiogroup], form, body"));
   add(doc.body);
   return roots;
 }
@@ -770,6 +868,7 @@ function findCustomOption(context, el, wanted) {
     "[role=menuitem]",
     "[role=menuitemradio]",
     "[role=menuitemcheckbox]",
+    "[role=treeitem]",
     "[data-value]",
     "[aria-selected]",
     "li",
@@ -792,34 +891,61 @@ function findCustomOption(context, el, wanted) {
   return candidates[0] || null;
 }
 
+function customOptionSelected(node) {
+  return node.getAttribute("aria-selected") === "true" ||
+    node.getAttribute("aria-checked") === "true" ||
+    node.getAttribute("aria-pressed") === "true" ||
+    node.getAttribute("data-selected") === "true" ||
+    /\b(selected|active|checked)\b/i.test(String(node.className || ""));
+}
+
 function selectCustomOption(context, el, wantedValues) {
-  if (wantedValues.length !== 1) {
+  clickLike(context, el);
+  const role = inferRole(el) || (el.getAttribute && el.getAttribute("role")) || "";
+  const supportsMultiple = role === "listbox" ||
+    el.getAttribute("aria-multiselectable") === "true" ||
+    el.hasAttribute("multiple");
+  if (wantedValues.length !== 1 && !supportsMultiple) {
     return { ok: false, error: "custom dropdown selection supports one option at a time" };
   }
-  const wanted = wantedValues[0];
 
-  clickLike(context, el);
-  const match = findCustomOption(context, el, wanted);
-  if (!match) return { ok: false, error: "option not found: " + wanted };
+  const matched = [];
+  for (const wanted of wantedValues) {
+    const match = findCustomOption(context, el, wanted);
+    if (!match) return { ok: false, error: "option not found: " + wanted };
+    matched.push({ wanted, node: match.node, score: match.score });
+  }
 
-  clickLike(context, match.node);
+  for (const match of matched) {
+    if (!customOptionSelected(match.node)) {
+      clickLike(context, match.node);
+    }
+  }
   const selected = {
     value: "value" in el ? String(el.value || "") : null,
     text: normalizeText(el.innerText || el.textContent || ""),
-    optionText: normalizeText(match.node.innerText || match.node.textContent || ""),
-    optionRole: inferRole(match.node),
-    optionSelected: match.node.getAttribute("aria-selected"),
+    options: matched.map((match) => ({
+      text: optionDisplayText(match.node),
+      role: inferRole(match.node),
+      selected: customOptionSelected(match.node),
+      value: match.node.getAttribute("data-value") || match.node.getAttribute("value") || "",
+    })),
   };
+  if (matched.length === 1) {
+    selected.optionText = selected.options[0].text;
+    selected.optionRole = selected.options[0].role;
+    selected.optionSelected = matched[0].node.getAttribute("aria-selected");
+  }
   return {
     ok: true,
     mode: "custom-option",
     selected,
-    matched: [{
-      wanted,
-      text: selected.optionText,
+    matched: matched.map((match) => ({
+      wanted: match.wanted,
+      text: optionDisplayText(match.node),
       value: match.node.getAttribute("data-value") || match.node.getAttribute("value") || "",
       score: match.score,
-    }],
+    })),
   };
 }
 
@@ -835,7 +961,7 @@ function selectOptionElement(context, el, options) {
   }
 
   const role = inferRole(el) || (el.getAttribute && el.getAttribute("role")) || "";
-  if (["combobox", "listbox", "menu", "button", "textbox"].includes(role) || el.hasAttribute("aria-haspopup")) {
+  if (["combobox", "listbox", "menu", "tree", "button", "textbox"].includes(role) || el.hasAttribute("aria-haspopup") || isCustomSelectableValueElement(el)) {
     return selectCustomOption(context, el, wantedValues);
   }
 
@@ -914,19 +1040,23 @@ function parseColorValue(raw) {
 
 function typedValueForInput(el, rawValue) {
   const type = String(el.getAttribute("type") || "text").toLowerCase();
+  return typedValueForKind(type, rawValue);
+}
+
+function typedValueForKind(kind, rawValue) {
   const wanted = String(rawValue ?? "");
-  if (type === "date") return parseDateValue(wanted);
-  if (type === "time") return parseTimeValue(wanted);
-  if (type === "month") return parseMonthValue(wanted);
-  if (type === "week") return wanted.trim();
-  if (type === "datetime-local") {
+  if (kind === "date") return parseDateValue(wanted);
+  if (kind === "time") return parseTimeValue(wanted);
+  if (kind === "month") return parseMonthValue(wanted);
+  if (kind === "week") return wanted.trim();
+  if (kind === "datetime-local") {
     const text = wanted.trim();
     if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text)) return text;
     const parts = text.split(/\s+(?:at\s+)?/i);
     if (parts.length >= 2) return `${parseDateValue(parts[0])}T${parseTimeValue(parts.slice(1).join(" "))}`;
     return text;
   }
-  if (type === "color") return parseColorValue(wanted);
+  if (kind === "color") return parseColorValue(wanted);
   return wanted;
 }
 
@@ -937,10 +1067,13 @@ function setTypedControlValue(el, rawValue) {
   const type = tag === "input" ? String(el.getAttribute("type") || "text").toLowerCase() : "";
   const supportedInputTypes = new Set(["range", "number", "date", "time", "month", "week", "datetime-local", "color"]);
   const supportedRole = role === "slider" || role === "spinbutton";
-  if (!(tag === "input" && supportedInputTypes.has(type)) && !supportedRole) return null;
+  const customKind = customValueSemanticKind(el);
+  const supportedCustomNumeric = customKind === "custom-number";
+  const supportedCustomTyped = ["date", "time", "month", "week", "datetime-local", "color"].includes(customKind);
+  if (!(tag === "input" && supportedInputTypes.has(type)) && !supportedRole && !supportedCustomNumeric && !supportedCustomTyped) return null;
 
   const wanted = String(rawValue ?? "");
-  const kind = type || role;
+  const kind = type || role || customKind;
   if (wanted.trim() === "") {
     if (type === "number") {
       setNativeValue(el, "");
@@ -950,7 +1083,7 @@ function setTypedControlValue(el, rawValue) {
     return { ok: false, kind, expected: wanted, actual: String(el.value || ""), error: kind + " value cannot be empty" };
   }
 
-  if (type === "range" || type === "number" || supportedRole) {
+  if (type === "range" || type === "number" || supportedRole || supportedCustomNumeric) {
     const numeric = Number(wanted);
     if (!Number.isFinite(numeric)) {
       return { ok: false, kind, expected: wanted, actual: String(el.value || el.getAttribute("aria-valuenow") || ""), error: "value is not numeric" };
@@ -960,16 +1093,18 @@ function setTypedControlValue(el, rawValue) {
     const max = el.getAttribute("max") ?? el.getAttribute("aria-valuemax");
     if (min !== null && min !== "" && Number.isFinite(Number(min))) next = Math.max(next, Number(min));
     if (max !== null && max !== "" && Number.isFinite(Number(max))) next = Math.min(next, Number(max));
-    if (tag === "input") {
+    if (tag === "input" || supportedCustomNumeric) {
       setNativeValue(el, String(next));
     } else {
       el.setAttribute("aria-valuenow", String(next));
+      el.setAttribute("aria-valuetext", String(next));
+      el.textContent = String(next);
       if ("value" in el) {
         try { el.value = String(next); } catch (_) {}
       }
     }
     dispatchValueEvents(el);
-    const actual = tag === "input" ? String(el.value || "") : String(el.getAttribute("aria-valuenow") || "");
+    const actual = tag === "input" || supportedCustomNumeric ? String(el.value || "") : String(el.getAttribute("aria-valuenow") || "");
     const actualNumber = Number(actual);
     const ok = Number.isFinite(actualNumber) && Math.abs(actualNumber - next) < 1e-9;
     return {
@@ -985,7 +1120,7 @@ function setTypedControlValue(el, rawValue) {
     };
   }
 
-  const next = typedValueForInput(el, wanted);
+  const next = supportedCustomTyped ? typedValueForKind(kind, wanted) : typedValueForInput(el, wanted);
   setNativeValue(el, String(next));
   dispatchValueEvents(el);
   const actual = String(el.value || "");
@@ -1299,21 +1434,87 @@ pub async fn perform_selector_action(
       }}
       case "set_checked": {{
         const desired = !!options.checked;
+        let before = null;
+        let actual = null;
+        let mode = null;
+        let peerChanges = 0;
+        function customCheckable(node) {{
+          if (!node || !node.tagName || !("checked" in node)) return false;
+          if (!node.tagName.toLowerCase().includes("-")) return false;
+          return typeof node.checked === "boolean";
+        }}
+        function checkedRole(node) {{
+          return String((node && node.getAttribute && node.getAttribute("role")) || inferRole(node) || "").toLowerCase();
+        }}
+        function checkedState(node) {{
+          if ("checked" in node) return !!node.checked;
+          return String(node.getAttribute("aria-checked") || node.getAttribute("aria-pressed") || "false").toLowerCase() === "true";
+        }}
+        function assignChecked(node, next) {{
+          if ("checked" in node) {{
+            node.checked = next;
+          }} else if (node.hasAttribute("aria-pressed")) {{
+            node.setAttribute("aria-pressed", String(next));
+          }} else {{
+            node.setAttribute("aria-checked", String(next));
+          }}
+          node.dispatchEvent(new Event("change", {{ bubbles: true, composed: true }}));
+          node.dispatchEvent(new Event("input", {{ bubbles: true, composed: true }}));
+        }}
+        function exclusiveGroupFor(node, role) {{
+          return node.closest("[role=radiogroup], [role=group], [role=menu], [role=menubar], form") ||
+            (node.getRootNode && node.getRootNode().host && node.getRootNode().host) ||
+            node.parentElement;
+        }}
+        function isExclusiveChoice(node, role, group) {{
+          const type = node && node.tagName && node.tagName.toLowerCase() === "input"
+            ? String(node.type || "").toLowerCase()
+            : "";
+          const groupRole = group && group.getAttribute ? String(group.getAttribute("role") || "").toLowerCase() : "";
+          return type === "radio" ||
+            role === "radio" ||
+            role === "menuitemradio" ||
+            (customCheckable(node) && ["radiogroup", "menu", "menubar"].includes(groupRole));
+        }}
+        function uncheckExclusivePeers(node) {{
+          const role = checkedRole(node);
+          const group = exclusiveGroupFor(node, role);
+          if (!group || !isExclusiveChoice(node, role, group)) return 0;
+          const candidates = group.querySelectorAll
+            ? Array.from(group.querySelectorAll('input[type=radio], [role=radio], [role=menuitemradio], *'))
+            : [];
+          let changed = 0;
+          for (const peer of candidates) {{
+            if (peer === node || !isExclusiveChoice(peer, checkedRole(peer), group)) continue;
+            if (!checkedState(peer)) continue;
+            assignChecked(peer, false);
+            changed += 1;
+          }}
+          return changed;
+        }}
         if ("checked" in el) {{
-          el.checked = desired;
-          el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-          el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+          before = !!el.checked;
+          assignChecked(el, desired);
+          if (desired) peerChanges = uncheckExclusivePeers(el);
+          actual = !!el.checked;
+          mode = "native";
         }} else {{
           const role = String(el.getAttribute("role") || "").toLowerCase();
-          if (!["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"].includes(role)) {{
+          const pressedToggle = el.hasAttribute("aria-pressed");
+          if (!pressedToggle && !["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"].includes(role)) {{
             throw new Error("element does not support checked state");
           }}
-          const before = String(el.getAttribute("aria-checked") || "false").toLowerCase() === "true";
+          const stateAttribute = pressedToggle ? "aria-pressed" : "aria-checked";
+          before = String(el.getAttribute(stateAttribute) || "false").toLowerCase() === "true";
           if (before !== desired && typeof el.click === "function") el.click();
-          el.setAttribute("aria-checked", String(desired));
-          el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-          el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+          if (!pressedToggle && desired && ["radio", "menuitemradio"].includes(role)) {{
+            peerChanges = uncheckExclusivePeers(el);
+          }}
+          assignChecked(el, desired);
+          actual = String(el.getAttribute(stateAttribute) || "false").toLowerCase() === "true";
+          mode = pressedToggle ? "pressed" : (role || "aria");
         }}
+        target.checkedResult = {{ ok: actual === desired, before, desired, actual, mode, changed: before !== actual, peerChanges }};
         break;
       }}
       default:
@@ -1329,6 +1530,7 @@ pub async fn perform_selector_action(
       fill: target.fillResult || null,
       selection: target.selection || null,
       valueResult: target.valueResult || null,
+      checkedResult: target.checkedResult || null,
       boundaries: resolved.boundaries || [],
     }});
   }}
@@ -1341,6 +1543,7 @@ pub async fn perform_selector_action(
     fill: target.fillResult || null,
     selection: target.selection || null,
     valueResult: target.valueResult || null,
+    checkedResult: target.checkedResult || null,
     center: actionability.absolute || absoluteCenter(context, el),
     boundaries: resolved.boundaries || [],
   }});

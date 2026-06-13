@@ -164,6 +164,7 @@ pub(crate) async fn set_default_viewport(page: &Page) {
 /// - Spoofs realistic navigator properties, hardware, locale, plugins
 /// - Clears webdriver flag and automation-controlled hints
 /// - Sets matching Client Hints via emulation (best effort)
+///
 /// This keeps the rest of the daemon (handlers using Page) unchanged.
 async fn apply_stealth_patches(page: &Page, _config: &Config) {
     info!("[gsd-browser-daemon] applying stealth patches (UA/hardware/locale spoofing + CDP signal patches)");
@@ -786,7 +787,8 @@ async fn run_daemon(
         });
     }
 
-    if let Some(page) = daemon_state.pages.lock().unwrap().active_page() {
+    let active_page = daemon_state.pages.lock().unwrap().active_page();
+    if let Some(page) = active_page {
         let state = Arc::clone(&daemon_state);
         tokio::spawn(async move {
             let _ = handlers::session::sync_session_manifest(
@@ -810,7 +812,8 @@ async fn run_daemon(
     .await?;
 
     // Clean shutdown
-    if let Some(page) = daemon_state.pages.lock().unwrap().active_page() {
+    let active_page = daemon_state.pages.lock().unwrap().active_page();
+    if let Some(page) = active_page {
         let _ = handlers::session::sync_session_manifest(
             page.as_ref(),
             &daemon_state,
@@ -1842,7 +1845,15 @@ pub(crate) async fn dispatch_inner(
             ),
         },
         "act_instruction" => {
-            match handlers::instruction::handle_act_instruction(page, state, &req.params).await {
+            match handlers::instruction::handle_act_instruction(
+                page,
+                logs,
+                state,
+                browser,
+                &req.params,
+            )
+            .await
+            {
                 Ok(result) => DaemonResponse::success(req.id, result),
                 Err(msg) => DaemonResponse::error_with_data(
                     req.id,
