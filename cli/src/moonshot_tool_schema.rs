@@ -252,12 +252,15 @@ pub fn normalize_claude_tool_schema_for_google(schema: &Value) -> Value {
         }
     }
 
-    let mut required: HashSet<String> = HashSet::new();
+    let mut required_seen: HashSet<String> = HashSet::new();
+    let mut required_order: Vec<String> = Vec::new();
     for candidate in &object_variants {
         if let Some(req) = candidate.get("required").and_then(|r| r.as_array()) {
             for key in req {
                 if let Some(key) = key.as_str() {
-                    required.insert(key.to_string());
+                    if required_seen.insert(key.to_string()) {
+                        required_order.push(key.to_string());
+                    }
                 }
             }
         }
@@ -266,12 +269,10 @@ pub fn normalize_claude_tool_schema_for_google(schema: &Value) -> Value {
     let mut normalized = Map::new();
     normalized.insert("type".to_string(), json!("object"));
     normalized.insert("properties".to_string(), Value::Object(properties));
-    if !required.is_empty() {
-        let mut required_vec: Vec<String> = required.into_iter().collect();
-        required_vec.sort();
+    if !required_order.is_empty() {
         normalized.insert(
             "required".to_string(),
-            Value::Array(required_vec.into_iter().map(Value::String).collect()),
+            Value::Array(required_order.into_iter().map(Value::String).collect()),
         );
     }
     Value::Object(normalized)
