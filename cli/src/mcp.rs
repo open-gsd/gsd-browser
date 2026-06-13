@@ -10,6 +10,9 @@
 //! - Keep the implementation small and dependency-light for the first slice.
 //! - Make the most valuable commands available as tools on day one.
 
+use crate::moonshot_tool_schema::{
+    collect_forbidden_union_schema_paths, sanitize_tool_list_for_moonshot,
+};
 use crate::Cli;
 use axum::{
     extract::State,
@@ -498,8 +501,58 @@ mod tests {
     }
 
     #[test]
+    fn tool_list_advertises_moonshot_safe_input_schemas() {
+        let tools = sanitize_tool_list_for_moonshot(build_tool_list());
+        assert!(
+            tools.len() >= 40,
+            "expected broad MCP tool surface, got {}",
+            tools.len()
+        );
+
+        for tool in &tools {
+            let name = tool["name"]
+                .as_str()
+                .expect("tool name");
+            let input_schema = &tool["inputSchema"];
+            assert_eq!(
+                input_schema["type"], "object",
+                "{name}: root type must be object"
+            );
+            assert!(
+                collect_forbidden_union_schema_paths(input_schema, "$").is_empty(),
+                "{name}: Moonshot schema must not contain anyOf/oneOf/allOf"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_list_flattens_known_union_schemas() {
+        let tools = sanitize_tool_list_for_moonshot(build_tool_list());
+
+        let select_option = tools
+            .iter()
+            .find(|tool| tool["name"] == "browser_select_option")
+            .expect("browser_select_option should be advertised");
+        assert!(
+            collect_forbidden_union_schema_paths(&select_option["inputSchema"], "$").is_empty()
+        );
+        assert_eq!(
+            select_option["inputSchema"]["properties"]["option"]["type"],
+            "array"
+        );
+
+        let replayable = tools
+            .iter()
+            .find(|tool| tool["name"] == "browser_generate_replayable_test")
+            .expect("browser_generate_replayable_test should be advertised");
+        assert!(
+            collect_forbidden_union_schema_paths(&replayable["inputSchema"], "$").is_empty()
+        );
+    }
+
+    #[test]
     fn tool_list_includes_generic_instruction_action() {
-        let tools = build_tool_list();
+        let tools = sanitize_tool_list_for_moonshot(build_tool_list());
         let tool = tools
             .iter()
             .find(|tool| tool["name"] == "browser_act_instruction")
@@ -661,7 +714,7 @@ fn handle_request(request: &Value, cli: &Cli) -> Value {
                 "jsonrpc": jsonrpc,
                 "id": id,
                 "result": {
-                    "tools": build_tool_list()
+                    "tools": sanitize_tool_list_for_moonshot(build_tool_list())
                 }
             })
         }
