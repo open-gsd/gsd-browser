@@ -8,7 +8,7 @@ This is not "just another browser tool". It is designed for serious, auditable, 
 
 ## Current Capabilities (Massively Expanded)
 
-- **50+ tools** covering: core navigation & state, snapshot & versioned refs (core differentiator), precise ref-based interaction, semantic/intent-based actions (`browser_act` + `find_best`), advanced forms, assertions & robust waits, visual & evidence (screenshots, visual-diff, PDF), live viewer + full human collaboration (takeover, goal, step/abort, sensitive), state/auth/vault persistence, rich diagnostics (debug_bundle, console, network, timeline), structured extraction, injection scanning, full recording & evidence bundles, annotations, network mocking/blocking, device emulation, action cache for self-healing, batch/diff for complex flows, multi-page/tab & frame management, and more.
+- **50+ tools** covering: core navigation & state, snapshot & versioned refs (core differentiator), precise ref-based interaction, semantic/intent-based actions (`browser_act`, `browser_act_instruction`, and `find_best`), advanced forms, assertions & robust waits, visual & evidence (screenshots, visual-diff, PDF), live viewer + full human collaboration (takeover, goal, step/abort, sensitive), state/auth/vault persistence, rich diagnostics (debug_bundle, console, network, timeline), structured extraction, injection scanning, full recording & evidence bundles, annotations, network mocking/blocking, device emulation, action cache for self-healing, batch/diff for complex flows, multi-page/tab & frame management, and more.
 - **Resources** (gsd-browser://current-state via debug bundle, latest-snapshot [real data + refs], current-refs, active-recordings, timeline) — wired to query the live daemon.
 - **Prompts** (robust_login_flow, full_page_audit, create_evidence_bundle, autonomous_research_task, evidence_creation_workflow, debug_stuck_agent_flow) — rich executable multi-step workflows with best-practice guidance built in.
 - Powerful standardized response envelopes on every tool call: `summary`, `structured_data`, `suggested_next_actions` (high-signal hints), `evidence_refs`, plus raw fallback.
@@ -20,7 +20,7 @@ See the full current surface by connecting your MCP client to `gsd-browser mcp` 
 
 gsd-browser already has one of the richest browser automation surfaces available for agents:
 - Versioned refs (`@v1:e1`) for reliable, deterministic interaction
-- Semantic intents via `browser_act`
+- Semantic intents via `browser_act`, plus generic natural-language page planning via `browser_act_instruction`
 - Live authenticated viewer with human takeover, annotations, recordings, and step-through control
 - First-class evidence & audit (recordings, visual regression, traces, HAR, debug bundles)
 - Self-healing via action cache + find_element resilience patterns

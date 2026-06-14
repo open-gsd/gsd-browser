@@ -13,6 +13,7 @@ use crate::daemon::state::DaemonState;
 use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
 use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::input::{DispatchMouseEventType, MouseButton};
+use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::layout::Point;
 use chromiumoxide::Page;
 use gsd_browser_common::types::SettleOptions;
@@ -98,7 +99,7 @@ where
 // ── Click ──
 
 /// Handle `click` command.
-/// Params: { selector?: string, x?: f64, y?: f64 }
+/// Params: { selector?: string, x?: f64, y?: f64, button?: string, click_count?: i64 }
 pub async fn handle_click(
     page: &Page,
     state: &DaemonState,
@@ -107,6 +108,20 @@ pub async fn handle_click(
     let selector = params.get("selector").and_then(|v| v.as_str());
     let x = params.get("x").and_then(|v| v.as_f64());
     let y = params.get("y").and_then(|v| v.as_f64());
+    let button_name = params
+        .get("button")
+        .and_then(|v| v.as_str())
+        .unwrap_or("left");
+    let click_count = params
+        .get("click_count")
+        .or_else(|| params.get("clickCount"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1)
+        .clamp(1, 3);
+    let button = mouse_button(Some(button_name))?;
+    if matches!(button, MouseButton::None) {
+        return Err("click button cannot be none".to_string());
+    }
 
     match (selector, x, y) {
         (None, None, _) | (None, _, None) => {
@@ -130,8 +145,10 @@ pub async fn handle_click(
     state.narrator.sleep_lead(&probe).await;
 
     let result = match (selector, x, y) {
-        (Some(sel), _, _) => click_selector(page, state, sel).await,
-        (None, Some(cx), Some(cy)) => click_coordinates(page, cx, cy).await,
+        (Some(sel), _, _) => click_selector(page, state, sel, button_name, click_count).await,
+        (None, Some(cx), Some(cy)) => {
+            click_coordinates(page, cx, cy, button_name, click_count).await
+        }
         _ => unreachable!("click parameters are validated before narration"),
     };
     state.narrator.emit_post(&probe, &result).await;
@@ -142,8 +159,10 @@ pub(super) async fn click_selector(
     page: &Page,
     state: &DaemonState,
     selector: &str,
+    button_name: &str,
+    click_count: i64,
 ) -> Result<Value, String> {
-    debug!("click: selector={selector}");
+    debug!("click: selector={selector} button={button_name} click_count={click_count}");
 
     let resolved = inspection::resolve_selector_target(page, state, selector, true).await?;
     if !resolved
@@ -167,10 +186,12 @@ pub(super) async fn click_selector(
         .and_then(|value| value.as_f64())
         .ok_or_else(|| format!("click target has no y coordinate: {selector}"))?;
 
-    if let Err(err) = timeout(CDP_TIMEOUT, page.click(Point::new(x, y)))
-        .await
-        .map_err(|_| format!("click timed out at ({x}, {y})"))?
-    {
+    if let Err(err) = perform_mouse_click(page, x, y, button_name, click_count).await {
+        if button_name != "left" || click_count != 1 {
+            return Err(format!(
+                "click failed for {selector} with button={button_name} click_count={click_count}: {err}"
+            ));
+        }
         debug!("click: coordinate click failed ({err}), falling back to JS action");
         let fallback =
             inspection::perform_selector_action(page, state, selector, "click", &json!({}), true)
@@ -192,16 +213,23 @@ pub(super) async fn click_selector(
         "state": state,
         "settle": settle,
         "clicked": selector_action_meta(selector, &resolved),
+        "button": button_name,
+        "clickCount": click_count,
         "boundaries": resolved.get("boundaries").cloned().unwrap_or(json!([])),
     }))
 }
 
-async fn click_coordinates(page: &Page, x: f64, y: f64) -> Result<Value, String> {
-    debug!("click: coordinates=({x}, {y})");
+async fn click_coordinates(
+    page: &Page,
+    x: f64,
+    y: f64,
+    button_name: &str,
+    click_count: i64,
+) -> Result<Value, String> {
+    debug!("click: coordinates=({x}, {y}) button={button_name} click_count={click_count}");
 
-    timeout(CDP_TIMEOUT, page.click(Point::new(x, y)))
+    perform_mouse_click(page, x, y, button_name, click_count)
         .await
-        .map_err(|_| format!("click timed out at ({x}, {y})"))?
         .map_err(|e| format!("click failed at ({x}, {y}): {e}"))?;
 
     let (state, settle) = settle_and_capture(page).await;
@@ -209,7 +237,70 @@ async fn click_coordinates(page: &Page, x: f64, y: f64) -> Result<Value, String>
         "state": state,
         "settle": settle,
         "clicked": { "x": x, "y": y },
+        "button": button_name,
+        "clickCount": click_count,
     }))
+}
+
+async fn perform_mouse_click(
+    page: &Page,
+    x: f64,
+    y: f64,
+    button_name: &str,
+    click_count: i64,
+) -> Result<(), String> {
+    if button_name == "left" && click_count == 1 {
+        timeout(CDP_TIMEOUT, page.click(Point::new(x, y)))
+            .await
+            .map_err(|_| format!("click timed out at ({x}, {y})"))?
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let button = mouse_button(Some(button_name))?;
+    let button_mask = mouse_buttons_mask_for_button(&button);
+    dispatch_mouse(
+        page,
+        DispatchMouseEventType::MouseMoved,
+        x,
+        y,
+        MouseButton::None,
+        0,
+        0,
+        0,
+        None,
+        None,
+    )
+    .await?;
+    for count in 1..=click_count {
+        dispatch_mouse(
+            page,
+            DispatchMouseEventType::MousePressed,
+            x,
+            y,
+            button.clone(),
+            button_mask,
+            count,
+            0,
+            None,
+            None,
+        )
+        .await?;
+        dispatch_mouse(
+            page,
+            DispatchMouseEventType::MouseReleased,
+            x,
+            y,
+            button.clone(),
+            0,
+            count,
+            0,
+            None,
+            None,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 // ── Type ──
@@ -280,6 +371,24 @@ pub async fn handle_type_text(
                     &format!("type failed for {selector}"),
                 ));
             }
+            let actual = action_result
+                .get("fill")
+                .and_then(|value| value.get("actual"))
+                .or_else(|| action_result.get("valueResult").and_then(|value| value.get("actual")))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let method = action_result
+                .get("fill")
+                .and_then(|value| value.get("method"))
+                .or_else(|| action_result.get("valueResult").and_then(|value| value.get("method")))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let kind = action_result
+                .get("fill")
+                .and_then(|value| value.get("kind"))
+                .or_else(|| action_result.get("valueResult").and_then(|value| value.get("kind")))
+                .cloned()
+                .unwrap_or(Value::Null);
 
             let (state, settle) = settle_and_capture(page).await;
             Ok(json!({
@@ -292,9 +401,10 @@ pub async fn handle_type_text(
                     "submitted": submit,
                     "frameLabel": action_result.get("target").and_then(|value| value.get("frameLabel")).cloned().unwrap_or(Value::Null),
                     "frameUrl": action_result.get("target").and_then(|value| value.get("frameUrl")).cloned().unwrap_or(Value::Null),
-                    "actual": action_result.get("fill").and_then(|value| value.get("actual")).cloned().unwrap_or(Value::Null),
-                    "method": action_result.get("fill").and_then(|value| value.get("method")).cloned().unwrap_or(Value::Null),
-                    "kind": action_result.get("fill").and_then(|value| value.get("kind")).cloned().unwrap_or(Value::Null),
+                    "actual": actual,
+                    "method": method,
+                    "kind": kind,
+                    "fill": action_result.get("fill").cloned().unwrap_or(Value::Null),
                     "valueResult": action_result.get("valueResult").cloned().unwrap_or(Value::Null),
                     "actionability": action_result.get("actionability").cloned().unwrap_or(Value::Null),
                 },
@@ -359,7 +469,7 @@ async fn press_combo(page: &Page, combo: &str) -> Result<(), String> {
     }
 
     // Build JS that dispatches keydown for each modifier, then the final key, then keyup in reverse
-    let modifiers: Vec<&str> = parts[..parts.len() - 1].iter().copied().collect();
+    let modifiers: Vec<&str> = parts[..parts.len() - 1].to_vec();
     let final_key = parts[parts.len() - 1];
 
     let modifier_flags: Vec<String> = modifiers
@@ -692,6 +802,7 @@ pub async fn handle_set_checked(
                 "checked": {
                     "selector": selector,
                     "value": checked,
+                    "result": action_result.get("checkedResult").cloned().unwrap_or(Value::Null),
                     "frameLabel": action_result.get("target").and_then(|value| value.get("frameLabel")).cloned().unwrap_or(Value::Null),
                     "frameUrl": action_result.get("target").and_then(|value| value.get("frameUrl")).cloned().unwrap_or(Value::Null),
                 },
@@ -790,7 +901,7 @@ pub async fn handle_drag(
                     to_y.unwrap(),
                 )
             } else {
-                element_centers(page, source_sel.unwrap(), target_sel.unwrap()).await?
+                element_centers(page, state, source_sel.unwrap(), target_sel.unwrap()).await?
             };
 
             let button = mouse_button(Some(&button_name))?;
@@ -882,48 +993,53 @@ pub async fn handle_drag(
 
 async fn element_centers(
     page: &Page,
+    state: &DaemonState,
     source_sel: &str,
     target_sel: &str,
 ) -> Result<(f64, f64, f64, f64), String> {
-    let centers_js = format!(
-        r#"(() => {{
-            const src = document.querySelector({src_json});
-            const tgt = document.querySelector({tgt_json});
-            if (!src) throw new Error('source element not found: ' + {src_json});
-            if (!tgt) throw new Error('target element not found: ' + {tgt_json});
-            const sr = src.getBoundingClientRect();
-            const tr = tgt.getBoundingClientRect();
-            return {{
-                sx: sr.x + sr.width / 2,
-                sy: sr.y + sr.height / 2,
-                tx: tr.x + tr.width / 2,
-                ty: tr.y + tr.height / 2,
-            }};
-        }})()"#,
-        src_json = serde_json::to_string(source_sel).unwrap(),
-        tgt_json = serde_json::to_string(target_sel).unwrap()
-    );
+    let source = inspection::resolve_selector_target(page, state, source_sel, true).await?;
+    if !source
+        .get("ok")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(selector_action_error(
+            &source,
+            &format!("drag source element not found: {source_sel}"),
+        ));
+    }
+    let target = inspection::resolve_selector_target(page, state, target_sel, true).await?;
+    if !target
+        .get("ok")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(selector_action_error(
+            &target,
+            &format!("drag target element not found: {target_sel}"),
+        ));
+    }
 
-    let result = timeout(ELEMENT_TIMEOUT, page.evaluate_expression(&centers_js))
-        .await
-        .map_err(|_| "drag: timed out getting element centers".to_string())?
-        .map_err(|e| format!("drag: failed to get element centers: {e}"))?;
-
-    let centers = result.value().cloned().unwrap_or(json!({}));
-    let sx = centers
+    let source_center = source.get("center").cloned().unwrap_or_else(|| json!({}));
+    let target_center = target.get("center").cloned().unwrap_or_else(|| json!({}));
+    let sx = source_center
         .get("sx")
+        .or_else(|| source_center.get("x"))
         .and_then(|v| v.as_f64())
         .ok_or("drag: could not get source x")?;
-    let sy = centers
+    let sy = source_center
         .get("sy")
+        .or_else(|| source_center.get("y"))
         .and_then(|v| v.as_f64())
         .ok_or("drag: could not get source y")?;
-    let tx = centers
+    let tx = target_center
         .get("tx")
+        .or_else(|| target_center.get("x"))
         .and_then(|v| v.as_f64())
         .ok_or("drag: could not get target x")?;
-    let ty = centers
+    let ty = target_center
         .get("ty")
+        .or_else(|| target_center.get("y"))
         .and_then(|v| v.as_f64())
         .ok_or("drag: could not get target y")?;
     Ok((sx, sy, tx, ty))
@@ -1009,14 +1125,130 @@ pub async fn handle_upload_file(
         Some(selector),
         Some(selector),
         || async {
-            let element = timeout(ELEMENT_TIMEOUT, page.find_element(selector))
+            let lookup_js = format!(
+                r#"(() => {{
+  const selector = {selector_json};
+  function roots(start) {{
+    const out = [];
+    const seen = new Set();
+    function add(root) {{
+      if (!root || seen.has(root)) return;
+      seen.add(root);
+      out.push(root);
+      if (root.shadowRoot) add(root.shadowRoot);
+      if (root.tagName && root.tagName.toLowerCase() === 'iframe') {{
+        try {{
+          if (root.contentDocument) add(root.contentDocument);
+        }} catch (_) {{}}
+      }}
+      const tree = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
+      for (const el of tree) {{
+        if (el.shadowRoot) add(el.shadowRoot);
+        if (el.tagName && el.tagName.toLowerCase() === 'iframe') {{
+          try {{
+            if (el.contentDocument) add(el.contentDocument);
+          }} catch (_) {{}}
+        }}
+      }}
+    }}
+    add(start);
+    return out;
+  }}
+  function visible(el) {{
+    const style = getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' && (rect.width > 0 || rect.height > 0);
+  }}
+  const matches = [];
+  for (const root of roots(document)) {{
+    let found = [];
+    try {{
+      found = Array.from(root.querySelectorAll(selector));
+    }} catch (err) {{
+      throw new Error('invalid selector: ' + err.message);
+    }}
+    for (const el of found) {{
+      if (matches.includes(el)) continue;
+      matches.push(el);
+    }}
+  }}
+  function fileInput(el) {{
+    return el && el.tagName && el.tagName.toLowerCase() === 'input' && String(el.type || '').toLowerCase() === 'file';
+  }}
+  function byIdNear(el, id) {{
+    const cleanId = String(id || '').replace(/^#/, '');
+    if (!cleanId) return null;
+    const root = el && el.getRootNode && el.getRootNode();
+    return (root && root.getElementById && root.getElementById(cleanId)) || document.getElementById(cleanId);
+  }}
+  function collectFileInputs(el) {{
+    const out = [];
+    const add = candidate => {{
+      if (fileInput(candidate) && !out.includes(candidate)) out.push(candidate);
+    }};
+    add(el);
+    if (el && el.querySelectorAll) {{
+      for (const input of Array.from(el.querySelectorAll('input[type=file]'))) add(input);
+    }}
+    const ids = [
+      el && el.getAttribute && el.getAttribute('for'),
+      el && el.getAttribute && el.getAttribute('aria-controls'),
+      el && el.getAttribute && el.getAttribute('aria-owns')
+    ].filter(Boolean).join(' ');
+    for (const id of ids.split(/\s+/).filter(Boolean)) add(byIdNear(el, id));
+    const label = el && el.closest && el.closest('label');
+    if (label) {{
+      const labeled = label.getAttribute('for') ? byIdNear(label, label.getAttribute('for')) : null;
+      add(labeled);
+      if (label.querySelectorAll) for (const input of Array.from(label.querySelectorAll('input[type=file]'))) add(input);
+    }}
+    for (const sibling of [el && el.previousElementSibling, el && el.nextElementSibling]) {{
+      add(sibling);
+      if (sibling && sibling.querySelectorAll) {{
+        for (const input of Array.from(sibling.querySelectorAll('input[type=file]'))) add(input);
+      }}
+    }}
+    const parent = el && el.parentElement;
+    if (parent && parent.querySelectorAll) {{
+      for (const input of Array.from(parent.querySelectorAll('input[type=file]'))) add(input);
+    }}
+    return out;
+  }}
+  const fileInputs = [];
+  for (const match of matches) {{
+    for (const input of collectFileInputs(match)) {{
+      if (!fileInputs.includes(input)) fileInputs.push(input);
+    }}
+  }}
+  if (!fileInputs.length) throw new Error('file input not found: ' + selector);
+  return fileInputs.find(el => visible(el) && !el.disabled) || fileInputs[0];
+}})()"#,
+                selector_json = serde_json::to_string(selector).unwrap()
+            );
+            let eval_params = EvaluateParams::builder()
+                .expression(lookup_js)
+                .await_promise(true)
+                .return_by_value(false)
+                .build()
+                .map_err(|e| format!("upload_file: failed to build lookup: {e}"))?;
+            let resolved = timeout(ELEMENT_TIMEOUT, page.evaluate_expression(eval_params))
                 .await
                 .map_err(|_| format!("upload_file: timed out finding element: {selector}"))?
-                .map_err(|e| format!("element not found: {selector} ({e})"))?;
+                .map_err(|e| {
+                    format!(
+                        "element not found: {selector} ({})",
+                        super::clean_cdp_error(&e)
+                    )
+                })?;
+            let object_id = resolved
+                .object()
+                .object_id
+                .clone()
+                .ok_or_else(|| format!("upload_file: resolved target has no object id: {selector}"))?;
 
             let set_files_params = SetFileInputFilesParams::builder()
                 .files(file_paths.iter().map(|s| s.as_str()))
-                .backend_node_id(element.backend_node_id)
+                .object_id(object_id)
                 .build()
                 .map_err(|e| format!("upload_file: failed to build params: {e}"))?;
 

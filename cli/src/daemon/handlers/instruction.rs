@@ -1,64 +1,57 @@
 //! Natural-language instruction planning for generic browser actions.
 //!
-//! This module intentionally avoids benchmark- or site-specific task names. It
-//! translates short user instructions into existing primitive handlers by
-//! combining verb classification with live DOM affordances.
+//! This module intentionally avoids task- or site-specific names. It translates
+//! short user instructions into existing primitive handlers by combining verb
+//! classification with live DOM affordances.
+
+mod action_runtime;
+mod model;
+mod page_model;
+mod parser;
+mod planner;
+mod planner_js;
+mod verification;
+mod workflow_runtime;
 
 use crate::daemon::capture::capture_compact_page_state;
 use crate::daemon::handlers;
+use crate::daemon::logs::DaemonLogs;
 use crate::daemon::state::DaemonState;
-use chromiumoxide::Page;
+use action_runtime::{
+    handle_autocomplete_select, handle_click_ordered_values, handle_command_surface_action,
+    handle_conditional_value_action, handle_derive_and_act, handle_discover_click,
+    handle_draw_path, handle_feedback_loop_value, handle_focus_element, handle_format_text,
+    handle_generate_constrained_value, handle_orient_visual, handle_read_text,
+    handle_record_property_click, handle_scoped_menu_click, handle_scroll_element,
+    handle_scroll_text_extract, handle_select_menu_path, handle_select_text,
+    handle_set_checkbox_grid, handle_set_slider, handle_tree_search_click,
+    handle_visual_feedback_search,
+};
+use chromiumoxide::{Browser, Page};
+use model::InstructionKind;
+use page_model::capture_instruction_page_model;
+use parser::{analyze_instruction, build_intent};
+use planner::build_plan;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
+use tokio::sync::Mutex;
+use tokio::time::sleep;
+use verification::verify_action_effect;
+use workflow_runtime::{handle_date_picker, handle_form_workflow, handle_scoped_item_workflow};
 
 const PLAN_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_STEPS: usize = 8;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InstructionKind {
-    Click,
-    Fill,
-    SelectOption,
-    SetChecked,
-    Count,
-    Drag,
-    Scroll,
-    Unknown,
-}
-
-impl InstructionKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Click => "click",
-            Self::Fill => "fill",
-            Self::SelectOption => "select_option",
-            Self::SetChecked => "set_checked",
-            Self::Count => "count",
-            Self::Drag => "drag",
-            Self::Scroll => "scroll",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct InstructionAnalysis {
-    kind: InstructionKind,
-    value: Option<String>,
-    target_hint: Option<String>,
-    secondary_hint: Option<String>,
-    checked: Option<bool>,
-    direction: Option<String>,
-}
 
 /// Handle `act_instruction`.
 ///
 /// Params: { instruction: string, dry_run?: bool, scope?: string,
 /// min_confidence?: number, max_steps?: number }
 pub async fn handle_act_instruction(
-    page: &Page,
+    _page: &Page,
+    logs: &DaemonLogs,
     state: &DaemonState,
+    browser: &Arc<Mutex<Browser>>,
     params: &Value,
 ) -> Result<Value, String> {
     let instruction = params
@@ -83,19 +76,44 @@ pub async fn handle_act_instruction(
         .unwrap_or(DEFAULT_MAX_STEPS);
 
     let analysis = analyze_instruction(instruction);
+    let intent = build_intent(instruction, &analysis);
     if analysis.kind == InstructionKind::Unknown {
         return Err(format!(
             "act_instruction: could not infer a generic browser action from instruction: {instruction}"
         ));
     }
 
-    let plan = build_plan(page, instruction, &analysis, scope).await?;
+    let mut active_page = state
+        .pages
+        .lock()
+        .map_err(|_| "act_instruction: page registry lock poisoned".to_string())?
+        .active_page()
+        .ok_or_else(|| "act_instruction: no active page in registry".to_string())?;
+
+    let before_model = match capture_instruction_page_model_with_retry(
+        active_page.as_ref(),
+        state,
+        browser,
+        scope,
+    )
+    .await?
+    {
+        (model, Some(refreshed_page)) => {
+            active_page = refreshed_page;
+            model
+        }
+        (model, None) => model,
+    };
+    let mut plan = build_plan(active_page.as_ref(), instruction, &analysis, &intent, scope).await?;
+    annotate_plan_context(&mut plan, &before_model);
     let step_count = plan_step_count(&plan);
     if step_count > max_steps {
         return Ok(json!({
             "instruction": instruction,
-            "analysis": analysis_to_json(&analysis),
+            "analysis": analysis.to_json(),
+            "intent": intent.to_json(),
             "plan": plan,
+            "pageModel": before_model,
             "blocked": true,
             "blockReason": "max_steps_exceeded",
             "message": format!("act_instruction planned {step_count} steps, above max_steps={max_steps}; rerun with dry_run, a narrower scope, or a higher max_steps if this is intended"),
@@ -107,8 +125,10 @@ pub async fn handle_act_instruction(
         if confidence < min_confidence {
             return Ok(json!({
                 "instruction": instruction,
-                "analysis": analysis_to_json(&analysis),
+                "analysis": analysis.to_json(),
+                "intent": intent.to_json(),
                 "plan": plan,
+                "pageModel": before_model,
                 "blocked": true,
                 "blockReason": "confidence_below_threshold",
                 "message": format!("act_instruction confidence {confidence:.3} is below min_confidence={min_confidence:.3}; inspect the plan or lower the threshold to execute"),
@@ -119,38 +139,101 @@ pub async fn handle_act_instruction(
     if dry_run {
         return Ok(json!({
             "instruction": instruction,
-            "analysis": analysis_to_json(&analysis),
+            "analysis": analysis.to_json(),
+            "intent": intent.to_json(),
             "plan": plan,
+            "pageModel": before_model,
             "dryRun": true,
         }));
     }
 
-    let action = plan
-        .get("action")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "act_instruction: planner returned no action".to_string())?;
-
-    let result = if action == "sequence" {
-        let steps = plan
-            .get("steps")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| "act_instruction: sequence plan has no steps".to_string())?;
-        let mut results = Vec::with_capacity(steps.len());
-        for step in steps {
-            results.push(dispatch_planned_action(page, state, step).await?);
+    let (executed_plan, result, fallback_attempts) =
+        execute_planned_action_with_fallbacks(active_page.as_ref(), logs, state, &plan).await?;
+    plan = executed_plan;
+    let after_model = match capture_instruction_page_model_with_retry(
+        active_page.as_ref(),
+        state,
+        browser,
+        scope,
+    )
+    .await?
+    {
+        (model, Some(refreshed_page)) => {
+            active_page = refreshed_page;
+            model
         }
-        json!({ "steps": results })
-    } else {
-        dispatch_planned_action(page, state, &plan).await?
+        (model, None) => model,
     };
+    let verification = verify_action_effect(
+        instruction,
+        &analysis,
+        &plan,
+        &before_model,
+        &after_model,
+        &result,
+    );
 
-    Ok(json!({
+    let mut response = json!({
         "instruction": instruction,
-        "analysis": analysis_to_json(&analysis),
+        "analysis": analysis.to_json(),
+        "intent": intent.to_json(),
         "plan": plan,
         "result": result,
-        "state": capture_compact_page_state(page, false).await,
-    }))
+        "verification": verification,
+        "pageModel": {
+            "before": before_model,
+            "after": after_model,
+        },
+        "state": capture_compact_page_state(active_page.as_ref(), false).await,
+    });
+    if let Some(fallback_attempts) = fallback_attempts {
+        if let Some(object) = response.as_object_mut() {
+            object.insert(
+                "execution".to_string(),
+                json!({ "fallbackAttempts": fallback_attempts }),
+            );
+        }
+    }
+    Ok(response)
+}
+
+async fn capture_instruction_page_model_with_retry(
+    page: &Page,
+    state: &DaemonState,
+    browser: &Arc<Mutex<Browser>>,
+    scope: Option<&str>,
+) -> Result<(Value, Option<Arc<Page>>), String> {
+    let mut last_error = None;
+    let mut refreshed_page: Option<Arc<Page>> = None;
+    for attempt in 0..3 {
+        let current_page: &Page = match refreshed_page.as_ref() {
+            Some(page) => page.as_ref(),
+            None => page,
+        };
+        match capture_instruction_page_model(current_page, scope).await {
+            Ok(model) => return Ok((model, refreshed_page)),
+            Err(error) if is_transient_cdp_session_error(&error) && attempt < 2 => {
+                last_error = Some(error);
+                if let Ok(page) =
+                    super::pages::refresh_active_page_from_browser(browser, state).await
+                {
+                    refreshed_page = Some(page);
+                }
+                sleep(Duration::from_millis(120 * (attempt + 1) as u64)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "page model capture failed".to_string()))
+}
+
+fn is_transient_cdp_session_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("session with given id not found")
+        || lower.contains("target closed")
+        || lower.contains("target detached")
+        || lower.contains("session closed")
+        || lower.contains("receiver is gone")
 }
 
 fn plan_step_count(plan: &Value) -> usize {
@@ -170,8 +253,32 @@ fn plan_confidence(plan: &Value) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn annotate_plan_context(plan: &mut Value, page_model: &Value) {
+    let summary = page_model
+        .get("summary")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let element_count = page_model
+        .get("elements")
+        .and_then(|value| value.as_array())
+        .map(|elements| elements.len())
+        .unwrap_or(0);
+    if let Some(object) = plan.as_object_mut() {
+        object.insert(
+            "planner".to_string(),
+            json!({
+                "pageModelVersion": page_model.get("version").and_then(|value| value.as_i64()).unwrap_or(1),
+                "pageModelSummary": summary,
+                "candidateCount": element_count,
+                "strategy": "intent-page-model-candidate-score-v1",
+            }),
+        );
+    }
+}
+
 async fn dispatch_planned_action(
     page: &Page,
+    logs: &DaemonLogs,
     state: &DaemonState,
     plan: &Value,
 ) -> Result<Value, String> {
@@ -182,1490 +289,193 @@ async fn dispatch_planned_action(
     let params = plan.get("params").cloned().unwrap_or_else(|| json!({}));
     match action {
         "click" => handlers::interaction::handle_click(page, state, &params).await,
+        "focus" => handle_focus_element(page, state, &params).await,
+        "hover" => handlers::interaction::handle_hover(page, state, &params).await,
         "type" => handlers::interaction::handle_type_text(page, state, &params).await,
         "select_option" => handlers::interaction::handle_select_option(page, state, &params).await,
         "set_checked" => handlers::interaction::handle_set_checked(page, state, &params).await,
+        "upload_file" => handlers::interaction::handle_upload_file(page, state, &params).await,
+        "press" => handlers::interaction::handle_press(page, state, &params).await,
+        "set_checkbox_grid" => handle_set_checkbox_grid(page, &params).await,
         "set_slider" => handle_set_slider(page, &params).await,
-        "discover_click" => handle_discover_click(page, &params).await,
+        "autocomplete_select" => handle_autocomplete_select(page, state, &params).await,
+        "scoped_item_workflow" => handle_scoped_item_workflow(page, &params).await,
+        "scoped_menu_click" => handle_scoped_menu_click(page, &params).await,
+        "form_workflow" => handle_form_workflow(page, &params).await,
+        "date_picker" => handle_date_picker(page, &params).await,
+        "derive_and_act" => handle_derive_and_act(page, &params).await,
+        "generate_constrained_value" => handle_generate_constrained_value(page, &params).await,
+        "feedback_loop_value" => handle_feedback_loop_value(page, &params).await,
+        "conditional_value_action" => handle_conditional_value_action(page, &params).await,
+        "command_surface_action" => handle_command_surface_action(page, &params).await,
+        "discover_click" => handle_discover_click(page, state, &params).await,
+        "visual_feedback_search" => handle_visual_feedback_search(page, &params).await,
+        "tree_search_click" => handle_tree_search_click(page, &params).await,
+        "record_property_click" => handle_record_property_click(page, &params).await,
+        "click_ordered_values" => handle_click_ordered_values(page, &params).await,
+        "select_menu_path" => handle_select_menu_path(page, &params).await,
+        "select_text" => handle_select_text(page, &params).await,
+        "format_text" => handle_format_text(page, &params).await,
         "scroll_element" => handle_scroll_element(page, &params).await,
+        "scroll_text_extract" => handle_scroll_text_extract(page, &params).await,
+        "orient_visual" => handle_orient_visual(page, &params).await,
+        "draw_path" => handle_draw_path(page, &params).await,
         "drag" => handlers::interaction::handle_drag(page, state, &params).await,
         "scroll" => handlers::interaction::handle_scroll(page, state, &params).await,
+        "set_viewport" => handlers::interaction::handle_set_viewport(page, &params).await,
+        "emulate_device" => handlers::device::handle_emulate_device(page, &params).await,
+        "read_text" => handle_read_text(page, &params).await,
+        "analyze_form" => handlers::forms::handle_analyze_form(page, &params).await,
+        "accessibility_tree" => handlers::inspect::handle_accessibility_tree(page, &params).await,
+        "find" => handlers::inspect::handle_find(page, state, &params).await,
+        "navigate" => handlers::navigate::handle_navigate(page, &params, state).await,
+        "back" => handlers::navigate::handle_back(page, state).await,
+        "forward" => handlers::navigate::handle_forward(page, state).await,
+        "reload" => handlers::navigate::handle_reload(page, state).await,
+        "screenshot" => handlers::screenshot::handle_screenshot(page, &params).await,
+        "assert" => {
+            let result = handlers::assert_cmd::handle_assert(page, logs, state, &params).await?;
+            if !result
+                .get("verified")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                let summary = result
+                    .get("summary")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("assertion failed");
+                return Err(format!("act_instruction: assertion failed: {summary}"));
+            }
+            Ok(result)
+        }
+        "wait_for" => {
+            let result = handlers::wait::handle_wait_for(page, logs, state, &params).await?;
+            if !result
+                .get("met")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                let condition = result
+                    .get("condition")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                let value = result
+                    .get("value")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                return Err(format!(
+                    "act_instruction: wait_for condition '{condition}' was not met for '{value}'"
+                ));
+            }
+            Ok(result)
+        }
         other => Err(format!(
             "act_instruction: unsupported planned action: {other}"
         )),
     }
 }
 
-async fn handle_set_slider(page: &Page, params: &Value) -> Result<Value, String> {
-    let selector = params
-        .get("selector")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing required parameter: selector".to_string())?;
-    let value = params
-        .get("value")
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| "missing required parameter: value".to_string())?;
-    let selector_json = serde_json::to_string(selector).unwrap();
-    let value_json = serde_json::to_string(&value).unwrap();
-    let js = format!(
-        r#"(() => {{
-  const selector = {selector_json};
-  const desired = {value_json};
-  const el = document.querySelector(selector);
-  if (!el) return {{ ok: false, error: 'slider not found: ' + selector }};
-  if (el.matches('input[type=range]')) {{
-    el.value = String(desired);
-    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-    return {{ ok: true, selector, value: Number(el.value), mode: 'native-range' }};
-  }}
-  if (window.jQuery) {{
-    try {{
-      const jq = window.jQuery(el);
-      if (jq && jq.data && (jq.data('ui-slider') || jq.data('slider'))) {{
-        jq.slider('value', desired);
-        return {{ ok: true, selector, value: Number(jq.slider('value')), mode: 'jquery-ui' }};
-      }}
-    }} catch (error) {{
-      return {{ ok: false, error: String(error && error.message || error) }};
-    }}
-  }}
-  if (el.getAttribute('role') === 'slider') {{
-    el.setAttribute('aria-valuenow', String(desired));
-    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-    return {{ ok: true, selector, value: desired, mode: 'aria' }};
-  }}
-  return {{ ok: false, error: 'matched element is not a supported slider' }};
-}})()"#
-    );
-    let result = timeout(PLAN_TIMEOUT, page.evaluate_expression(&js))
-        .await
-        .map_err(|_| "set_slider timed out".to_string())?
-        .map_err(|e| format!("set_slider failed: {}", super::clean_cdp_error(&e)))?;
-    let value = result.value().cloned().unwrap_or_else(|| json!({}));
-    if value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        Ok(json!({
-            "slider": value,
-            "state": capture_compact_page_state(page, false).await,
-        }))
-    } else {
-        Err(value
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("set_slider failed")
-            .to_string())
-    }
-}
-
-async fn handle_scroll_element(page: &Page, params: &Value) -> Result<Value, String> {
-    let selector = params
-        .get("selector")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing required parameter: selector".to_string())?;
-    let selector_json = serde_json::to_string(selector).unwrap();
-    let js = format!(
-        r#"(() => {{
-  const el = document.querySelector({selector_json});
-  if (!el) return {{ ok: false, error: 'scroll_element target not found' }};
-  el.scrollTop = el.scrollHeight;
-  el.dispatchEvent(new Event('scroll', {{ bubbles: true }}));
-  return {{ ok: true, selector: {selector_json}, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight }};
-}})()"#
-    );
-    let result = timeout(PLAN_TIMEOUT, page.evaluate_expression(&js))
-        .await
-        .map_err(|_| "scroll_element timed out".to_string())?
-        .map_err(|e| format!("scroll_element failed: {}", super::clean_cdp_error(&e)))?;
-    let value = result.value().cloned().unwrap_or_else(|| json!({}));
-    if value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        Ok(json!({
-            "scrollElement": value,
-            "state": capture_compact_page_state(page, false).await,
-        }))
-    } else {
-        Err(value
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("scroll_element failed")
-            .to_string())
-    }
-}
-
-async fn handle_discover_click(page: &Page, params: &Value) -> Result<Value, String> {
-    let target = params
-        .get("target")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing required parameter: target".to_string())?;
-    let target_json = serde_json::to_string(target).unwrap();
-    let js = format!(
-        r#"(async () => {{
-  const target = {target_json};
-  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-  function visible(el) {{
-    if (!el || el.hidden || el.disabled) return false;
-    const r = el.getBoundingClientRect();
-    const s = getComputedStyle(el);
-    return (r.width > 0 || r.height > 0) &&
-      s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) !== 0;
-  }}
-  function norm(text) {{
-    return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  }}
-  function textOf(el) {{
-    return [el.textContent || '', el.value || '', el.getAttribute('aria-label') || '', el.getAttribute('title') || ''].join(' ');
-  }}
-  function selector(el) {{
-    if (el.id) return '#' + CSS.escape(el.id);
-    const parts = [];
-    let node = el;
-    while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.documentElement) {{
-      let part = node.tagName.toLowerCase();
-      const parent = node.parentElement;
-      if (parent) {{
-        const siblings = Array.from(parent.children).filter(child => child.tagName === node.tagName);
-        if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')';
-      }}
-      parts.unshift(part);
-      node = parent;
-      if (parts.length >= 5) break;
-    }}
-    return parts.join(' > ');
-  }}
-  function targetClickables() {{
-    return Array.from(document.querySelectorAll('a, button, [role=link], [role=button], .alink, [onclick], [tabindex]'))
-      .filter(visible)
-      .filter(el => norm(textOf(el)).split(' ').includes(norm(target)) || norm(textOf(el)).includes(norm(target)));
-  }}
-  function discoveryControls() {{
-    return Array.from(document.querySelectorAll(
-      '[aria-expanded=false], [role=tab], [role=button], button, summary, .ui-tabs-anchor, .ui-accordion-header, [data-toggle], [data-testid*=tab], [data-testid*=section]'
-    )).filter(visible);
-  }}
-  const tried = [];
-  for (let pass = 0; pass < 2; pass++) {{
-    const direct = targetClickables()[0];
-    if (direct) {{
-      direct.click();
-      await delay(80);
-      return {{ ok: true, target, clicked: selector(direct), mode: pass === 0 ? 'direct' : 'after-discovery', tried }};
-    }}
-    for (const control of discoveryControls()) {{
-      const key = selector(control);
-      if (tried.includes(key)) continue;
-      tried.push(key);
-      control.click();
-      await delay(120);
-      const found = targetClickables()[0];
-      if (found) {{
-        found.click();
-        await delay(80);
-        return {{ ok: true, target, clicked: selector(found), discoveredBy: key, mode: 'discover-click', tried }};
-      }}
-    }}
-  }}
-  return {{ ok: false, error: 'discover_click could not reveal clickable target: ' + target, target, tried }};
-}})()"#
-    );
-    let result = timeout(PLAN_TIMEOUT, page.evaluate_expression(&js))
-        .await
-        .map_err(|_| "discover_click timed out".to_string())?
-        .map_err(|e| format!("discover_click failed: {}", super::clean_cdp_error(&e)))?;
-    let value = result.value().cloned().unwrap_or_else(|| json!({}));
-    if value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        Ok(json!({
-            "discoverClick": value,
-            "state": capture_compact_page_state(page, false).await,
-        }))
-    } else {
-        Err(value
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("discover_click failed")
-            .to_string())
-    }
-}
-
-fn analysis_to_json(analysis: &InstructionAnalysis) -> Value {
-    json!({
-        "kind": analysis.kind.as_str(),
-        "value": analysis.value,
-        "targetHint": analysis.target_hint,
-        "secondaryHint": analysis.secondary_hint,
-        "checked": analysis.checked,
-        "direction": analysis.direction,
-    })
-}
-
-fn analyze_instruction(instruction: &str) -> InstructionAnalysis {
-    let lower = instruction.to_lowercase();
-    let quoted = quoted_strings(instruction);
-    let mut value = quoted.first().cloned();
-    let mut target_hint = None;
-    let mut secondary_hint = quoted.get(1).cloned();
-    let mut checked = None;
-    let mut direction = None;
-
-    let kind = if starts_with_any(&lower, &["how many ", "count "]) || lower.contains(" how many ")
-    {
-        target_hint = trailing_hint(instruction, &["how many", "count"]);
-        InstructionKind::Count
-    } else if contains_any(&lower, &["drag ", "dragged ", "move "]) && lower.contains(" to ") {
-        target_hint = quoted.first().cloned();
-        if target_hint.is_none() || secondary_hint.is_none() {
-            let (first, second) = split_around_to(instruction);
-            target_hint = target_hint.or(first);
-            secondary_hint = secondary_hint.or(second);
-        }
-        InstructionKind::Drag
-    } else if contains_any(&lower, &["uncheck", "untick", "deselect "]) {
-        checked = Some(false);
-        target_hint = quoted
-            .first()
-            .cloned()
-            .or_else(|| trailing_hint(instruction, &["uncheck", "untick", "deselect"]));
-        InstructionKind::SetChecked
-    } else if starts_with_any(&lower, &["check ", "tick "]) {
-        checked = Some(true);
-        target_hint = quoted
-            .first()
-            .cloned()
-            .or_else(|| trailing_hint(instruction, &["check", "tick"]));
-        InstructionKind::SetChecked
-    } else if has_value_control_hint(&lower)
-        && (starts_with_any(
-            &lower,
-            &[
-                "select ", "choose ", "pick ", "set ", "move ", "use ", "enter ", "input ",
-            ],
-        ) || lower.contains(" with ")
-            || lower.contains(" using ")
-            || lower.contains(" on "))
-    {
-        let (mut parsed_value, mut parsed_target) = value_target_from_markers(
-            instruction,
-            &[
-                "select", "choose", "pick", "set", "move", "use", "enter", "input",
-            ],
-            &[
-                " with ", " using ", " on ", " into ", " in ", " to ", " as ",
-            ],
-        );
-        let parsed_value_is_control = parsed_value
-            .as_deref()
-            .map(|text| has_value_control_hint(&text.to_lowercase()))
-            .unwrap_or(false);
-        if parsed_value_is_control && parsed_target.is_some() {
-            std::mem::swap(&mut parsed_value, &mut parsed_target);
-        }
-        let numeric = first_number(instruction);
-        let fallback_control_hint = value_control_hint(instruction);
-        let numeric_control = parsed_target
-            .as_deref()
-            .or(fallback_control_hint.as_deref())
-            .map(|text| {
-                let text = text.to_lowercase();
-                contains_any(
-                    &text,
-                    &[
-                        "slider",
-                        "range",
-                        "spinner",
-                        "spinbutton",
-                        "stepper",
-                        "number",
-                        "numeric",
-                    ],
-                )
-            })
-            .unwrap_or(false);
-        let parsed_value_has_digit = parsed_value
-            .as_deref()
-            .map(|text| text.chars().any(|ch| ch.is_ascii_digit()))
-            .unwrap_or(false);
-        let parsed_value = if (numeric_control || !parsed_value_has_digit) && numeric.is_some() {
-            numeric
-        } else {
-            parsed_value
-        };
-        value = value.or(parsed_value);
-        target_hint = parsed_target.or(fallback_control_hint);
-        InstructionKind::Fill
-    } else if starts_with_any(
-        &lower,
-        &["select ", "choose ", "pick ", "set dropdown", "set option"],
-    ) || lower.contains(" dropdown")
-        || lower.contains(" option")
-    {
-        let (parsed_value, parsed_target) = value_target_from_markers(
-            instruction,
-            &["select", "choose", "pick"],
-            &[" from ", " in ", " for "],
-        );
-        value = value.or(parsed_value);
-        target_hint = parsed_target;
-        InstructionKind::SelectOption
-    } else if starts_with_any(
-        &lower,
-        &["type ", "enter ", "fill ", "input ", "write ", "search "],
-    ) || contains_any(&lower, &[" into ", " in the field", " in field"])
-        || (lower.contains("enter ") && !quoted.is_empty())
-    {
-        let (parsed_value, parsed_target) = value_target_from_markers(
-            instruction,
-            &["type", "enter", "fill", "input", "write", "search"],
-            &[" into ", " in ", " to "],
-        );
-        value = value.or(parsed_value);
-        target_hint = field_hint(instruction).or(parsed_target);
-        InstructionKind::Fill
-    } else if lower.contains("scroll") {
-        direction = if lower.contains("up") {
-            Some("up".to_string())
-        } else {
-            Some("down".to_string())
-        };
-        InstructionKind::Scroll
-    } else if starts_with_any(
-        &lower,
-        &[
-            "click ", "press ", "tap ", "open ", "submit", "continue", "confirm", "save", "done",
-            "next", "buy ", "expand ", "switch ",
-        ],
-    ) || lower.contains(" click ")
-        || lower.contains(" press ")
-        || lower.contains(" tap ")
-    {
-        target_hint = quoted
-            .first()
-            .cloned()
-            .or_else(|| trailing_hint(instruction, &["click", "press", "tap", "open", "buy"]));
-        InstructionKind::Click
-    } else {
-        InstructionKind::Unknown
-    };
-
-    InstructionAnalysis {
-        kind,
-        value: clean_hint(value),
-        target_hint: clean_hint(target_hint),
-        secondary_hint: clean_hint(secondary_hint),
-        checked,
-        direction,
-    }
-}
-
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
-}
-
-fn starts_with_any(haystack: &str, prefixes: &[&str]) -> bool {
-    prefixes.iter().any(|prefix| haystack.starts_with(prefix))
-}
-
-fn has_value_control_hint(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &[
-            "slider",
-            "range",
-            "spinner",
-            "spinbutton",
-            "stepper",
-            "number",
-            "numeric",
-            "date",
-            "time",
-            "month",
-            "week",
-            "color",
-            "colour",
-            "datetime",
-        ],
-    )
-}
-
-fn value_control_hint(input: &str) -> Option<String> {
-    let lower = input.to_lowercase();
-    for word in [
-        "slider",
-        "range",
-        "spinner",
-        "spinbutton",
-        "stepper",
-        "number",
-        "numeric",
-        "date",
-        "time",
-        "month",
-        "week",
-        "color",
-        "colour",
-        "datetime",
-    ] {
-        if lower.contains(word) {
-            return Some(word.to_string());
-        }
-    }
-    None
-}
-
-fn first_number(input: &str) -> Option<String> {
-    let mut current = String::new();
-    let mut started = false;
-    let mut seen_digit = false;
-    for ch in input.chars() {
-        if ch.is_ascii_digit() || (ch == '-' && !started) || (ch == '.' && started) {
-            current.push(ch);
-            started = true;
-            if ch.is_ascii_digit() {
-                seen_digit = true;
-            }
-        } else if started {
-            break;
-        }
-    }
-    if seen_digit {
-        Some(current)
-    } else {
-        None
-    }
-}
-
-fn quoted_strings(input: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut active = None;
-    let mut current = String::new();
-    for ch in input.chars() {
-        if ch == '"' || ch == '\'' {
-            match active {
-                Some(q) if q == ch => {
-                    if !current.trim().is_empty() {
-                        out.push(current.trim().to_string());
-                    }
-                    current.clear();
-                    active = None;
-                }
-                None => active = Some(ch),
-                _ => current.push(ch),
-            }
-        } else if active.is_some() {
-            current.push(ch);
-        }
-    }
-    out
-}
-
-fn trailing_hint(input: &str, verbs: &[&str]) -> Option<String> {
-    let lower = input.to_lowercase();
-    for verb in verbs {
-        if let Some(index) = lower.find(verb) {
-            let start = index + verb.len();
-            let hint = input[start..]
-                .trim()
-                .trim_start_matches(|ch: char| ch == ':' || ch == '-' || ch.is_whitespace())
-                .trim();
-            if !hint.is_empty() {
-                return Some(hint.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn split_around_to(input: &str) -> (Option<String>, Option<String>) {
-    let lower = input.to_lowercase();
-    if let Some(index) = lower.find(" to ") {
-        let before = input[..index]
-            .split_whitespace()
-            .skip(1)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let after = input[index + 4..].trim().to_string();
-        (clean_hint(Some(before)), clean_hint(Some(after)))
-    } else {
-        (None, None)
-    }
-}
-
-fn value_target_from_markers(
-    input: &str,
-    verbs: &[&str],
-    markers: &[&str],
-) -> (Option<String>, Option<String>) {
-    let lower = input.to_lowercase();
-    let start = verbs
-        .iter()
-        .filter_map(|verb| {
-            let index = lower.find(verb)?;
-            Some(index + verb.len())
-        })
-        .min()
-        .unwrap_or(0);
-    let tail = input[start..]
-        .trim()
-        .trim_start_matches(|ch: char| ch == ':' || ch == '-' || ch.is_whitespace())
-        .trim();
-    if tail.is_empty() {
-        return (None, None);
-    }
-
-    let tail_lower = tail.to_lowercase();
-    for marker in markers {
-        if let Some(index) = tail_lower.find(marker) {
-            let raw_value = tail[..index].trim();
-            let raw_target = tail[index + marker.len()..].trim();
-            return (
-                clean_hint(Some(raw_value.to_string())),
-                clean_hint(Some(raw_target.to_string())),
-            );
-        }
-    }
-
-    (clean_hint(Some(tail.to_string())), None)
-}
-
-fn field_hint(input: &str) -> Option<String> {
-    let lower = input.to_lowercase();
-    for marker in [" into ", " in ", " to "] {
-        if let Some(index) = lower.find(marker) {
-            let hint = input[index + marker.len()..].trim();
-            if !hint.is_empty() {
-                return Some(hint.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn clean_hint(value: Option<String>) -> Option<String> {
-    value
-        .map(|text| {
-            strip_follow_up_suffix(text.trim())
-                .trim_matches(|ch: char| {
-                    matches!(
-                        ch,
-                        '"' | '\'' | '.' | ',' | ':' | ';' | '(' | ')' | '[' | ']'
-                    )
-                })
-                .trim()
-                .to_string()
-        })
-        .filter(|text| !text.is_empty())
-}
-
-fn strip_follow_up_suffix(text: &str) -> &str {
-    let lower = text.to_lowercase();
-    for marker in [
-        " and click ",
-        " and press ",
-        " and tap ",
-        " and hit ",
-        " then click ",
-        " then press ",
-        " then tap ",
-        " then hit ",
-    ] {
-        if let Some(index) = lower.find(marker) {
-            return &text[..index];
-        }
-    }
-    text
-}
-
-async fn build_plan(
+async fn execute_plan_without_fallbacks(
     page: &Page,
-    instruction: &str,
-    analysis: &InstructionAnalysis,
-    scope: Option<&str>,
+    logs: &DaemonLogs,
+    state: &DaemonState,
+    plan: &Value,
 ) -> Result<Value, String> {
-    if analysis.kind == InstructionKind::Scroll {
-        return Ok(json!({
-            "action": "scroll",
-            "params": {
-                "direction": analysis.direction.as_deref().unwrap_or("down"),
-                "amount": 500,
-            },
-            "confidence": 0.9,
-            "reason": "instruction asks to scroll",
-        }));
-    }
-
-    let js = planner_js(instruction, analysis, scope);
-    let result = timeout(PLAN_TIMEOUT, page.evaluate_expression(&js))
-        .await
-        .map_err(|_| "act_instruction: planner timed out".to_string())?
-        .map_err(|e| {
-            format!(
-                "act_instruction: planner failed: {}",
-                super::clean_cdp_error(&e)
-            )
-        })?;
-    let plan = result.value().cloned().unwrap_or_else(|| json!({}));
-    if plan
-        .get("ok")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        Ok(plan)
+    let action = plan
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "act_instruction: planner returned no action".to_string())?;
+    if action == "sequence" {
+        let steps = plan
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "act_instruction: sequence plan has no steps".to_string())?;
+        let mut results = Vec::with_capacity(steps.len());
+        for step in steps {
+            results.push(dispatch_planned_action(page, logs, state, step).await?);
+        }
+        Ok(json!({ "steps": results }))
     } else {
-        Err(plan
-            .get("error")
-            .and_then(|value| value.as_str())
-            .unwrap_or("act_instruction: no actionable plan found")
-            .to_string())
+        dispatch_planned_action(page, logs, state, plan).await
     }
 }
 
-fn planner_js(instruction: &str, analysis: &InstructionAnalysis, scope: Option<&str>) -> String {
-    let instruction_json = serde_json::to_string(instruction).unwrap();
-    let kind_json = serde_json::to_string(analysis.kind.as_str()).unwrap();
-    let value_json = serde_json::to_string(&analysis.value).unwrap();
-    let target_json = serde_json::to_string(&analysis.target_hint).unwrap();
-    let secondary_json = serde_json::to_string(&analysis.secondary_hint).unwrap();
-    let checked_json = serde_json::to_string(&analysis.checked).unwrap();
-    let scope_json = serde_json::to_string(&scope).unwrap();
-
-    format!(
-        r#"(() => {{
-  const instruction = {instruction_json};
-  const kind = {kind_json};
-  const wantedValue = {value_json};
-  const targetHint = {target_json};
-  const secondaryHint = {secondary_json};
-  const checked = {checked_json};
-  const scopeSelector = {scope_json};
-  const root = scopeSelector ? document.querySelector(scopeSelector) : document;
-  if (!root) return {{ ok: false, error: 'act_instruction: scope not found: ' + scopeSelector }};
-
-  function visible(el) {{
-    if (!el || el.hidden || el.disabled) return false;
-    const r = el.getBoundingClientRect();
-    const s = getComputedStyle(el);
-    return (r.width > 0 || r.height > 0) &&
-      s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) !== 0;
-  }}
-  function textOf(el) {{
-    const labels = [];
-    if (el.id) {{
-      for (const label of document.querySelectorAll('label[for=' + JSON.stringify(el.id) + ']')) {{
-        labels.push(label.textContent || '');
-      }}
-    }}
-    const wrappingLabel = el.closest('label');
-    if (wrappingLabel) labels.push(wrappingLabel.textContent || '');
-    return [
-      el.textContent || '', el.value || '', el.name || '', el.placeholder || '',
-      el.getAttribute('aria-label') || '', el.getAttribute('title') || '',
-      el.getAttribute('role') || '', el.getAttribute('data-testid') || '',
-      labels.join(' ')
-    ].join(' ').trim();
-  }}
-  function tokens(text) {{
-    return String(text || '').toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 1);
-  }}
-  function tokenScore(hint, text) {{
-    const ht = tokens(hint);
-    if (!ht.length) return 0;
-    const tt = new Set(tokens(text));
-    let hits = 0;
-    for (const token of ht) if (tt.has(token)) hits++;
-    return hits / ht.length;
-  }}
-  function normalized(text) {{
-    return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  }}
-  function exactPhraseScore(hint, text) {{
-    const h = normalized(hint);
-    const t = normalized(text);
-    if (!h || !t) return 0;
-    const compactText = t.replace(/\s+/g, '');
-    for (const variant of [h, h.replace(/^(?:on|the|a|an)\s+/, '')]) {{
-      if (!variant) continue;
-      if (t === variant) return 1;
-      if (t.includes(variant)) return 0.9;
-      if (compactText.includes(variant.replace(/\s+/g, ''))) return 0.85;
-    }}
-    return 0;
-  }}
-  function selector(el) {{
-    if (el.id) return '#' + CSS.escape(el.id);
-    const testId = el.getAttribute('data-testid');
-    if (testId) return el.tagName.toLowerCase() + '[data-testid=' + JSON.stringify(testId) + ']';
-    if (el.name) {{
-      const sel = el.tagName.toLowerCase() + '[name=' + JSON.stringify(el.name) + ']';
-      if (document.querySelectorAll(sel).length === 1) return sel;
-    }}
-    const type = el.getAttribute('type');
-    if (type) {{
-      const sel = el.tagName.toLowerCase() + '[type=' + JSON.stringify(type) + ']';
-      if (document.querySelectorAll(sel).length === 1) return sel;
-    }}
-    const parts = [];
-    let node = el;
-    while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.documentElement) {{
-      let part = node.tagName.toLowerCase();
-      if (node.id) {{
-        part += '#' + CSS.escape(node.id);
-        parts.unshift(part);
-        break;
-      }}
-      const parent = node.parentElement;
-      if (parent) {{
-        const siblings = Array.from(parent.children).filter(child => child.tagName === node.tagName);
-        if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')';
-      }}
-      parts.unshift(part);
-      node = parent;
-      if (parts.length >= 5) break;
-    }}
-    return parts.join(' > ');
-  }}
-  function candidate(el) {{
-    const rect = el.getBoundingClientRect();
-    return {{
-      selector: selector(el),
-      tag: el.tagName.toLowerCase(),
-      type: (el.getAttribute('type') || '').toLowerCase() || null,
-      role: (el.getAttribute('role') || '').toLowerCase() || null,
-      text: textOf(el).slice(0, 160),
-      bounds: {{ x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }}
-    }};
-  }}
-  function best(elements, score) {{
-    const scored = [];
-    for (const el of elements) {{
-      if (!visible(el)) continue;
-      const s = score(el);
-      if (s > 0) scored.push({{ el, score: s }});
-    }}
-    scored.sort((a, b) => b.score - a.score);
-    return scored;
-  }}
-  function stripFollowUp(text) {{
-    return String(text || '')
-      .replace(/\s+(?:and|then)\s+(?:click|press|tap|hit)\s+(?:the\s+)?[^,.]+\.?$/i, '')
-      .trim();
-  }}
-  function followUpClickHint() {{
-    const match = instruction.match(/\b(?:and|then)\s+(?:click|press|tap|hit)\s+(?:the\s+)?([^,.]+)\.?$/i);
-    if (!match) return null;
-    return match[1].replace(/\b(button|link|control)\b/ig, '').trim() || match[1].trim();
-  }}
-  function transformedValue(text) {{
-    if (text == null) return text;
-    if (/all\s+upper\s+case|uppercase|upper-case/i.test(instruction)) return String(text).toUpperCase();
-    if (/all\s+lower\s+case|lowercase|lower-case/i.test(instruction)) return String(text).toLowerCase();
-    return text;
-  }}
-  function requestedItems(text) {{
-    const cleaned = stripFollowUp(text);
-    if (!cleaned || /^nothing$/i.test(cleaned)) return [];
-    return cleaned
-      .replace(/^(?:words?\s+)?(?:similar|related|synonyms?)\s+to\s+/i, '')
-      .split(/\s*,\s*|\s+\band\b\s+/i)
-      .map(item => item.trim().replace(/^(?:words?\s+)?(?:similar|related|synonyms?)\s+to\s+/i, ''))
-      .filter(Boolean);
-  }}
-  const semanticGroups = [
-    ['small', 'mini', 'tiny', 'little'],
-    ['large', 'big', 'huge'],
-    ['home', 'homes', 'house', 'houses'],
-    ['keep', 'retain', 'hold'],
-    ['start', 'begin', 'initiate'],
-    ['real', 'genuine', 'authentic'],
-    ['red', 'scarlet', 'crimson'],
-    ['calm', 'peaceful', 'quiet'],
-    ['car', 'cars', 'automobile', 'automobiles', 'vehicle', 'vehicles'],
-    ['pig', 'hog', 'swine'],
-    ['like', 'similar', 'alike'],
-    ['hide', 'conceal', 'cover'],
-    ['cut', 'scar', 'slice'],
-    ['water', 'aqua'],
-  ];
-  function semanticTokens(word) {{
-    const base = tokens(word);
-    const out = new Set(base);
-    for (const token of base) {{
-      const singular = token.endsWith('s') ? token.slice(0, -1) : token;
-      out.add(singular);
-      for (const group of semanticGroups) {{
-        if (group.includes(token) || group.includes(singular)) {{
-          for (const item of group) out.add(item);
-        }}
-      }}
-    }}
-    return out;
-  }}
-  function semanticScore(hint, text) {{
-    const ht = semanticTokens(hint);
-    if (!ht.size) return 0;
-    const tt = semanticTokens(text);
-    let hits = 0;
-    for (const token of ht) if (tt.has(token)) hits++;
-    if (hits) return hits / ht.size;
-    const plainHint = String(hint || '').toLowerCase();
-    const plainText = String(text || '').toLowerCase();
-    return plainText.includes(plainHint) ? 0.75 : 0;
-  }}
-  function relationScore(el, anchor) {{
-    if (!anchor) return 0;
-    const form = anchor.closest('form');
-    if (form && form.contains(el)) return 0.5;
-    const anchorParent = anchor.parentElement;
-    if (anchorParent && anchorParent.contains(el)) return 0.25;
-    const position = anchor.compareDocumentPosition(el);
-    if (position & Node.DOCUMENT_POSITION_FOLLOWING) return 0.15;
-    if (position & Node.DOCUMENT_POSITION_PRECEDING) return -0.05;
-    return 0;
-  }}
-  function clickStepForHint(hint, anchor = null) {{
-    if (!hint) return null;
-    const ranked = best(interactive, el => {{
-      const tag = el.tagName.toLowerCase();
-      const type = (el.getAttribute('type') || '').toLowerCase();
-      let score = Math.max(tokenScore(hint, textOf(el)), exactPhraseScore(hint, textOf(el)));
-      if (/submit|continue|confirm|save|done|next|ok/i.test(hint)) {{
-        if (type === 'submit') score += 0.5;
-        if (/submit|continue|confirm|save|done|next|ok/i.test(textOf(el))) score += 0.4;
-      }}
-      if (tag === 'button' || tag === 'a' || type === 'submit' || (el.getAttribute('role') || '').toLowerCase() === 'button') score += 0.05;
-      score += relationScore(el, anchor);
-      return score;
-    }});
-    if (!ranked.length) return null;
-    const chosen = ranked[0];
-    return {{
-      action: 'click',
-      params: {{ selector: selector(chosen.el) }},
-      confidence: Math.min(1, chosen.score),
-      reason: 'matched follow-up clickable element by instruction text',
-      candidate: candidate(chosen.el)
-    }};
-  }}
-  function withFollowUp(primary, anchor = null) {{
-    const followHint = followUpClickHint();
-    const follow = clickStepForHint(followHint, anchor);
-    if (!follow) return primary;
-    return {{
-      ok: true,
-      action: 'sequence',
-      steps: [primary, follow],
-      confidence: Math.min(primary.confidence || 0.5, follow.confidence || 0.5),
-      reason: 'planned primary action plus follow-up click from compound instruction'
-    }};
-  }}
-  function all(selectorText) {{
-    const results = Array.from(root.querySelectorAll(selectorText));
-    if (root !== document && root.matches && root.matches(selectorText)) {{
-      results.unshift(root);
-    }}
-    return results;
-  }}
-  const interactive = all(
-    'button, a, input, textarea, select, [role=button], [role=link], [role=option], [role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], [role=tab], [role=slider], [role=spinbutton], [role=textbox], [role=searchbox], [role=combobox], [role=switch], [onclick], [tabindex], [contenteditable=true], [contenteditable=""]'
-  );
-  const textInputTypes = new Set(['', 'text', 'password', 'email', 'search', 'url', 'tel', 'number', 'date', 'time', 'month', 'week', 'datetime-local', 'color', 'range']);
-  function roleOf(el) {{
-    return (el.getAttribute('role') || '').toLowerCase();
-  }}
-  function typeOf(el) {{
-    return (el.getAttribute('type') || '').toLowerCase();
-  }}
-  function isEditableElement(el) {{
-    const editable = el.getAttribute('contenteditable');
-    return el.isContentEditable || (editable !== null && editable.toLowerCase() !== 'false');
-  }}
-  function isFillableField(el) {{
-    const tag = el.tagName.toLowerCase();
-    const type = typeOf(el);
-    const role = roleOf(el);
-    return tag === 'textarea' || isEditableElement(el) ||
-      (tag === 'input' && textInputTypes.has(type)) ||
-      ['textbox', 'searchbox', 'spinbutton', 'slider'].includes(role);
-  }}
-  function isSliderControl(el) {{
-    if (typeOf(el) === 'range' || roleOf(el) === 'slider') return true;
-    try {{
-      if (!window.jQuery) return false;
-      const jq = window.jQuery(el);
-      return !!(jq && jq.data && (jq.data('ui-slider') || jq.data('slider')));
-    }} catch (_) {{
-      return false;
-    }}
-  }}
-  function controlTypeScore(hint, el) {{
-    const haystack = normalized([hint || '', instruction].join(' '));
-    const tag = el.tagName.toLowerCase();
-    const type = typeOf(el);
-    const role = roleOf(el);
-    let score = 0;
-    if (/\b(slider|range)\b/.test(haystack) && (type === 'range' || role === 'slider' || /\bslider\b/i.test(textOf(el)))) score += 0.7;
-    if (/\b(spinner|spinbutton|stepper|numeric|number)\b/.test(haystack) && (type === 'number' || role === 'spinbutton')) score += 0.7;
-    if (/\bdate\b/.test(haystack) && type === 'date') score += 0.7;
-    if (/\btime\b/.test(haystack) && type === 'time') score += 0.7;
-    if (/\bmonth\b/.test(haystack) && type === 'month') score += 0.7;
-    if (/\bweek\b/.test(haystack) && type === 'week') score += 0.7;
-    if (/\b(datetime|date time|date-time)\b/.test(haystack) && type === 'datetime-local') score += 0.7;
-    if (/\b(colou?r)\b/.test(haystack) && type === 'color') score += 0.7;
-    if (/\bsearch\b/.test(haystack) && (type === 'search' || role === 'searchbox')) score += 0.4;
-    if (/\b(text|input|field|box)\b/.test(haystack) && (tag === 'input' || tag === 'textarea' || role === 'textbox')) score += 0.2;
-    return score;
-  }}
-  function ordinalIndex(text) {{
-    const lower = String(text || '').toLowerCase();
-    const named = [
-      ['first', 0], ['1st', 0],
-      ['second', 1], ['2nd', 1],
-      ['third', 2], ['3rd', 2],
-      ['fourth', 3], ['4th', 3],
-      ['fifth', 4], ['5th', 4],
-    ];
-    for (const [word, index] of named) if (lower.includes(word)) return index;
-    const match = lower.match(/\b(\d+)(?:st|nd|rd|th)?\s+checkbox\b/);
-    if (match) return Math.max(0, Number(match[1]) - 1);
-    return null;
-  }}
-  function sliderPlan() {{
-    const valueMatch = instruction.match(/\b(?:select|set|choose|move|use|enter|input)\s+(-?\d+(?:\.\d+)?)\s+(?:with|on|using|in|into)\s+(?:the\s+)?(?:slider|range)\b/i);
-    if (!valueMatch) return null;
-    const desired = Number(valueMatch[1]);
-    const sliders = all('input[type=range], [role=slider], .ui-slider, [class*=slider]').filter(el => visible(el) && isSliderControl(el));
-    for (const el of sliders) {{
-      const minAttr = el.getAttribute('min') ?? el.getAttribute('aria-valuemin');
-      const maxAttr = el.getAttribute('max') ?? el.getAttribute('aria-valuemax');
-      let min = minAttr == null ? Number.NaN : Number(minAttr);
-      let max = maxAttr == null ? Number.NaN : Number(maxAttr);
-      let orientation = (el.getAttribute('aria-orientation') || '').toLowerCase();
-      try {{
-        if ((!Number.isFinite(min) || !Number.isFinite(max)) && window.jQuery) {{
-          const jq = window.jQuery(el);
-          if (jq && jq.data && (jq.data('ui-slider') || jq.data('slider'))) {{
-            min = Number(jq.slider('option', 'min'));
-            max = Number(jq.slider('option', 'max'));
-            orientation = String(jq.slider('option', 'orientation') || orientation).toLowerCase();
-          }}
-        }}
-      }} catch (_) {{}}
-      if (!Number.isFinite(min) || !Number.isFinite(max) || max === min) continue;
-      const rect = el.getBoundingClientRect();
-      const ratio = Math.max(0, Math.min(1, (desired - min) / (max - min)));
-      const vertical = orientation === 'vertical';
-      return {{
-        action: 'set_slider',
-        params: {{
-          selector: selector(el),
-          value: desired,
-          x: vertical ? rect.left + rect.width / 2 : rect.left + rect.width * ratio,
-          y: vertical ? rect.bottom - rect.height * ratio : rect.top + rect.height / 2
-        }},
-        confidence: 0.85,
-        reason: 'matched slider value from instruction and slider range metadata',
-        candidate: candidate(el)
-	      }};
-	    }}
-	    return null;
-	  }}
-	  function listedNumbers() {{
-    const bracket = instruction.match(/\[([^\]]+)\]/);
-    const source = bracket ? bracket[1] : '';
-    if (!source) return [];
-    return Array.from(source.matchAll(/-?\d+(?:\.\d+)?/g)).map(match => Number(match[0])).filter(Number.isFinite);
-  }}
-  function multiSliderPlan() {{
-    const values = listedNumbers();
-    if (values.length < 2 || !/\bsliders?\b/i.test(instruction)) return null;
-    const sliders = all('input[type=range], [role=slider], .ui-slider, [class*=slider]').filter(el => visible(el) && isSliderControl(el));
-    if (sliders.length < values.length) return null;
-    const steps = values.map((value, index) => ({{
-      action: 'set_slider',
-      params: {{ selector: selector(sliders[index]), value }},
-      confidence: 0.82,
-      reason: 'matched listed value to repeated slider by document order',
-      candidate: candidate(sliders[index])
-    }}));
-    const follow = clickStepForHint(followUpClickHint() || (/submit/i.test(instruction) ? 'submit' : null), sliders[values.length - 1]);
-    if (follow) steps.push(follow);
-    return {{
-      ok: true,
-      action: 'sequence',
-      steps,
-      confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
-      reason: 'planned repeated slider value sequence from listed instruction values'
-    }};
-  }}
-  function spinbuttonPlan() {{
-    const valueMatch = instruction.match(/\b(?:select|set|choose|move|use|enter|input)\s+(-?\d+(?:\.\d+)?)\s+(?:with|on|using|in|into)\s+(?:the\s+)?(?:spinner|spinbutton|stepper|number|numeric)\b/i);
-    if (!valueMatch) return null;
-    const desired = valueMatch[1];
-    const fields = all('input[type=number], [role=spinbutton]').filter(visible);
-    if (!fields.length) return null;
-    const ranked = best(fields, el => 0.4 + controlTypeScore(targetHint, el) + (targetHint ? tokenScore(targetHint, textOf(el)) * 0.4 : 0));
-    const chosen = (ranked[0] || {{ el: fields[0], score: 0.7 }});
-    return withFollowUp({{
-      ok: true,
-      action: 'type',
-      params: {{ selector: selector(chosen.el), text: desired, clear_first: true }},
-      confidence: Math.min(1, chosen.score || 0.75),
-      reason: 'matched numeric spinner or spinbutton value from instruction',
-      candidate: candidate(chosen.el)
-    }}, chosen.el);
-  }}
-  const multiSlider = multiSliderPlan();
-  if (multiSlider) return multiSlider;
-	  const directSlider = sliderPlan();
-	  if (directSlider && !/\bcheckbox\b/i.test(instruction)) {{
-	    return withFollowUp(Object.assign({{ ok: true }}, directSlider), document.querySelector(directSlider.params.selector));
-	  }}
-	  const directSpinbutton = spinbuttonPlan();
-	  if (directSpinbutton) return directSpinbutton;
-	  if (/\bslider\b/i.test(instruction) && /\bcheckbox\b/i.test(instruction)) {{
-    const steps = [];
-    const slider = sliderPlan();
-    if (slider) steps.push(slider);
-    const boxes = interactive.filter(el => {{
-      const type = (el.getAttribute('type') || '').toLowerCase();
-      const role = (el.getAttribute('role') || '').toLowerCase();
-      return type === 'checkbox' || role === 'checkbox';
-    }});
-    const index = ordinalIndex(instruction);
-    let followAnchor = null;
-    if (index != null && boxes[index]) {{
-      followAnchor = boxes[index];
-      steps.push({{
-        action: 'set_checked',
-        params: {{ selector: selector(boxes[index]), checked: true }},
-        confidence: 0.9,
-        reason: 'matched ordinal checkbox target from instruction',
-        candidate: candidate(boxes[index])
-      }});
-    }}
-    const follow = clickStepForHint(followUpClickHint(), followAnchor);
-    if (follow) steps.push(follow);
-    if (steps.length >= 2) {{
-      return {{
-        ok: true,
-        action: 'sequence',
-        steps,
-        confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
-        reason: 'planned slider, checkbox, and follow-up click sequence'
-      }};
-    }}
-  }}
-
-  function discoverClickPlan() {{
-    const target = targetHint || (instruction.match(/\blink\s+["']?([^"'.]+)["']?/i) || [])[1];
-    if (!target) return null;
-    if (!/\b(find|switch|expand|reveal|open)\b/i.test(instruction)) return null;
-    return {{
-      ok: true,
-      action: 'discover_click',
-      params: {{ target }},
-      confidence: 0.75,
-      reason: 'instruction asks to reveal content and click a target by text'
-    }};
-  }}
-  const discoveryPlan = discoverClickPlan();
-  if (discoveryPlan) return discoveryPlan;
-
-  function parseDurationSeconds(text) {{
-    const match = String(text || '').match(/(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?/i);
-    if (!match || (!match[1] && !match[2])) return null;
-    return (Number(match[1] || 0) * 3600) + (Number(match[2] || 0) * 60);
-  }}
-  function extremeClickPlan() {{
-    if (!/\b(shortest|longest|lowest|highest|smallest|largest|cheapest|most expensive)\b/i.test(instruction)) return null;
-    const wantMin = /\b(shortest|lowest|smallest|cheapest)\b/i.test(instruction);
-    const buttons = interactive.filter(el => {{
-      const tag = el.tagName.toLowerCase();
-      return tag === 'button' || tag === 'a' || (el.getAttribute('role') || '').toLowerCase() === 'button';
-    }});
-    const scored = [];
-    for (const button of buttons) {{
-      const ancestors = [];
-      let cursor = button;
-      while (cursor && cursor !== root && cursor !== document.body && ancestors.length < 6) {{
-        if (cursor.nodeType === Node.ELEMENT_NODE) ancestors.push(cursor);
-        cursor = cursor.parentElement;
-      }}
-      const container = (/\bduration\b/i.test(instruction)
-        ? ancestors.find(el => /duration/i.test(textOf(el)))
-        : null) || button.closest('tr, li, .flight, .card, .row, section, article, div') || button.parentElement;
-      if (!container) continue;
-      const text = textOf(container);
-      let metric = /duration/i.test(instruction) ? parseDurationSeconds(text) : null;
-      if (metric == null) {{
-        const numbers = Array.from(String(text).matchAll(/-?\d+(?:\.\d+)?/g)).map(m => Number(m[0]));
-        if (numbers.length) metric = numbers[0];
-      }}
-      if (metric != null && Number.isFinite(metric)) scored.push({{ button, metric }});
-    }}
-    if (!scored.length) return null;
-    scored.sort((a, b) => wantMin ? a.metric - b.metric : b.metric - a.metric);
-    const chosen = scored[0];
-    return {{
-      ok: true,
-      action: 'click',
-      params: {{ selector: selector(chosen.button) }},
-      confidence: 0.82,
-      reason: 'matched repeated item with requested extreme numeric or duration value',
-      candidate: candidate(chosen.button),
-      metric: chosen.metric
-    }};
-  }}
-  const extremePlan = extremeClickPlan();
-  if (extremePlan) return extremePlan;
-
-  function countPlan() {{
-    if (kind !== 'count') return null;
-    const textItems = all('svg text').filter(el => visible(el) || (el.textContent || '').trim()).map(el => {{
-      const size = Number.parseFloat(getComputedStyle(el).fontSize || el.getAttribute('font-size') || '0');
-      return {{ el, text: (el.textContent || '').trim(), size, fill: String(el.getAttribute('fill') || getComputedStyle(el).fill || '').toLowerCase() }};
-    }});
-    const svgItems = all('svg text, svg circle, svg rect, svg polygon, svg path, svg ellipse').filter(el => visible(el)).map(el => ({{
-      el,
-      tag: el.tagName.toLowerCase(),
-      text: (el.textContent || '').trim(),
-      fill: String(el.getAttribute('fill') || getComputedStyle(el).fill || '').toLowerCase()
-    }}));
-    let answer = null;
-    if (/\bdigits?\b/i.test(instruction)) {{
-      answer = textItems.filter(item => /^\d$/.test(item.text)).length;
-    }}
-    if (answer == null) {{
-      const colorMatch = instruction.match(/\b(red|scarlet|blue|green|yellow|magenta|purple|aqua|cyan|black|white|orange|gray|grey)\b/i);
-      if (colorMatch && /\bletters?\b/i.test(instruction)) {{
-        const color = colorMatch[1].toLowerCase();
-        answer = textItems.filter(item => /^[a-z]$/i.test(item.text) && item.fill.includes(color)).length;
-      }} else if (colorMatch && /\bitems?\b/i.test(instruction)) {{
-        const color = colorMatch[1].toLowerCase();
-        answer = svgItems.filter(item => item.fill.includes(color)).length;
-      }}
-    }}
-    if (answer == null) {{
-      const sizeMatch = instruction.match(/\b(small|large|big|tiny)\s+(?:letter\s+)?([a-z])s?\b/i);
-      const letterMatch = sizeMatch || instruction.match(/\b(?:letter\s+)?([a-z])s?\b/i);
-      if (letterMatch) {{
-        const sizeWord = sizeMatch ? sizeMatch[1].toLowerCase() : null;
-        const letter = (sizeMatch ? sizeMatch[2] : letterMatch[1]).toLowerCase();
-        const sizes = textItems.map(item => item.size).filter(Number.isFinite).sort((a, b) => a - b);
-        const median = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0;
-        answer = textItems.filter(item => {{
-          if (item.text.toLowerCase() !== letter) return false;
-          if (!sizeWord) return true;
-          if (sizeWord === 'small' || sizeWord === 'tiny') return !item.size || item.size <= median;
-          return item.size >= median;
-        }}).length;
-      }}
-    }}
-    if (answer == null && /\b(circles?|rectangles?|squares?|triangles?|polygons?)\b/i.test(instruction)) {{
-      const tag = /circles?/i.test(instruction) ? 'circle' :
-        /rectangles?|squares?/i.test(instruction) ? 'rect' :
-        /triangles?|polygons?/i.test(instruction) ? 'polygon' : null;
-      if (tag) answer = all('svg ' + tag).filter(visible).length;
-    }}
-    if (answer == null) return null;
-    const buttons = best(interactive.filter(el => el.tagName.toLowerCase() === 'button' || (el.getAttribute('role') || '').toLowerCase() === 'button'), el => {{
-      return (textOf(el).trim() === String(answer)) ? 1 : 0;
-    }});
-    if (buttons.length) {{
-      return {{
-        ok: true,
-        action: 'click',
-        params: {{ selector: selector(buttons[0].el) }},
-        confidence: 0.8,
-        reason: 'counted visible page items and matched numeric answer button',
-        candidate: candidate(buttons[0].el),
-        answer
-      }};
-    }}
-    const fields = all('input, textarea').filter(el => {{
-      const tag = el.tagName.toLowerCase();
-      const type = (el.getAttribute('type') || '').toLowerCase();
-      return tag === 'textarea' || (tag === 'input' && ['', 'text', 'number'].includes(type));
-    }});
-    if (fields.length) {{
-      return {{
-        ok: true,
-        action: 'type',
-        params: {{ selector: selector(fields[0]), text: String(answer), clear_first: true }},
-        confidence: 0.75,
-        reason: 'counted visible page items and matched answer field',
-        candidate: candidate(fields[0]),
-        answer
-      }};
-    }}
-    return null;
-  }}
-  const counted = countPlan();
-  if (counted) return counted;
-
-  function scrollFillPressPlan() {{
-    if (kind !== 'fill' || !/\bscroll\b/i.test(instruction) || !wantedValue) return null;
-    const hasBox = el => {{
-      const r = el.getBoundingClientRect();
-      const s = getComputedStyle(el);
-      return (r.width > 0 || r.height > 0) && s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) !== 0;
-    }};
-    const scrollable = all('textarea, [style*=overflow], [role=textbox], div').find(el => hasBox(el) && el.scrollHeight > el.clientHeight + 8);
-	    const fields = all('input, textarea, [contenteditable=true], [contenteditable=""], [role=textbox], [role=searchbox], [role=spinbutton], [role=slider]').filter(el => {{
-	      const tag = el.tagName.toLowerCase();
-	      if (tag === 'textarea') return false;
-	      return isFillableField(el);
-	    }});
-    const field = fields.find(el => targetHint ? tokenScore(targetHint, textOf(el)) > 0 : true) || fields[0];
-    const followHint = followUpClickHint() || secondaryHint;
-    const follow = followHint ? all('button, a, input, [role=button], [role=link]').find(el => tokenScore(followHint, textOf(el)) > 0 || String(textOf(el)).toLowerCase().includes(String(followHint).toLowerCase())) : null;
-    if (!scrollable || !field) return null;
-    const steps = [{{
-      action: 'scroll_element',
-      params: {{ selector: selector(scrollable) }},
-      confidence: 0.85,
-      reason: 'matched scrollable element mentioned before fill action',
-      candidate: candidate(scrollable)
-    }}, {{
-      action: 'type',
-      params: {{ selector: selector(field), text: transformedValue(wantedValue), clear_first: true }},
-      confidence: 0.75,
-      reason: 'matched fillable field after prerequisite scroll',
-      candidate: candidate(field)
-    }}];
-    if (follow) steps.push({{
-      action: 'click',
-      params: {{ selector: selector(follow) }},
-      confidence: 0.75,
-      reason: 'matched follow-up control after prerequisite scroll and fill',
-      candidate: candidate(follow)
-    }});
-    return {{
-      ok: true,
-      action: 'sequence',
-      steps,
-      confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
-      reason: 'planned scroll, fill, and follow-up control sequence'
-    }};
-  }}
-  const scrollFill = scrollFillPressPlan();
-  if (scrollFill) return scrollFill;
-
-	  if (kind === 'fill') {{
-	    const fields = interactive.filter(isFillableField);
-	    const ranked = best(fields, el => {{
-	      const t = textOf(el);
-	      let score = targetHint ? tokenScore(targetHint, t) : 0.2;
-	      score += controlTypeScore(targetHint, el);
-	      if (targetHint && /\b(text|input|field|box)\b/i.test(targetHint) && score === 0) score = 0.2;
-	      if (typeOf(el) === 'search') score += 0.2;
-	      if (/search/.test(instruction.toLowerCase()) && /search/.test(t.toLowerCase())) score += 0.5;
-	      return score;
-	    }});
-    if (!ranked.length) return {{ ok: false, error: 'act_instruction: no fillable field found' }};
-    if (!wantedValue) return {{ ok: false, error: 'act_instruction: fill instruction has no text value' }};
-    const textValue = transformedValue(wantedValue);
-    const repeatedFields = /\bboth\s+(?:text\s+)?(?:fields?|inputs?)\b/i.test(instruction) ||
-      /\ball\s+(?:text\s+)?(?:fields?|inputs?)\b/i.test(instruction);
-    if (repeatedFields) {{
-      const count = /\bboth\b/i.test(instruction) ? Math.min(2, fields.length) : fields.length;
-	      const repeatedRanked = best(fields, el => {{
-	        const t = textOf(el);
-	        let score = targetHint ? tokenScore(targetHint, t) : 0.2;
-	        score += controlTypeScore(targetHint, el);
-	        if (/\bpassword\b/i.test(instruction) && typeOf(el) === 'password') score += 0.6;
-        if (targetHint && /\b(text|input|field|box)\b/i.test(targetHint) && score === 0) score = 0.2;
-        return score;
-      }});
-      const targets = repeatedRanked.slice(0, count).map(item => item.el);
-      const steps = targets.map(el => ({{
-        action: 'type',
-        params: {{ selector: selector(el), text: textValue, clear_first: true }},
-        confidence: 0.7,
-        reason: 'matched repeated fillable field from collective instruction',
-        candidate: candidate(el)
-      }}));
-      const follow = clickStepForHint(followUpClickHint(), targets[targets.length - 1]);
-      if (follow) steps.push(follow);
-      if (steps.length) {{
-        return {{
-          ok: true,
-          action: 'sequence',
-          steps,
-          confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
-          reason: 'planned repeated field fill sequence from collective instruction'
-        }};
-      }}
-    }}
-    const chosen = ranked[0];
-    return withFollowUp({{
-      ok: true, action: 'type',
-      params: {{ selector: selector(chosen.el), text: textValue, clear_first: true }},
-      confidence: Math.min(1, chosen.score),
-      reason: 'matched fillable field from instruction and DOM labels',
-      candidate: candidate(chosen.el)
-    }}, chosen.el);
-  }}
-
-	  if (kind === 'select_option') {{
-	    const selects = best(interactive.filter(el => {{
-	      const tag = el.tagName.toLowerCase();
-	      const role = roleOf(el);
-	      return tag === 'select' || ['combobox', 'listbox', 'menu'].includes(role) || el.hasAttribute('aria-haspopup');
-	    }}), el => {{
-	      const options = Array.from(el.options || []).map(o => (o.textContent || o.value || '').toLowerCase()).join(' ');
-	      let score = (wantedValue ? tokenScore(stripFollowUp(wantedValue), options) : 0) + (targetHint ? tokenScore(targetHint, textOf(el)) * 0.7 : 0.2);
-	      if (/\b(dropdown|select|option|list|menu|combo)\b/i.test(instruction) && (el.tagName.toLowerCase() === 'select' || roleOf(el) === 'combobox' || el.hasAttribute('aria-haspopup'))) score += 0.35;
-	      return score;
-	    }});
-    if (selects.length && wantedValue) {{
-      const chosen = selects[0];
-      return withFollowUp({{
-        ok: true, action: 'select_option',
-        params: {{ selector: selector(chosen.el), option: stripFollowUp(wantedValue) }},
-        confidence: Math.min(1, chosen.score),
-        reason: 'matched select element and option text',
-        candidate: candidate(chosen.el)
-      }}, chosen.el);
-    }}
-    const boxes = interactive.filter(el => {{
-      const type = (el.getAttribute('type') || '').toLowerCase();
-      const role = (el.getAttribute('role') || '').toLowerCase();
-      return type === 'checkbox' || type === 'radio' || role === 'checkbox' || role === 'radio';
-    }});
-    const items = requestedItems(wantedValue);
-    if (boxes.length && (items.length || /^nothing$/i.test(stripFollowUp(wantedValue)))) {{
-      const used = new Set();
-      const steps = [];
-      let followAnchor = boxes[boxes.length - 1] || null;
-      for (const item of items) {{
-        const rankedBoxes = best(boxes.filter(el => !used.has(selector(el))), el => {{
-          const text = textOf(el);
-          return Math.max(semanticScore(item, text), tokenScore(item, text), text.toLowerCase().includes(item.toLowerCase()) ? 1 : 0);
-        }});
-        if (rankedBoxes.length) {{
-          const chosen = rankedBoxes[0];
-          followAnchor = chosen.el;
-          used.add(selector(chosen.el));
-          steps.push({{
-            action: 'set_checked',
-            params: {{ selector: selector(chosen.el), checked: true }},
-            confidence: Math.min(1, chosen.score),
-            reason: 'matched checkbox option by visible label text',
-            candidate: candidate(chosen.el)
-          }});
-        }}
-      }}
-      const follow = clickStepForHint(followUpClickHint(), followAnchor);
-      if (follow) steps.push(follow);
-      if (steps.length) {{
-        return {{
-          ok: true,
-          action: 'sequence',
-          steps,
-          confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
-          reason: 'planned checkbox selection sequence from listed instruction values'
-        }};
-      }}
-    }}
-    const optionClicks = best(interactive, el => tokenScore(wantedValue || targetHint, textOf(el)));
-    if (!optionClicks.length) return {{ ok: false, error: 'act_instruction: no matching option-like element found' }};
-    const chosen = optionClicks[0];
-    return withFollowUp({{
-      ok: true, action: 'click',
-      params: {{ selector: selector(chosen.el) }},
-      confidence: Math.min(1, chosen.score),
-      reason: 'matched clickable option-like element by visible text',
-      candidate: candidate(chosen.el)
-    }}, chosen.el);
-  }}
-
-  if (kind === 'set_checked') {{
-    const boxes = interactive.filter(el => {{
-      const type = (el.getAttribute('type') || '').toLowerCase();
-      const role = (el.getAttribute('role') || '').toLowerCase();
-      return type === 'checkbox' || type === 'radio' || role === 'checkbox' || role === 'radio';
-    }});
-    const items = requestedItems(targetHint);
-    if (checked !== false && items.length > 1) {{
-      const used = new Set();
-      const steps = [];
-      let followAnchor = boxes[boxes.length - 1] || null;
-      for (const item of items) {{
-        const rankedBoxes = best(boxes.filter(el => !used.has(selector(el))), el => {{
-          const text = textOf(el);
-          return Math.max(semanticScore(item, text), tokenScore(item, text), text.toLowerCase().includes(item.toLowerCase()) ? 1 : 0);
-        }});
-        if (rankedBoxes.length) {{
-          const chosen = rankedBoxes[0];
-          followAnchor = chosen.el;
-          used.add(selector(chosen.el));
-          steps.push({{
-            action: 'set_checked',
-            params: {{ selector: selector(chosen.el), checked: true }},
-            confidence: Math.min(1, chosen.score),
-            reason: 'matched checkbox or radio item by visible label text',
-            candidate: candidate(chosen.el)
-          }});
-        }}
-      }}
-      const follow = clickStepForHint(followUpClickHint(), followAnchor);
-      if (follow) steps.push(follow);
-      if (steps.length) {{
-        return {{
-          ok: true,
-          action: 'sequence',
-          steps,
-          confidence: Math.min(1, steps.reduce((sum, step) => sum + (step.confidence || 0.5), 0) / steps.length),
-          reason: 'planned checkbox or radio sequence from listed instruction values'
-        }};
-      }}
-    }}
-    const ranked = best(boxes, el => targetHint ? tokenScore(targetHint, textOf(el)) : 0.2);
-    if (!ranked.length) return {{ ok: false, error: 'act_instruction: no checkbox or radio target found' }};
-    const chosen = ranked[0];
-    return withFollowUp({{
-      ok: true, action: 'set_checked',
-      params: {{ selector: selector(chosen.el), checked: checked !== false }},
-      confidence: Math.min(1, chosen.score),
-      reason: 'matched checkbox or radio by instruction text',
-      candidate: candidate(chosen.el)
-    }}, chosen.el);
-  }}
-
-  if (kind === 'drag') {{
-    const rankedSource = best(interactive, el => tokenScore(targetHint, textOf(el)));
-    const rankedTarget = best(interactive.concat(all('div, li, td, canvas, svg, [role=gridcell]')), el => tokenScore(secondaryHint, textOf(el)));
-    if (!rankedSource.length || !rankedTarget.length) return {{ ok: false, error: 'act_instruction: could not match drag source and target' }};
-    return {{
-      ok: true, action: 'drag',
-      params: {{ source: selector(rankedSource[0].el), target: selector(rankedTarget[0].el) }},
-      confidence: Math.min(1, (rankedSource[0].score + rankedTarget[0].score) / 2),
-      reason: 'matched drag source and target by instruction text',
-      candidate: {{ source: candidate(rankedSource[0].el), target: candidate(rankedTarget[0].el) }}
-    }};
-  }}
-
-  const clickHint = targetHint || wantedValue || instruction;
-  const clickables = best(interactive, el => {{
-    const tag = el.tagName.toLowerCase();
-    const type = (el.getAttribute('type') || '').toLowerCase();
-    let score = Math.max(tokenScore(clickHint, textOf(el)), exactPhraseScore(clickHint, textOf(el)));
-    if (kind === 'click' && /submit|continue|confirm|save|done|next/.test(instruction.toLowerCase())) {{
-      if (type === 'submit') score += 0.5;
-      if (/submit|continue|confirm|save|done|next|ok/.test(textOf(el).toLowerCase())) score += 0.4;
-    }}
-    if (tag === 'button' || tag === 'a' || type === 'submit' || (el.getAttribute('role') || '').toLowerCase() === 'button') score += 0.05;
-    return score;
-  }});
-  if (!clickables.length) return {{ ok: false, error: 'act_instruction: no clickable target found' }};
-  const chosen = clickables[0];
-  return {{
-    ok: true, action: 'click',
-    params: {{ selector: selector(chosen.el) }},
-    confidence: Math.min(1, chosen.score),
-    reason: 'matched clickable element by instruction text',
-    candidate: candidate(chosen.el)
-  }};
-}})()"#
-    )
+async fn execute_planned_action_with_fallbacks(
+    page: &Page,
+    logs: &DaemonLogs,
+    state: &DaemonState,
+    plan: &Value,
+) -> Result<(Value, Value, Option<Value>), String> {
+    let primary_action = plan
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "act_instruction: planner returned no action".to_string())?;
+    match execute_plan_without_fallbacks(page, logs, state, plan).await {
+        Ok(result) => Ok((plan.clone(), result, None)),
+        Err(primary_error) => {
+            if primary_action == "sequence" {
+                return Err(primary_error);
+            }
+            let alternates = match plan
+                .get("alternatePlans")
+                .and_then(|value| value.as_array())
+            {
+                Some(alternates) if !alternates.is_empty() => alternates,
+                _ => return Err(primary_error),
+            };
+            let mut attempts = vec![json!({
+                "action": primary_action,
+                "capability": plan.get("capability").cloned().unwrap_or(Value::Null),
+                "ok": false,
+                "error": primary_error,
+            })];
+            for alternate in alternates.iter().take(3) {
+                let alternate_action = alternate
+                    .get("action")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                match execute_plan_without_fallbacks(page, logs, state, alternate).await {
+                    Ok(result) => {
+                        let mut executed_plan = alternate.clone();
+                        if let Some(object) = executed_plan.as_object_mut() {
+                            object.insert(
+                                "fallback".to_string(),
+                                json!({
+                                    "used": true,
+                                    "primaryAction": primary_action,
+                                    "attemptCount": attempts.len() + 1,
+                                }),
+                            );
+                        }
+                        attempts.push(json!({
+                            "action": alternate_action,
+                            "capability": alternate.get("capability").cloned().unwrap_or(Value::Null),
+                            "ok": true,
+                        }));
+                        return Ok((executed_plan, result, Some(json!(attempts))));
+                    }
+                    Err(error) => attempts.push(json!({
+                        "action": alternate_action,
+                        "capability": alternate.get("capability").cloned().unwrap_or(Value::Null),
+                        "ok": false,
+                        "error": error,
+                    })),
+                }
+            }
+            let errors = attempts
+                .iter()
+                .filter_map(|attempt| {
+                    let action = attempt.get("action").and_then(|value| value.as_str())?;
+                    let error = attempt.get("error").and_then(|value| value.as_str())?;
+                    Some(format!("{action}: {error}"))
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(format!(
+                "act_instruction: primary plan and alternate plans failed: {errors}"
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1679,6 +489,225 @@ mod tests {
             InstructionKind::Click
         );
         assert_eq!(
+            analyze_instruction(
+                "Reserve the cheapest service option from: Origin Alpha to: Destination Beta on 07/09/2026."
+            )
+            .kind,
+            InstructionKind::Fill
+        );
+        assert_eq!(
+            analyze_instruction(
+                "Find the cheapest service option from: Origin Alpha to: Destination Beta on 07/09/2026."
+            )
+            .kind,
+            InstructionKind::Fill
+        );
+        assert_eq!(
+            analyze_instruction(
+                "Show me the cheapest service option from: Origin Alpha to: Destination Beta on 07/09/2026."
+            )
+            .kind,
+            InstructionKind::Fill
+        );
+        assert_eq!(
+            analyze_instruction(
+                "Can you show me the cheapest service option from: Origin Alpha to: Destination Beta on 07/09/2026?"
+            )
+            .kind,
+            InstructionKind::Fill
+        );
+        assert_eq!(
+            analyze_instruction(
+                "I need the cheapest service option from: Origin Alpha to: Destination Beta on 07/09/2026."
+            )
+            .kind,
+            InstructionKind::Fill
+        );
+        assert_eq!(
+            analyze_instruction(
+                "I need the cheapest service option between Origin Alpha and Destination Beta for July 9, 2026."
+            )
+            .kind,
+            InstructionKind::Fill
+        );
+        assert_eq!(
+            analyze_instruction("Create a 90 mins event named \"Gym\", between 12PM and 4PM.").kind,
+            InstructionKind::Fill
+        );
+        let wait_visible = analyze_instruction("Wait until Results appears");
+        assert_eq!(wait_visible.kind, InstructionKind::Wait);
+        assert_eq!(wait_visible.direction.as_deref(), Some("visible"));
+        assert_eq!(wait_visible.value.as_deref(), Some("Results"));
+        let wait_hidden = analyze_instruction("Wait for Loading to disappear");
+        assert_eq!(wait_hidden.kind, InstructionKind::Wait);
+        assert_eq!(wait_hidden.direction.as_deref(), Some("hidden"));
+        assert_eq!(wait_hidden.value.as_deref(), Some("Loading"));
+        let navigate = analyze_instruction("Open about:blank#agent-target");
+        assert_eq!(navigate.kind, InstructionKind::Navigate);
+        assert_eq!(navigate.direction.as_deref(), Some("url"));
+        assert_eq!(navigate.value.as_deref(), Some("about:blank#agent-target"));
+        let localhost = analyze_instruction("Go to localhost:3000");
+        assert_eq!(localhost.kind, InstructionKind::Navigate);
+        assert_eq!(localhost.value.as_deref(), Some("http://localhost:3000"));
+        let back = analyze_instruction("Go back");
+        assert_eq!(back.kind, InstructionKind::Navigate);
+        assert_eq!(back.direction.as_deref(), Some("back"));
+        let forward = analyze_instruction("Go forward");
+        assert_eq!(forward.kind, InstructionKind::Navigate);
+        assert_eq!(forward.direction.as_deref(), Some("forward"));
+        let reload = analyze_instruction("Reload the page");
+        assert_eq!(reload.kind, InstructionKind::Navigate);
+        assert_eq!(reload.direction.as_deref(), Some("reload"));
+        let viewport_preset = analyze_instruction("Set viewport to mobile");
+        assert_eq!(viewport_preset.kind, InstructionKind::SetViewport);
+        assert_eq!(viewport_preset.direction.as_deref(), Some("preset"));
+        assert_eq!(viewport_preset.value.as_deref(), Some("mobile"));
+        let viewport_dimensions = analyze_instruction("Resize browser to 390x844");
+        assert_eq!(viewport_dimensions.kind, InstructionKind::SetViewport);
+        assert_eq!(viewport_dimensions.direction.as_deref(), Some("dimensions"));
+        assert_eq!(viewport_dimensions.value.as_deref(), Some("390x844"));
+        let emulate = analyze_instruction("Emulate iPhone 15");
+        assert_eq!(emulate.kind, InstructionKind::EmulateDevice);
+        assert_eq!(emulate.direction.as_deref(), Some("device"));
+        assert_eq!(emulate.value.as_deref(), Some("iPhone 15"));
+        let read_page = analyze_instruction("Read the page");
+        assert_eq!(read_page.kind, InstructionKind::ReadText);
+        assert_eq!(read_page.direction.as_deref(), Some("visible_text"));
+        assert_eq!(read_page.target_hint, None);
+        let read_selector = analyze_instruction("Extract text from #status-panel");
+        assert_eq!(read_selector.kind, InstructionKind::ReadText);
+        assert_eq!(read_selector.target_hint.as_deref(), Some("#status-panel"));
+        let read_semantic = analyze_instruction("Read the Profile card");
+        assert_eq!(read_semantic.kind, InstructionKind::ReadText);
+        assert_eq!(read_semantic.target_hint.as_deref(), Some("Profile card"));
+        let analyze_form = analyze_instruction("Analyze the Shipping form");
+        assert_eq!(analyze_form.kind, InstructionKind::AnalyzeForm);
+        assert_eq!(analyze_form.direction.as_deref(), Some("fields"));
+        assert_eq!(analyze_form.target_hint.as_deref(), Some("Shipping"));
+        let analyze_selector = analyze_instruction("Inspect form fields in #shipping");
+        assert_eq!(analyze_selector.kind, InstructionKind::AnalyzeForm);
+        assert_eq!(analyze_selector.target_hint.as_deref(), Some("#shipping"));
+        let tree_page = analyze_instruction("Show accessibility tree");
+        assert_eq!(tree_page.kind, InstructionKind::AccessibilityTree);
+        assert_eq!(tree_page.direction.as_deref(), Some("tree"));
+        assert_eq!(tree_page.target_hint, None);
+        let tree_selector = analyze_instruction("Show accessibility tree for #nav");
+        assert_eq!(tree_selector.kind, InstructionKind::AccessibilityTree);
+        assert_eq!(tree_selector.target_hint.as_deref(), Some("#nav"));
+        let tree_semantic = analyze_instruction("List roles in the Profile card");
+        assert_eq!(tree_semantic.kind, InstructionKind::AccessibilityTree);
+        assert_eq!(tree_semantic.target_hint.as_deref(), Some("Profile card"));
+        let find_button = analyze_instruction("Find buttons named Save profile");
+        assert_eq!(find_button.kind, InstructionKind::FindElements);
+        assert_eq!(find_button.direction.as_deref(), Some("role_text"));
+        assert_eq!(find_button.value.as_deref(), Some("Save profile"));
+        let find_selector = analyze_instruction("Locate #profile");
+        assert_eq!(find_selector.kind, InstructionKind::FindElements);
+        assert_eq!(find_selector.direction.as_deref(), Some("selector"));
+        assert_eq!(find_selector.value.as_deref(), Some("#profile"));
+        let find_text = analyze_instruction("Search for Account status");
+        assert_eq!(find_text.kind, InstructionKind::FindElements);
+        assert_eq!(find_text.direction.as_deref(), Some("text"));
+        assert_eq!(find_text.value.as_deref(), Some("Account status"));
+        let find_then_reply =
+            analyze_instruction("Find the message by Carlynne and reply with \"Ornare commodo\".");
+        assert_ne!(find_then_reply.kind, InstructionKind::FindElements);
+        let find_then_toggle =
+            analyze_instruction("Find the message by Carlynne and turn on alerts.");
+        assert_ne!(find_then_toggle.kind, InstructionKind::FindElements);
+        assert_eq!(
+            analyze_instruction("Forward Anitra's e-mail to Loralyn.").kind,
+            InstructionKind::Click
+        );
+        assert_eq!(
+            analyze_instruction("Please forward the information from Margaretta to Roslyn.").kind,
+            InstructionKind::Click
+        );
+        assert_eq!(
+            analyze_instruction("Send the email from Chrysa to Misty.").kind,
+            InstructionKind::Click
+        );
+        assert_eq!(
+            analyze_instruction(
+                "Respond \"Vitae mattis dictum. Ut.\" to the email sent by Chrysa."
+            )
+            .kind,
+            InstructionKind::Click
+        );
+        assert_eq!(
+            analyze_instruction(
+                "Write \"Launch update approved\" into the Message body editor and press Send."
+            )
+            .kind,
+            InstructionKind::Fill
+        );
+        assert_eq!(
+            analyze_instruction("Enter an item that starts with \"Com\" and ends with \"os\".")
+                .kind,
+            InstructionKind::Fill
+        );
+        let assert_visible = analyze_instruction("Verify that Success message is visible");
+        assert_eq!(assert_visible.kind, InstructionKind::Assert);
+        assert_eq!(assert_visible.direction.as_deref(), Some("visible"));
+        assert_eq!(assert_visible.value.as_deref(), Some("Success message"));
+        let assert_hidden = analyze_instruction("Check that #spinner is hidden");
+        assert_eq!(assert_hidden.kind, InstructionKind::Assert);
+        assert_eq!(assert_hidden.direction.as_deref(), Some("hidden"));
+        assert_eq!(assert_hidden.value.as_deref(), Some("#spinner"));
+        let assert_url = analyze_instruction("Expect URL contains #done");
+        assert_eq!(assert_url.kind, InstructionKind::Assert);
+        assert_eq!(assert_url.direction.as_deref(), Some("url_contains"));
+        assert_eq!(assert_url.value.as_deref(), Some("#done"));
+        let assert_logs = analyze_instruction("Ensure no console errors");
+        assert_eq!(assert_logs.kind, InstructionKind::Assert);
+        assert_eq!(assert_logs.direction.as_deref(), Some("no_console_errors"));
+        let assert_value = analyze_instruction("Verify that Email value equals alice@example.com");
+        assert_eq!(assert_value.kind, InstructionKind::Assert);
+        assert_eq!(assert_value.direction.as_deref(), Some("value_equals"));
+        assert_eq!(assert_value.target_hint.as_deref(), Some("Email"));
+        assert_eq!(assert_value.value.as_deref(), Some("alice@example.com"));
+        let assert_checked = analyze_instruction("Ensure newsletter checkbox is checked");
+        assert_eq!(assert_checked.kind, InstructionKind::Assert);
+        assert_eq!(assert_checked.direction.as_deref(), Some("checked"));
+        assert_eq!(
+            assert_checked.target_hint.as_deref(),
+            Some("newsletter checkbox")
+        );
+        let assert_unchecked = analyze_instruction("Expect beta access checkbox is not checked");
+        assert_eq!(assert_unchecked.kind, InstructionKind::Assert);
+        assert_eq!(assert_unchecked.direction.as_deref(), Some("unchecked"));
+        assert_eq!(
+            assert_unchecked.target_hint.as_deref(),
+            Some("beta access checkbox")
+        );
+        let screenshot = analyze_instruction("Take a full page screenshot");
+        assert_eq!(screenshot.kind, InstructionKind::Screenshot);
+        assert_eq!(screenshot.direction.as_deref(), Some("full_page"));
+        let element_screenshot = analyze_instruction("Capture a screenshot of the profile card");
+        assert_eq!(element_screenshot.kind, InstructionKind::Screenshot);
+        assert_eq!(
+            element_screenshot.target_hint.as_deref(),
+            Some("the profile card")
+        );
+        let right_click = analyze_instruction("Right click the Actions button");
+        assert_eq!(right_click.kind, InstructionKind::Click);
+        assert_eq!(right_click.value.as_deref(), Some("right_click"));
+        assert_eq!(
+            right_click.target_hint.as_deref(),
+            Some("the Actions button")
+        );
+        let double_click = analyze_instruction("Double-click the Preview card");
+        assert_eq!(double_click.kind, InstructionKind::Click);
+        assert_eq!(double_click.value.as_deref(), Some("double_click"));
+        assert_eq!(
+            double_click.target_hint.as_deref(),
+            Some("the Preview card")
+        );
+        assert_eq!(
+            analyze_instruction("Focus into the textbox").kind,
+            InstructionKind::Focus
+        );
+        assert_eq!(
             analyze_instruction("enter 'alice@example.com' into email").kind,
             InstructionKind::Fill
         );
@@ -1686,21 +715,115 @@ mod tests {
             analyze_instruction("choose California from the State dropdown").kind,
             InstructionKind::SelectOption
         );
+        let sort_option = analyze_instruction("choose Date from Sort order");
+        assert_eq!(sort_option.kind, InstructionKind::SelectOption);
+        assert_eq!(sort_option.value.as_deref(), Some("Date"));
+        assert_eq!(sort_option.target_hint.as_deref(), Some("Sort order"));
         assert_eq!(
             analyze_instruction("uncheck newsletter checkbox").checked,
+            Some(false)
+        );
+        assert_eq!(
+            analyze_instruction("turn on Email notifications").checked,
+            Some(true)
+        );
+        assert_eq!(
+            analyze_instruction("disable Compact mode").checked,
             Some(false)
         );
         let checked = analyze_instruction("check Red, Green, and Blue");
         assert_eq!(checked.kind, InstructionKind::SetChecked);
         assert_eq!(checked.target_hint.as_deref(), Some("Red, Green, and Blue"));
+        let upload = analyze_instruction("Upload \"/tmp/resume.txt\" to the Resume field");
+        assert_eq!(upload.kind, InstructionKind::UploadFile);
+        assert_eq!(upload.value.as_deref(), Some("/tmp/resume.txt"));
+        let press_key = analyze_instruction("Press Enter.");
+        assert_eq!(press_key.kind, InstructionKind::PressKey);
+        assert_eq!(press_key.value.as_deref(), Some("Enter"));
+        assert_eq!(
+            analyze_instruction("Press Submit.").kind,
+            InstructionKind::Click
+        );
+        let hover = analyze_instruction("Hover over the Account menu");
+        assert_eq!(hover.kind, InstructionKind::Hover);
+        assert_eq!(hover.target_hint.as_deref(), Some("the Account menu"));
+        let clear = analyze_instruction("Clear the search field");
+        assert_eq!(clear.kind, InstructionKind::ClearField);
+        assert_eq!(clear.target_hint.as_deref(), Some("the search field"));
+        let append = analyze_instruction("Append beta to the Notes field");
+        assert_eq!(append.kind, InstructionKind::AppendField);
+        assert_eq!(append.value.as_deref(), Some("beta"));
         assert_eq!(
             analyze_instruction("drag card A to Done").kind,
             InstructionKind::Drag
         );
         assert_eq!(
+            analyze_instruction(
+                "Drag the smaller box so that it is completely inside the larger box."
+            )
+            .kind,
+            InstructionKind::Drag
+        );
+        let directional_drag = analyze_instruction("Drag the Token right.");
+        assert_eq!(directional_drag.kind, InstructionKind::Drag);
+        assert_eq!(
+            directional_drag.target_hint.as_deref(),
+            Some("the Token right")
+        );
+        let line_draw = analyze_instruction("Draw a horizontal line on the drawing surface.");
+        assert_eq!(line_draw.kind, InstructionKind::Drag);
+        assert_eq!(line_draw.value.as_deref(), Some("line"));
+        let create_line =
+            analyze_instruction("Create a line that bisects the angle evenly in two.");
+        assert_eq!(create_line.kind, InstructionKind::Drag);
+        assert_eq!(create_line.value.as_deref(), Some("line"));
+        let circle_draw =
+            analyze_instruction("Draw a circle centered around the marked point, then submit.");
+        assert_eq!(circle_draw.kind, InstructionKind::Drag);
+        assert_eq!(circle_draw.value.as_deref(), Some("circle"));
+        assert_eq!(
             analyze_instruction("scroll up").direction.as_deref(),
             Some("up")
         );
+    }
+
+    #[test]
+    fn classifies_checkbox_grid_pattern_rendering_before_fill_fallback() {
+        let analysis =
+            analyze_instruction("Draw the number \"2\" in the checkboxes and press Submit.");
+        assert_eq!(analysis.kind, InstructionKind::RenderPattern);
+        assert_eq!(analysis.value.as_deref(), Some("2"));
+        assert_eq!(analysis.target_hint.as_deref(), Some("checkbox grid"));
+    }
+
+    #[test]
+    fn classifies_coordinate_grid_clicks_as_clicks() {
+        let analysis = analyze_instruction("Click on the grid coordinate (-1,0).");
+        assert_eq!(analysis.kind, InstructionKind::Click);
+    }
+
+    #[test]
+    fn classifies_visual_find_clicks_as_click_plans() {
+        let analysis =
+            analyze_instruction("Find and click on the center of the circle, then press Submit.");
+        assert_eq!(analysis.kind, InstructionKind::Click);
+        assert_eq!(
+            analysis.target_hint.as_deref(),
+            Some("the center of the circle")
+        );
+    }
+
+    #[test]
+    fn extracts_follow_up_icon_click_targets() {
+        let intent = build_intent(
+            "Click the \"Menu\" button, and then find and click on the item with the \"ui-icon-play\" icon.",
+            &analyze_instruction(
+                "Click the \"Menu\" button, and then find and click on the item with the \"ui-icon-play\" icon.",
+            ),
+        );
+
+        assert_eq!(intent.ordered_click_hints, vec!["Menu", "ui-icon-play"]);
+        assert_eq!(intent.follow_up_click_hint.as_deref(), Some("ui-icon-play"));
     }
 
     #[test]
@@ -1718,10 +841,89 @@ mod tests {
         assert_eq!(fill.value.as_deref(), Some("Alice"));
         assert_eq!(fill.target_hint.as_deref(), Some("email"));
 
+        let fill_target_with_value = analyze_instruction("Fill Public contact with Ada Lovelace");
+        assert_eq!(fill_target_with_value.kind, InstructionKind::Fill);
+        assert_eq!(
+            fill_target_with_value.value.as_deref(),
+            Some("Ada Lovelace")
+        );
+        assert_eq!(
+            fill_target_with_value.target_hint.as_deref(),
+            Some("Public contact")
+        );
+
+        let scoped_set =
+            analyze_instruction("Set the Quantity field in the row containing Alice to 3.");
+        assert_eq!(scoped_set.kind, InstructionKind::Fill);
+        assert_eq!(scoped_set.value.as_deref(), Some("3"));
+        assert_eq!(
+            scoped_set.target_hint.as_deref(),
+            Some("the Quantity field in the row containing Alice")
+        );
+
+        let plain_numeric_set = analyze_instruction("Set the Rating to 6 and click Apply.");
+        assert_eq!(plain_numeric_set.kind, InstructionKind::Fill);
+        assert_eq!(plain_numeric_set.value.as_deref(), Some("6"));
+        assert_eq!(plain_numeric_set.target_hint.as_deref(), Some("the Rating"));
+
         let select = analyze_instruction("choose California from the State dropdown");
         assert_eq!(select.kind, InstructionKind::SelectOption);
         assert_eq!(select.value.as_deref(), Some("California"));
         assert_eq!(select.target_hint.as_deref(), Some("the State dropdown"));
+
+        let shorthand =
+            analyze_instruction("In the Support panel, Plan Enterprise, Routing Manual.");
+        assert_eq!(shorthand.kind, InstructionKind::Fill);
+        assert_eq!(
+            shorthand.target_hint.as_deref(),
+            Some("scoped multi-action")
+        );
+
+        let key_value_shorthand =
+            analyze_instruction("In the Support panel, Plan: Enterprise; Routing=Manual.");
+        assert_eq!(key_value_shorthand.kind, InstructionKind::Fill);
+        assert_eq!(
+            key_value_shorthand.target_hint.as_deref(),
+            Some("scoped multi-action")
+        );
+
+        let record_first = analyze_instruction("For Alice, Quantity 4, Status Approved, Save.");
+        assert_eq!(record_first.kind, InstructionKind::Fill);
+        assert_eq!(
+            record_first.target_hint.as_deref(),
+            Some("scoped multi-action")
+        );
+
+        let row_first = analyze_instruction("Bob row: Quantity: 5; Status=Approved; Save.");
+        assert_eq!(row_first.kind, InstructionKind::Fill);
+        assert_eq!(
+            row_first.target_hint.as_deref(),
+            Some("scoped multi-action")
+        );
+
+        let leading_section =
+            analyze_instruction("Support: Title Escalated; Status Approved; Save.");
+        assert_eq!(leading_section.kind, InstructionKind::Fill);
+        assert_eq!(
+            leading_section.target_hint.as_deref(),
+            Some("scoped multi-action")
+        );
+
+        let bulleted_section =
+            analyze_instruction("Support:\n- Title: Escalated\n- Status: Approved\n- Save");
+        assert_eq!(bulleted_section.kind, InstructionKind::Fill);
+        assert_eq!(
+            bulleted_section.target_hint.as_deref(),
+            Some("scoped multi-action")
+        );
+
+        let single_field_then_completion =
+            analyze_instruction("Support: Resume document: /tmp/support.pdf; Save.");
+        assert_eq!(single_field_then_completion.kind, InstructionKind::Fill);
+        assert_eq!(
+            single_field_then_completion.target_hint.as_deref(),
+            Some("scoped multi-action")
+        );
     }
 
     #[test]
@@ -1740,6 +942,30 @@ mod tests {
         assert_eq!(date.kind, InstructionKind::Fill);
         assert_eq!(date.value.as_deref(), Some("2026-06-04"));
         assert_eq!(date.target_hint.as_deref(), Some("date"));
+
+        let time = analyze_instruction("set time to 3:15 pm");
+        assert_eq!(time.kind, InstructionKind::Fill);
+        assert_eq!(time.value.as_deref(), Some("3:15 pm"));
+        assert_eq!(time.target_hint.as_deref(), Some("time"));
+
+        let color = analyze_instruction("set color to blue");
+        assert_eq!(color.kind, InstructionKind::Fill);
+        assert_eq!(color.value.as_deref(), Some("blue"));
+        assert_eq!(color.target_hint.as_deref(), Some("color"));
+
+        let ordered_click = analyze_instruction("Click on the numbers in ascending order.");
+        assert_eq!(ordered_click.kind, InstructionKind::Click);
+        assert!(
+            build_intent("Click on the numbers in ascending order.", &ordered_click)
+                .wants_ordered_values
+        );
+
+        let colored_box = analyze_instruction("Click on the olive colored box.");
+        assert_eq!(colored_box.kind, InstructionKind::Click);
+        assert_eq!(
+            colored_box.target_hint.as_deref(),
+            Some("the olive colored box")
+        );
     }
 
     #[test]
@@ -1765,5 +991,74 @@ mod tests {
         });
         assert_eq!(plan_step_count(&plan), 1);
         assert_eq!(plan_confidence(&plan), 0.8);
+    }
+
+    #[test]
+    fn intent_extracts_ordered_click_clauses() {
+        let analysis = analyze_instruction("Click button ONE, then click button TWO.");
+        let intent = build_intent("Click button ONE, then click button TWO.", &analysis);
+        assert_eq!(intent.action_verbs, vec!["click"]);
+        assert_eq!(intent.ordered_click_hints, vec!["ONE", "TWO"]);
+        assert_eq!(intent.follow_up_click_hint.as_deref(), Some("TWO"));
+        assert!(!intent.wants_ordered_values);
+    }
+
+    #[test]
+    fn intent_extracts_ordered_numeric_targets() {
+        let analysis = analyze_instruction("Click on the numbers in ascending order.");
+        let intent = build_intent("Click on the numbers in ascending order.", &analysis);
+        assert_eq!(intent.order.as_deref(), Some("ascending"));
+        assert_eq!(
+            intent.ordered_click_hints,
+            vec!["numbers in ascending order"]
+        );
+        assert!(intent.wants_numeric_targets);
+        assert!(intent.wants_ordered_values);
+        assert_eq!(
+            intent
+                .to_json()
+                .get("order")
+                .and_then(|value| value.as_str()),
+            Some("ascending")
+        );
+    }
+
+    #[test]
+    fn close_by_clicking_is_click_intent() {
+        let analysis = analyze_instruction("Close the dialog box by clicking the \"x\".");
+        assert_eq!(analysis.kind, InstructionKind::Click);
+        assert_eq!(analysis.target_hint.as_deref(), Some("x"));
+
+        let intent = build_intent("Close the dialog box by clicking the \"x\".", &analysis);
+        assert_eq!(intent.action_verbs, vec!["click"]);
+        assert_eq!(intent.ordered_click_hints, vec!["x"]);
+    }
+
+    #[test]
+    fn click_link_hint_ignores_control_words() {
+        let analysis = analyze_instruction("Click on the link \"maecenas\".");
+        assert_eq!(analysis.kind, InstructionKind::Click);
+        assert_eq!(analysis.target_hint.as_deref(), Some("maecenas"));
+
+        let intent = build_intent("Click on the link \"maecenas\".", &analysis);
+        assert_eq!(intent.ordered_click_hints, vec!["maecenas"]);
+    }
+
+    #[test]
+    fn intent_extracts_hierarchical_menu_path() {
+        let analysis = analyze_instruction("Select Alice>Bob>Carol");
+        assert_eq!(analysis.kind, InstructionKind::SelectOption);
+        assert_eq!(analysis.value.as_deref(), Some("Alice>Bob>Carol"));
+
+        let intent = build_intent("Select Alice>Bob>Carol", &analysis);
+        assert_eq!(intent.menu_path, vec!["Alice", "Bob", "Carol"]);
+        assert_eq!(
+            intent
+                .to_json()
+                .get("menuPath")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len()),
+            Some(3)
+        );
     }
 }

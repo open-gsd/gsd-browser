@@ -20,6 +20,156 @@ use tokio::time::timeout;
 use tracing::debug;
 
 const JS_TIMEOUT: Duration = Duration::from_secs(10);
+const FORM_FIELD_SELECTOR: &str = r#"input:not([type=hidden]), select, textarea, [contenteditable]:not([contenteditable="false"]), [role~="textbox"], [role~="searchbox"], [role~="spinbutton"], [role~="slider"], [role~="combobox"], [aria-haspopup]"#;
+
+fn form_control_helpers_js() -> &'static str {
+    r#"
+    function allRoots(start = document) {
+        const roots = [];
+        const seen = new Set();
+        function add(scope) {
+            if (!scope || seen.has(scope)) return;
+            seen.add(scope);
+            roots.push(scope);
+            if (scope.shadowRoot) add(scope.shadowRoot);
+            if (scope.tagName && scope.tagName.toLowerCase() === 'iframe') {
+                try {
+                    if (scope.contentDocument) add(scope.contentDocument);
+                } catch (_) {}
+            }
+            const tree = scope.querySelectorAll ? Array.from(scope.querySelectorAll('*')) : [];
+            for (const el of tree) {
+                if (el.shadowRoot) add(el.shadowRoot);
+                if (el.tagName && el.tagName.toLowerCase() === 'iframe') {
+                    try {
+                        if (el.contentDocument) add(el.contentDocument);
+                    } catch (_) {}
+                }
+            }
+        }
+        add(start);
+        return roots;
+    }
+
+    function all(selector, start = document) {
+        const out = [];
+        const seen = new Set();
+        for (const root of allRoots(start)) {
+            if (root.matches && root.matches(selector) && !seen.has(root)) {
+                seen.add(root);
+                out.push(root);
+            }
+            const matches = root.querySelectorAll ? Array.from(root.querySelectorAll(selector)) : [];
+            for (const el of matches) {
+                if (seen.has(el)) continue;
+                seen.add(el);
+                out.push(el);
+            }
+        }
+        return out;
+    }
+
+    function findOne(selector) {
+        return all(selector)[0] || null;
+    }
+
+    function hasCustomFieldSignal(el) {
+        if (!el || !el.getAttribute) return false;
+        const metadata = [
+            el.id,
+            el.getAttribute('name'),
+            el.getAttribute('data-field'),
+            el.getAttribute('data-field-name'),
+            el.getAttribute('data-control'),
+            el.getAttribute('data-testid'),
+            el.getAttribute('data-test'),
+            el.getAttribute('aria-label'),
+            el.getAttribute('aria-labelledby'),
+            el.getAttribute('title'),
+            el.getAttribute('placeholder'),
+        ].filter(Boolean).join(' ');
+        if (metadata.trim()) return true;
+        const role = String(el.getAttribute('role') || '').toLowerCase();
+        if (/\b(?:textbox|searchbox|spinbutton|slider|combobox|listbox|checkbox|radio|switch)\b/.test(role)) return true;
+        const root = el.getRootNode && el.getRootNode();
+        if (el.id) {
+            const label = root && root.querySelector ? root.querySelector('label[for=' + JSON.stringify(el.id) + ']') : document.querySelector('label[for=' + JSON.stringify(el.id) + ']');
+            if (label) return true;
+        }
+        return !!(el.closest && el.closest('label'));
+    }
+
+    function isCustomWritableValueElement(el) {
+        if (!el || !el.tagName || !('value' in el)) return false;
+        const tag = el.tagName.toLowerCase();
+        if (!tag.includes('-')) return false;
+        if (!hasCustomFieldSignal(el)) return false;
+        const valueType = typeof el.value;
+        return valueType !== 'function' && valueType !== 'symbol';
+    }
+
+    function isCustomCheckableElement(el) {
+        return !!(el && el.tagName && el.tagName.toLowerCase().includes('-') && 'checked' in el && hasCustomFieldSignal(el));
+    }
+
+    function isFieldElement(el) {
+        if (!el || !el.tagName) return false;
+        if (el.matches && el.matches(FIELD_SELECTOR)) return true;
+        return isCustomWritableValueElement(el) || isCustomCheckableElement(el);
+    }
+
+    function fieldElements(start = document) {
+        const out = [];
+        const add = el => {
+            if (isFieldElement(el) && !out.includes(el)) out.push(el);
+        };
+        for (const el of all(FIELD_SELECTOR, start)) add(el);
+        for (const el of all('*', start)) add(el);
+        return out;
+    }
+
+    function customFieldType(el, fallback) {
+        if (isCustomCheckableElement(el)) return 'checkbox';
+        if (!isCustomWritableValueElement(el)) return fallback;
+        const metadata = [
+            el.tagName,
+            el.id,
+            el.className,
+            el.getAttribute('name'),
+            el.getAttribute('data-field'),
+            el.getAttribute('data-field-name'),
+            el.getAttribute('data-control'),
+            el.getAttribute('role'),
+            el.getAttribute('aria-label'),
+            el.getAttribute('title'),
+        ].filter(Boolean).join(' ');
+        if (/\b(dropdown|select|listbox|menu|choice|options?)\b/i.test(metadata)) return 'select';
+        if (/\b(colou?r|hex|palette)\b/i.test(metadata)) return 'color';
+        if (/\b(date[\s-]?time|datetime|timestamp)\b/i.test(metadata)) return 'datetime-local';
+        if (/\b(date|day|calendar|birthday|birthdate|departure|arrival)\b/i.test(metadata)) return 'date';
+        if (/\b(time)\b/i.test(metadata)) return 'time';
+        if (/\b(spinner|spinbutton|stepper|numeric|number|quantity|count|amount|limit|retries)\b/i.test(metadata)) return 'number';
+        return fallback || 'text';
+    }
+
+    function buildSelector(el) {
+        if (el.id) {
+            const byId = '#' + CSS.escape(el.id);
+            if (all(byId).length === 1) return byId;
+        }
+        if (el.name) {
+            const tag = el.tagName.toLowerCase();
+            const sel = tag + '[name=' + JSON.stringify(el.name) + ']';
+            if (all(sel, form).length === 1) return sel;
+        }
+        const tag = el.tagName.toLowerCase();
+        if (all(tag).length === 1) return tag;
+        const ref = refPrefix + '-' + (++refSeq);
+        el.setAttribute('data-gsd-browser-form-ref', ref);
+        return '[data-gsd-browser-form-ref=' + JSON.stringify(ref) + ']';
+    }
+"#
+}
 
 /// Settle and capture page state after form fill operations.
 async fn settle_and_capture(page: &Page) -> (Value, Value) {
@@ -53,25 +203,34 @@ pub async fn handle_analyze_form(page: &Page, params: &Value) -> Result<Value, S
         Some(s) => serde_json::to_string(s).unwrap(),
         None => "null".to_string(),
     };
+    let field_selector_json = serde_json::to_string(FORM_FIELD_SELECTOR).unwrap();
 
+    let form_helpers_js = form_control_helpers_js();
     let js = format!(
         r#"(() => {{
     const selectorArg = {selector_json};
+    const FIELD_SELECTOR = {field_selector_json};
+    const BUTTON_SELECTOR = 'button, input[type=submit], input[type=button], input[type=image]';
+    const refPrefix = 'gsd-form-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    let refSeq = 0;
+
+    let form;
+
+{form_helpers_js}
 
     // Auto-detect the form container
-    let form;
     if (selectorArg) {{
-        form = document.querySelector(selectorArg);
+        form = findOne(selectorArg);
         if (!form) throw new Error('form not found: ' + selectorArg);
     }} else {{
-        const forms = Array.from(document.querySelectorAll('form'));
+        const forms = all('form');
         if (forms.length === 1) {{
             form = forms[0];
         }} else if (forms.length > 1) {{
             // Pick the form with the most visible inputs
             form = forms.reduce((best, f) => {{
-                const count = f.querySelectorAll('input:not([type=hidden]), select, textarea').length;
-                const bestCount = best.querySelectorAll('input:not([type=hidden]), select, textarea').length;
+                const count = fieldElements(f).length;
+                const bestCount = fieldElements(best).length;
                 return count > bestCount ? f : best;
             }}, forms[0]);
         }} else {{
@@ -93,8 +252,9 @@ pub async fn handle_analyze_form(page: &Page, params: &Value) -> Result<Value, S
         // 1. aria-labelledby
         const lblBy = el.getAttribute('aria-labelledby');
         if (lblBy) {{
+            const root = el.getRootNode && el.getRootNode();
             const parts = lblBy.split(/\s+/).map(id => {{
-                const ref = document.getElementById(id);
+                const ref = root && root.getElementById ? root.getElementById(id) : document.getElementById(id);
                 return ref ? ref.textContent.trim() : '';
             }}).filter(Boolean);
             if (parts.length) return parts.join(' ');
@@ -104,7 +264,8 @@ pub async fn handle_analyze_form(page: &Page, params: &Value) -> Result<Value, S
         if (ariaLabel) return ariaLabel;
         // 3. label[for]
         if (el.id) {{
-            const forLabel = document.querySelector('label[for=' + JSON.stringify(el.id) + ']');
+            const root = el.getRootNode && el.getRootNode();
+            const forLabel = root && root.querySelector ? root.querySelector('label[for=' + JSON.stringify(el.id) + ']') : document.querySelector('label[for=' + JSON.stringify(el.id) + ']');
             if (forLabel) return forLabel.textContent.trim();
         }}
         // 4. Wrapping label
@@ -112,7 +273,9 @@ pub async fn handle_analyze_form(page: &Page, params: &Value) -> Result<Value, S
         if (wrap) {{
             // Clone and remove the input to get just the label text
             const clone = wrap.cloneNode(true);
-            clone.querySelectorAll('input, select, textarea').forEach(c => c.remove());
+            clone.querySelectorAll('input, select, textarea, [contenteditable], [aria-haspopup], *').forEach(c => {{
+                if (c.matches && (c.matches(FIELD_SELECTOR) || c.tagName.toLowerCase().includes('-'))) c.remove();
+            }});
             const text = clone.textContent.trim();
             if (text) return text;
         }}
@@ -124,30 +287,15 @@ pub async fn handle_analyze_form(page: &Page, params: &Value) -> Result<Value, S
         return humanize(el.name);
     }}
 
-    // Build a unique CSS selector for an element
-    function buildSelector(el) {{
-        if (el.id) return '#' + CSS.escape(el.id);
-        if (el.name) {{
-            const tag = el.tagName.toLowerCase();
-            const sel = tag + '[name=' + JSON.stringify(el.name) + ']';
-            if (form.querySelectorAll(sel).length === 1) return sel;
-        }}
-        // Fall back to nth-of-type within form
-        const tag = el.tagName.toLowerCase();
-        const siblings = Array.from(form.querySelectorAll(tag));
-        const idx = siblings.indexOf(el);
-        if (idx >= 0) return tag + ':nth-of-type(' + (idx + 1) + ')';
-        return tag;
-    }}
-
-    const elements = form.querySelectorAll('input, select, textarea, button, [contenteditable]:not([contenteditable="false"]), [role~="textbox"], [role~="searchbox"], [role~="spinbutton"], [role~="slider"], [role~="combobox"], [aria-haspopup]');
+    const elements = [...fieldElements(form), ...all(BUTTON_SELECTOR, form).filter(el => !fieldElements(form).includes(el))];
     const fields = [];
     const submitButtons = [];
 
     elements.forEach(el => {{
         const tag = el.tagName.toLowerCase();
         const role = (el.getAttribute('role') || '').toLowerCase();
-        const type = (el.getAttribute('type') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textarea' : role || 'text')).toLowerCase();
+        const nativeType = (el.getAttribute('type') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textarea' : role || 'text')).toLowerCase();
+        const type = customFieldType(el, nativeType);
 
         // Submit buttons go to a separate list
         if (tag === 'button' || type === 'submit' || type === 'image') {{
@@ -172,7 +320,7 @@ pub async fn handle_analyze_form(page: &Page, params: &Value) -> Result<Value, S
             required: el.required || el.hasAttribute('required'),
             value: el.value || '',
             hidden: type === 'hidden' || el.hidden || (el.offsetParent === null && type !== 'hidden'),
-            disabled: el.disabled,
+            disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
         }};
 
         // Validation state
@@ -183,7 +331,7 @@ pub async fn handle_analyze_form(page: &Page, params: &Value) -> Result<Value, S
 
         // Checkbox/radio checked state
         if (type === 'checkbox' || type === 'radio') {{
-            field.checked = el.checked;
+            field.checked = !!el.checked || el.getAttribute('aria-checked') === 'true';
         }}
 
         // Select options
@@ -268,24 +416,31 @@ pub async fn handle_fill_form(
     };
     let keys: Vec<&str> = values_map.keys().map(|k| k.as_str()).collect();
     let keys_json = serde_json::to_string(&keys).unwrap();
+    let field_selector_json = serde_json::to_string(FORM_FIELD_SELECTOR).unwrap();
 
+    let form_helpers_js = form_control_helpers_js();
     let resolve_js = format!(
         r#"(() => {{
     const formSel = {form_sel_json};
     const keys = {keys_json};
-    const fieldSelector = 'input:not([type=hidden]), select, textarea, [contenteditable]:not([contenteditable="false"]), [role~="textbox"], [role~="searchbox"], [role~="spinbutton"], [role~="slider"], [role~="combobox"], [aria-haspopup]';
+    const FIELD_SELECTOR = {field_selector_json};
+    const refPrefix = 'gsd-form-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    let refSeq = 0;
 
     let form;
+
+{form_helpers_js}
+
     if (formSel) {{
-        form = document.querySelector(formSel);
+        form = findOne(formSel);
         if (!form) throw new Error('form not found: ' + formSel);
     }} else {{
-        const forms = Array.from(document.querySelectorAll('form'));
+        const forms = all('form');
         if (forms.length === 1) form = forms[0];
         else if (forms.length > 1) {{
             form = forms.reduce((best, f) => {{
-                const count = f.querySelectorAll(fieldSelector).length;
-                const bestCount = best.querySelectorAll(fieldSelector).length;
+                const count = fieldElements(f).length;
+                const bestCount = fieldElements(best).length;
                 return count > bestCount ? f : best;
             }}, forms[0]);
         }} else {{
@@ -293,22 +448,7 @@ pub async fn handle_fill_form(
         }}
     }}
 
-    // Build a unique CSS selector for an element
-    function buildSelector(el) {{
-        if (el.id) return '#' + CSS.escape(el.id);
-        if (el.name) {{
-            const tag = el.tagName.toLowerCase();
-            const sel = tag + '[name=' + JSON.stringify(el.name) + ']';
-            if (document.querySelectorAll(sel).length === 1) return sel;
-        }}
-        const tag = el.tagName.toLowerCase();
-        const siblings = Array.from(form.querySelectorAll(tag));
-        const idx = siblings.indexOf(el);
-        if (idx >= 0) return tag + ':nth-of-type(' + (idx + 1) + ')';
-        return tag;
-    }}
-
-    const elements = Array.from(form.querySelectorAll(fieldSelector));
+    const elements = fieldElements(form);
 
     function normalize(s) {{ return (s || '').toLowerCase().trim(); }}
     function loose(s) {{ return normalize(s).replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }}
@@ -329,19 +469,23 @@ pub async fn handle_fill_form(
     function labelTexts(el) {{
         const out = [];
         if (el.id) {{
-            const lbl = document.querySelector('label[for=' + JSON.stringify(el.id) + ']');
+            const root = el.getRootNode && el.getRootNode();
+            const lbl = root && root.querySelector ? root.querySelector('label[for=' + JSON.stringify(el.id) + ']') : document.querySelector('label[for=' + JSON.stringify(el.id) + ']');
             if (lbl) out.push(lbl.textContent || '');
         }}
         const wrap = el.closest('label');
         if (wrap) {{
             const clone = wrap.cloneNode(true);
-            clone.querySelectorAll(fieldSelector).forEach(c => c.remove());
+            clone.querySelectorAll('input, select, textarea, [contenteditable], [aria-haspopup], *').forEach(c => {{
+                if (c.matches && (c.matches(FIELD_SELECTOR) || c.tagName.toLowerCase().includes('-'))) c.remove();
+            }});
             out.push(clone.textContent || '');
         }}
         const labelledBy = el.getAttribute('aria-labelledby');
         if (labelledBy) {{
+            const root = el.getRootNode && el.getRootNode();
             for (const id of labelledBy.split(/\s+/)) {{
-                const lbl = document.getElementById(id);
+                const lbl = root && root.getElementById ? root.getElementById(id) : document.getElementById(id);
                 if (lbl) out.push(lbl.textContent || '');
             }}
         }}
@@ -400,7 +544,8 @@ pub async fn handle_fill_form(
             continue;
         }}
         const tag = el.tagName.toLowerCase();
-        const type = (el.getAttribute('type') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textarea' : isEditable(el) ? 'contenteditable' : 'text')).toLowerCase();
+        const nativeType = (el.getAttribute('type') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textarea' : isEditable(el) ? 'contenteditable' : 'text')).toLowerCase();
+        const type = customFieldType(el, nativeType);
         resolved.push({{
             key,
             selector: buildSelector(el),
@@ -411,7 +556,7 @@ pub async fn handle_fill_form(
 
     // Find submit button for optional submission
     let submitSelector = null;
-    const submitBtn = form.querySelector('button[type=submit], input[type=submit], button:not([type])');
+    const submitBtn = all('button[type=submit], input[type=submit], button:not([type])', form)[0] || null;
     if (submitBtn) submitSelector = buildSelector(submitBtn);
 
     return {{ resolved, errors, submitSelector }};

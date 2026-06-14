@@ -141,6 +141,8 @@ gsd-browser act-instruction --max-steps 3 "check Red, Green, and Blue"
 
 MCP clients use `browser_act_instruction` with the same controls: `instruction`, `dry_run`, `scope`, `min_confidence`, and `max_steps`.
 
+Every plan is grounded in an instruction page model: visible DOM/accessibility elements, bounds, labels, grouping context, and inferred affordances such as clickable, fillable, selectable, checkable, slider, and scrollable. Dry runs include this model for inspection. Executed actions include a verification summary comparing before/after page models so agents can tell whether the requested action produced an observable effect.
+
 Best use cases:
 
 - Natural-language tasks like "fill both fields with cat", "select monthly", "drag item A to Done", or "click Submit".

@@ -150,6 +150,110 @@ pub async fn handle_close_page(state: &DaemonState, params: &Value) -> Result<Va
     }))
 }
 
+/// Refresh the active registry entry from the browser's current target list.
+///
+/// This is used as a generic recovery path when a handler discovers that the
+/// stored Page handle points at a detached CDP session. The logical active page
+/// remains the same when possible: prefer the same target id, then the same URL,
+/// then the first non-internal page the browser exposes.
+pub async fn refresh_active_page_from_browser(
+    browser: &Arc<Mutex<Browser>>,
+    state: &DaemonState,
+) -> Result<Arc<Page>, String> {
+    let (active_id, active_target_id, active_url) = {
+        let pages = state.pages.lock().unwrap();
+        let active = pages
+            .entries
+            .iter()
+            .find(|entry| entry.id == pages.active_page_id)
+            .ok_or_else(|| "no active page in registry".to_string())?;
+        (active.id, active.target_id.clone(), active.url.clone())
+    };
+
+    let mut selected = select_browser_page(browser, &active_target_id, &active_url).await?;
+    if selected.is_none() {
+        {
+            let mut locked = browser.lock().await;
+            if let Err(err) = locked.fetch_targets().await {
+                warn!("[pages] active page refresh: fetch_targets failed: {err}");
+            }
+        }
+        selected = select_browser_page(browser, &active_target_id, &active_url).await?;
+    }
+
+    let (page, discovered_url) = selected
+        .ok_or_else(|| "could not find a live browser page to refresh active page".to_string())?;
+
+    crate::daemon::set_default_viewport(&page).await;
+    crate::daemon::helpers::inject_helpers(&page).await;
+    crate::daemon::settle::ensure_mutation_counter(&page).await;
+
+    let url = page
+        .url()
+        .await
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(discovered_url);
+    let title = page
+        .evaluate("document.title")
+        .await
+        .ok()
+        .and_then(|value| value.into_value::<String>().ok())
+        .unwrap_or_default();
+    let page_arc = Arc::new(page);
+    {
+        let mut registry = state.pages.lock().unwrap();
+        if !registry.replace_page_handle(active_id, page_arc.clone(), title.clone(), url.clone()) {
+            let id = registry.register(page_arc.clone(), title.clone(), url.clone());
+            registry.set_active(id);
+        } else {
+            registry.set_active(active_id);
+        }
+    }
+    *state.selected_frame.lock().unwrap() = None;
+
+    info!("[pages] refreshed active page handle: {url}");
+
+    Ok(page_arc)
+}
+
+async fn select_browser_page(
+    browser: &Arc<Mutex<Browser>>,
+    active_target_id: &str,
+    active_url: &str,
+) -> Result<Option<(Page, String)>, String> {
+    let pages = browser
+        .lock()
+        .await
+        .pages()
+        .await
+        .map_err(|err| format!("could not list browser pages: {err}"))?;
+
+    let mut fallback = None;
+    for page in pages {
+        let target_id = page.target_id().as_ref().to_string();
+        let url = page.url().await.ok().flatten().unwrap_or_default();
+        if is_internal_browser_url(&url) {
+            continue;
+        }
+        if !active_target_id.is_empty() && target_id == active_target_id {
+            return Ok(Some((page, url)));
+        }
+        if !active_url.is_empty() && url == active_url {
+            return Ok(Some((page, url)));
+        }
+        if fallback.is_none() {
+            fallback = Some((page, url));
+        }
+    }
+    Ok(fallback)
+}
+
+fn is_internal_browser_url(url: &str) -> bool {
+    url.starts_with("chrome://") || url.starts_with("devtools://")
+}
+
 /// List all frames in the active page by walking window.frames recursively via JS.
 pub async fn handle_list_frames(page: &Page) -> Result<Value, String> {
     let js = r#"(function() {
@@ -216,11 +320,8 @@ pub fn handle_select_frame(state: &DaemonState, params: &Value) -> Result<Value,
         }
     } else if let Some(idx) = index {
         Some(format!("index:{idx}"))
-    } else if let Some(pat) = url_pattern {
-        Some(format!("url:{pat}"))
     } else {
-        // No params = reset to main
-        None
+        url_pattern.map(|pat| format!("url:{pat}"))
     };
 
     let selected = frame_id.is_some();

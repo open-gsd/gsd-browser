@@ -6,11 +6,8 @@
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
+#[cfg(test)]
 const FORBIDDEN_UNION_KEYS: [&str; 3] = ["anyOf", "oneOf", "allOf"];
-
-fn is_record(value: &Value) -> bool {
-    value.is_object()
-}
 
 fn infer_json_schema_type(value: &Value) -> &'static str {
     match value {
@@ -510,6 +507,7 @@ pub fn sanitize_schema_for_moonshot(schema: &Value) -> Value {
 }
 
 /// Test helper — returns paths of forbidden union keywords in a schema tree.
+#[cfg(test)]
 pub fn collect_forbidden_union_schema_paths(value: &Value, path: &str) -> Vec<String> {
     if value.is_null() || !value.is_object() && !value.is_array() {
         return Vec::new();
