@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       channel:
-        description: "npm dist-tag or release path to publish; latest publishes/verifies @dev first, then waits for prod approval"
+        description: "npm dist-tag or release path to publish; trusted latest publishes once after prod approval"
         required: true
         type: string
       tag:
@@ -20,14 +20,14 @@ on:
         default: false
         type: boolean
       publish_auth:
-        description: "npm auth fallback: token uses NPM_TOKEN for dist-tag promotion; trusted uses OIDC for first publish"
+        description: "npm auth mode: trusted uses OIDC publish; token can promote an already-published version"
         required: false
         default: "trusted"
         type: string
   workflow_dispatch:
     inputs:
       channel:
-        description: "npm dist-tag or release path to publish; latest publishes/verifies @dev first, then waits for prod approval"
+        description: "npm dist-tag or release path to publish; trusted latest publishes once after prod approval"
         required: true
         default: "dev"
         type: choice
@@ -60,7 +60,7 @@ on:
         default: false
         type: boolean
       publish_auth:
-        description: "npm auth fallback: token uses NPM_TOKEN for dist-tag promotion; trusted uses OIDC for first publish"
+        description: "npm auth mode: trusted uses OIDC publish; token can promote an already-published version"
         required: false
         default: "trusted"
         type: choice
@@ -399,7 +399,7 @@ jobs:
     needs:
       - release-input
       - create-github-release
-    if: ${{ always() && needs.release-input.result == 'success' && needs.release-input.outputs.dry_run_preview != 'true' && (needs.create-github-release.result == 'success' || needs.create-github-release.result == 'skipped') }}
+    if: ${{ always() && needs.release-input.result == 'success' && needs.release-input.outputs.dry_run_preview != 'true' && !(inputs.channel == 'latest' && inputs.publish_auth == 'trusted' && !inputs.dry_run) && (needs.create-github-release.result == 'success' || needs.create-github-release.result == 'skipped') }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ needs.release-input.outputs.version }}
@@ -548,6 +548,74 @@ jobs:
             fi
           fi
 
+  trusted-latest-check:
+    name: Check trusted @latest package
+    needs:
+      - release-input
+      - create-github-release
+    if: ${{ always() && inputs.channel == 'latest' && inputs.publish_auth == 'trusted' && !inputs.dry_run && needs.release-input.result == 'success' && needs.release-input.outputs.dry_run_preview != 'true' && (needs.create-github-release.result == 'success' || needs.create-github-release.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-input.outputs.checkout_ref }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Use npm 11
+        run: npm install -g npm@11
+
+      - name: Verify npm publish toolchain
+        run: |
+          node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 14)) { throw new Error('npm publish requires Node >= 22.14.0'); }"
+          node -e "const v=require('child_process').execSync('npm --version',{encoding:'utf8'}).trim().split('.').map(Number); if (v[0] < 11 || (v[0] === 11 && v[1] < 5) || (v[0] === 11 && v[1] === 5 && v[2] < 1)) { throw new Error('npm publish requires npm >= 11.5.1'); }"
+
+      - name: Verify release tag
+        run: npm --prefix npm run verify:release-tag -- "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ needs.release-input.outputs.tag_name }}
+
+      - name: Verify GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-input.outputs.tag_name }}
+        run: |
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets,isDraft)"
+
+          if [[ "$(jq -r '.isDraft' <<<"$release_json")" == "true" ]]; then
+            echo "::error::GitHub release '$RELEASE_TAG' is still a draft."
+            exit 1
+          fi
+
+          required_assets=(
+            "gsd-browser-darwin-arm64"
+            "gsd-browser-darwin-x64"
+            "gsd-browser-linux-arm64"
+            "gsd-browser-linux-x64"
+            "gsd-browser-windows-x64.exe"
+          )
+
+          for asset in "${required_assets[@]}"; do
+            if ! jq -e --arg asset "$asset" '.assets[] | select(.name == $asset)' <<<"$release_json" >/dev/null; then
+              echo "::error::GitHub release '$RELEASE_TAG' is missing asset '$asset'."
+              exit 1
+            fi
+          done
+
+      - name: Test npm package
+        run: npm --prefix npm test
+
+      - name: Build npm package
+        run: npm --prefix npm run build
+
+      - name: Pack dry run
+        working-directory: npm
+        run: npm pack --dry-run
+
   prerelease-verify:
     name: Verify @${{ needs.prerelease-publish.outputs.channel }} package
     needs: prerelease-publish
@@ -589,28 +657,35 @@ jobs:
 
   prod-release-plan:
     name: Plan Production Release
-    if: ${{ inputs.channel == 'latest' }}
+    if: ${{ always() && inputs.channel == 'latest' && (needs.trusted-latest-check.result == 'success' || needs.prerelease-verify.result == 'success') }}
     needs:
-      - prerelease-publish
+      - release-input
       - prerelease-verify
+      - trusted-latest-check
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.release.outputs.version }}
     steps:
       - name: Confirm production version
         id: release
-        run: echo "version=${{ needs.prerelease-publish.outputs.version }}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${{ needs.release-input.outputs.version }}" >> "$GITHUB_OUTPUT"
 
   prod-release:
     name: Production Release
-    if: ${{ inputs.channel == 'latest' && !inputs.dry_run }}
+    if: ${{ always() && inputs.channel == 'latest' && !inputs.dry_run && needs.prod-release-plan.result == 'success' }}
     needs:
-      - prerelease-publish
       - prerelease-verify
       - prod-release-plan
+      - release-input
+      - trusted-latest-check
     runs-on: ubuntu-latest
     environment: prod
     steps:
+      - uses: actions/checkout@v4
+        if: inputs.publish_auth == 'trusted'
+        with:
+          ref: ${{ needs.release-input.outputs.checkout_ref }}
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -620,7 +695,37 @@ jobs:
       - name: Use npm 11
         run: npm install -g npm@11
 
+      - name: Publish trusted package to @latest
+        if: inputs.publish_auth == 'trusted'
+        working-directory: npm
+        env:
+          VERSION: ${{ needs.prod-release-plan.outputs.version }}
+        run: |
+          TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.latest" 2>/dev/null || true)
+          if [ "${TAGGED}" = "${VERSION}" ]; then
+            echo "Confirmed: @latest already points to ${VERSION}."
+            exit 0
+          fi
+
+          EXISTING=$(npm view "@opengsd/gsd-browser@${VERSION}" version 2>/dev/null || true)
+          if [ -n "${EXISTING}" ]; then
+            echo "::error::Version ${VERSION} is already published, but @latest points to '${TAGGED:-<unset>}'."
+            echo "::error::Trusted publishing only supports npm publish/stage publish, not dist-tag promotion. Cut a new version or use publish_auth=token for a one-time promotion."
+            exit 1
+          fi
+
+          unset NODE_AUTH_TOKEN
+          npm config delete //registry.npmjs.org/:_authToken || true
+          npm publish --access public --provenance --tag latest
+          TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.latest" 2>/dev/null || true)
+          if [ "${TAGGED}" != "${VERSION}" ]; then
+            echo "::error::@latest points to '${TAGGED:-<unset>}' not ${VERSION} after trusted publish."
+            exit 1
+          fi
+          echo "Confirmed: @latest -> ${VERSION}."
+
       - name: Verify NPM_TOKEN for production dist-tag promotion
+        if: inputs.publish_auth == 'token'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.prod-release-plan.outputs.version }}
@@ -637,6 +742,7 @@ jobs:
           npm whoami
 
       - name: Promote verified package to @latest
+        if: inputs.publish_auth == 'token'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.prod-release-plan.outputs.version }}
