@@ -303,6 +303,19 @@ jobs:
             artifacts/gsd-browser-linux-x64/gsd-browser-linux-x64
             artifacts/gsd-browser-windows-x64.exe/gsd-browser-windows-x64.exe
 
+      - name: Post Discord release announcement
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_CHANGELOG_WEBHOOK }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release_input.outputs.tag_name }}
+        run: |
+          node scripts/release-notes/discord-release-summary.cjs \
+            --tag "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --package "@opengsd/gsd-browser" \
+            --post \
+            --allow-missing-webhook
+
   npm-publish:
     name: publish npm package
     needs:

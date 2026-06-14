@@ -1,0 +1,43 @@
+name: Discord changelog
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional release tag to test. Leave blank to use the latest release.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  discord-changelog:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Post release changelog to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_CHANGELOG_WEBHOOK }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RELEASE_TAG:-}" ]; then
+            node scripts/release-notes/discord-release-summary.cjs \
+              --tag "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --package "@opengsd/gsd-browser" \
+              --post
+          else
+            node scripts/release-notes/discord-release-summary.cjs \
+              --latest \
+              --repo "$GITHUB_REPOSITORY" \
+              --package "@opengsd/gsd-browser" \
+              --post
+          fi
