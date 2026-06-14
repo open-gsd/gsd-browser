@@ -717,7 +717,14 @@ jobs:
           unset NODE_AUTH_TOKEN
           npm config delete //registry.npmjs.org/:_authToken || true
           npm publish --access public --provenance --tag latest
-          TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.latest" 2>/dev/null || true)
+          for ATTEMPT in $(seq 1 24); do
+            TAGGED=$(npm view "@opengsd/gsd-browser" "dist-tags.latest" 2>/dev/null || true)
+            if [ "${TAGGED}" = "${VERSION}" ]; then
+              break
+            fi
+            echo "Waiting for npm @latest propagation (${ATTEMPT}/24): currently '${TAGGED:-<unset>}'."
+            sleep 5
+          done
           if [ "${TAGGED}" != "${VERSION}" ]; then
             echo "::error::@latest points to '${TAGGED:-<unset>}' not ${VERSION} after trusted publish."
             exit 1
