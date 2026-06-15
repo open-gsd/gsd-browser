@@ -61,9 +61,17 @@ function downloadFile(url, dest, get = https.get) {
         settled = true;
         fn(value);
       }
+      function cleanupPartial() {
+        try {
+          fs.rmSync(dest, { force: true });
+        } catch (_) {
+          // ignore cleanup failures
+        }
+      }
 
       file.on("error", (err) => {
         file.destroy();
+        cleanupPartial();
         settle(reject, new Error(`write ${dest} failed: ${err.message}`));
       });
       file.on("finish", () => {
@@ -73,6 +81,7 @@ function downloadFile(url, dest, get = https.get) {
 
       res.on("error", (err) => {
         file.destroy();
+        cleanupPartial();
         settle(reject, new Error(`download ${url} failed: ${err.message}`));
       });
 

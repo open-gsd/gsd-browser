@@ -49,6 +49,33 @@ describe('postinstall', () => {
     }
   });
 
+  test('downloadFile removes the partial file when the download is interrupted', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-browser-download-partial-'));
+
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': '1024',
+      });
+      res.write(Buffer.from('partial'));
+      res.socket.destroy();
+    });
+
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+
+    const destDir = path.join(tempDir, 'bin');
+    const dest = path.join(destDir, 'gsd-browser-bin');
+
+    try {
+      await assert.rejects(downloadFile(`http://127.0.0.1:${port}/binary`, dest, http.get));
+      assert.ok(!fs.existsSync(dest), 'partial download should be removed');
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+      server.close();
+    }
+  });
+
   test('downloadFile rejects when the destination directory cannot be created', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-browser-download-err-'));
     const payload = Buffer.from('hello gsd-browser');
