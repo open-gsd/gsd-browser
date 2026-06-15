@@ -74,6 +74,7 @@ function downloadFile(url, dest, get = https.get) {
         if (settled || failing) return;
         failing = true;
         file.once("close", () => {
+          if (settled) return;
           cleanupPartial();
           settle(reject, error);
         });
