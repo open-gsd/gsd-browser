@@ -40,6 +40,7 @@ function fetchJSON(url) {
 
 function downloadFile(url, dest, get = https.get) {
   return new Promise((resolve, reject) => {
+    let handleRequestError = reject;
     get(url, { headers: { "User-Agent": "gsd-browser-npm" } }, (res) => {
       if (res.statusCode === 302 || res.statusCode === 301) {
         return downloadFile(res.headers.location, dest, get).then(resolve, reject);
@@ -78,6 +79,7 @@ function downloadFile(url, dest, get = https.get) {
         });
         file.destroy();
       }
+      handleRequestError = fail;
 
       file.on("error", (err) => {
         fail(new Error(`write ${dest} failed: ${err.message}`));
@@ -92,7 +94,9 @@ function downloadFile(url, dest, get = https.get) {
       });
 
       res.pipe(file);
-    }).on("error", reject);
+    }).on("error", (err) => {
+      handleRequestError(new Error(`download ${url} failed: ${err.message}`));
+    });
   });
 }
 
