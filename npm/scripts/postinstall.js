@@ -56,6 +56,7 @@ function downloadFile(url, dest, get = https.get) {
 
       const file = fs.createWriteStream(dest);
       let settled = false;
+      let failing = false;
       function settle(fn, value) {
         if (settled) return;
         settled = true;
@@ -68,11 +69,18 @@ function downloadFile(url, dest, get = https.get) {
           // ignore cleanup failures
         }
       }
+      function fail(error) {
+        if (settled || failing) return;
+        failing = true;
+        file.once("close", () => {
+          cleanupPartial();
+          settle(reject, error);
+        });
+        file.destroy();
+      }
 
       file.on("error", (err) => {
-        file.destroy();
-        cleanupPartial();
-        settle(reject, new Error(`write ${dest} failed: ${err.message}`));
+        fail(new Error(`write ${dest} failed: ${err.message}`));
       });
       file.on("finish", () => {
         file.once("close", () => settle(resolve));
@@ -80,9 +88,7 @@ function downloadFile(url, dest, get = https.get) {
       });
 
       res.on("error", (err) => {
-        file.destroy();
-        cleanupPartial();
-        settle(reject, new Error(`download ${url} failed: ${err.message}`));
+        fail(new Error(`download ${url} failed: ${err.message}`));
       });
 
       res.pipe(file);
