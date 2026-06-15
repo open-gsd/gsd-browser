@@ -4,7 +4,6 @@
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
-const { execSync } = require("child_process");
 
 const REPO = "open-gsd/gsd-browser";
 
@@ -15,6 +14,10 @@ const PLATFORM_MAP = {
   "linux-x64": "gsd-browser-linux-x64",
   "win32-x64": "gsd-browser-windows-x64.exe",
 };
+
+function ensureDir(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+}
 
 function fetchJSON(url) {
   return new Promise((resolve, reject) => {
@@ -35,18 +38,45 @@ function fetchJSON(url) {
   });
 }
 
-function downloadFile(url, dest) {
+function downloadFile(url, dest, get = https.get) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { "User-Agent": "gsd-browser-npm" } }, (res) => {
+    get(url, { headers: { "User-Agent": "gsd-browser-npm" } }, (res) => {
       if (res.statusCode === 302 || res.statusCode === 301) {
-        return downloadFile(res.headers.location, dest).then(resolve, reject);
+        return downloadFile(res.headers.location, dest, get).then(resolve, reject);
       }
       if (res.statusCode !== 200) {
         return reject(new Error(`HTTP ${res.statusCode} downloading ${url}`));
       }
+
+      try {
+        ensureDir(path.dirname(dest));
+      } catch (err) {
+        return reject(new Error(`prepare ${dest} failed: ${err.message}`));
+      }
+
       const file = fs.createWriteStream(dest);
+      let settled = false;
+      function settle(fn, value) {
+        if (settled) return;
+        settled = true;
+        fn(value);
+      }
+
+      file.on("error", (err) => {
+        file.destroy();
+        settle(reject, new Error(`write ${dest} failed: ${err.message}`));
+      });
+      file.on("finish", () => {
+        file.once("close", () => settle(resolve));
+        file.close();
+      });
+
+      res.on("error", (err) => {
+        file.destroy();
+        settle(reject, new Error(`download ${url} failed: ${err.message}`));
+      });
+
       res.pipe(file);
-      file.on("finish", () => { file.close(); resolve(); });
     }).on("error", reject);
   });
 }
@@ -66,7 +96,7 @@ async function main() {
   }
 
   const binDir = path.join(__dirname, "..", "bin");
-  fs.mkdirSync(binDir, { recursive: true });
+  ensureDir(binDir);
 
   const isWindows = platform === "win32";
   const targetName = isWindows ? "gsd-browser.exe" : "gsd-browser-bin";
@@ -128,7 +158,12 @@ async function main() {
   console.log(`gsd-browser: installed ${binaryName} (${version}) to ${targetPath}`);
 }
 
-main().catch((e) => {
-  console.error(`gsd-browser: postinstall failed: ${e.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((e) => {
+    console.error(`gsd-browser: postinstall failed: ${e.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { downloadFile, ensureDir };
+
