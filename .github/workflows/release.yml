@@ -272,6 +272,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
+          retention-days: 7
 
   release:
     needs:
