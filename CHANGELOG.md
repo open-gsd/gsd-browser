@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Windows ARM64 release asset: `gsd-browser-windows-arm64.exe`.
+- npm install support for `win32-arm64`.
 - Unit tests for `postinstall.js` covering recursive directory creation, successful downloads into a missing `bin/`, and graceful rejection when the destination directory cannot be created.
 
 ## [0.1.31] - 2026-06-12

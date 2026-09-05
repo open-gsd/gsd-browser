@@ -169,6 +169,7 @@ jobs:
             "gsd-browser-darwin-x64"
             "gsd-browser-linux-arm64"
             "gsd-browser-linux-x64"
+            "gsd-browser-windows-arm64.exe"
             "gsd-browser-windows-x64.exe"
           )
 
@@ -215,6 +216,9 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact: gsd-browser-windows-x64.exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            artifact: gsd-browser-windows-arm64.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -393,6 +397,7 @@ jobs:
             artifacts/gsd-browser-darwin-x64/gsd-browser-darwin-x64
             artifacts/gsd-browser-linux-arm64/gsd-browser-linux-arm64
             artifacts/gsd-browser-linux-x64/gsd-browser-linux-x64
+            artifacts/gsd-browser-windows-arm64.exe/gsd-browser-windows-arm64.exe
             artifacts/gsd-browser-windows-x64.exe/gsd-browser-windows-x64.exe
 
   prerelease-publish:
@@ -463,6 +468,7 @@ jobs:
             "gsd-browser-darwin-x64"
             "gsd-browser-linux-arm64"
             "gsd-browser-linux-x64"
+            "gsd-browser-windows-arm64.exe"
             "gsd-browser-windows-x64.exe"
           )
 
@@ -597,6 +603,7 @@ jobs:
             "gsd-browser-darwin-x64"
             "gsd-browser-linux-arm64"
             "gsd-browser-linux-x64"
+            "gsd-browser-windows-arm64.exe"
             "gsd-browser-windows-x64.exe"
           )
 
