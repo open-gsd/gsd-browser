@@ -80,6 +80,7 @@ Download from [GitHub Releases](https://github.com/open-gsd/gsd-browser/releases
 | macOS (Intel) | `gsd-browser-darwin-x64` |
 | Linux (ARM64) | `gsd-browser-linux-arm64` |
 | Linux (x64) | `gsd-browser-linux-x64` |
+| Windows (ARM64) | `gsd-browser-windows-arm64.exe` |
 | Windows (x64) | `gsd-browser-windows-x64.exe` |
 
 ### Build from source

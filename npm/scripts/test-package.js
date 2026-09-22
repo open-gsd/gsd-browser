@@ -127,6 +127,7 @@ for (const asset of [
   "gsd-browser-darwin-x64",
   "gsd-browser-linux-arm64",
   "gsd-browser-linux-x64",
+  "gsd-browser-windows-arm64.exe",
   "gsd-browser-windows-x64.exe",
 ]) {
   assert(postinstall.includes(asset), `postinstall must know release asset ${asset}`);
