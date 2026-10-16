@@ -83,15 +83,18 @@ function testLauncherExecutesNativeBinary() {
     const launcherPath = copyLauncher(tempDir);
     const fakeBinaryPath = path.join(path.dirname(launcherPath), "gsd-browser-bin");
 
-    fs.writeFileSync(fakeBinaryPath, '#!/bin/sh\necho "fake-gsd-browser:$*"\n');
+    fs.writeFileSync(
+      fakeBinaryPath,
+      '#!/bin/sh\nprintf "fake-gsd-browser:%s:%s\\n" "$GSD_BROWSER_PACKAGE_MANAGED" "$*"\n'
+    );
     fs.chmodSync(fakeBinaryPath, 0o755);
 
     const result = runNodeScript(launcherPath, ["--version"]);
 
     assert(result.status === 0, `launcher exited with ${result.status}: ${result.stderr}`);
     assert(
-      result.stdout.trim() === "fake-gsd-browser:--version",
-      "launcher should forward arguments to the native binary"
+      result.stdout.trim() === "fake-gsd-browser:1:--version",
+      "launcher should mark the package-managed binary and forward arguments"
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });

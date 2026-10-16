@@ -25,7 +25,7 @@ gsd-browser daemon stop
 ```
 
 The installer downloads the binary and reuses a system Chrome/Chromium when present. Otherwise it downloads Chromium automatically when Chrome for Testing is available for the platform.
-Run `gsd-browser update` to install the current release.
+For standalone installs, run `gsd-browser update` to install the current release. The npm package is managed by npm; update it with your package manager (or run `gsd update browser` when installed through GSD Pi).
 
 **MCP agents:** The installer header and post-install message explicitly document the `gsd-browser mcp` path and quickstart helper.
 

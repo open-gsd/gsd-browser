@@ -802,7 +802,7 @@ enum Commands {
     },
     /// Print the Cloud browser method manifest
     CloudMethods,
-    /// Update gsd-browser using the release installer
+    /// Update a standalone gsd-browser install using the release installer
     Update,
     /// Run as an MCP server over stdio or Streamable HTTP
     Mcp {
@@ -1408,7 +1408,19 @@ fn cmd_cloud_methods(cli: &Cli) -> CmdResult {
     Ok(())
 }
 
+const PACKAGE_MANAGED_UPDATE_ERROR: &str = "This gsd-browser executable is managed by npm. Update @opengsd/gsd-browser with its package manager (for GSD Pi, run `gsd update browser`); refusing to install a separate standalone binary.";
+
+fn package_managed_update_error(marker: Option<&str>) -> Option<&'static str> {
+    (marker == Some("1")).then_some(PACKAGE_MANAGED_UPDATE_ERROR)
+}
+
 fn cmd_update(cli: &Cli) -> CmdResult {
+    if let Some(message) =
+        package_managed_update_error(std::env::var("GSD_BROWSER_PACKAGE_MANAGED").ok().as_deref())
+    {
+        return Err(message.into());
+    }
+
     let installer_url =
         std::env::var("GSD_BROWSER_INSTALL_URL").unwrap_or_else(|_| INSTALLER_URL.to_string());
 
@@ -1419,6 +1431,7 @@ fn cmd_update(cli: &Cli) -> CmdResult {
         .env("GSD_BROWSER_INSTALL_MODE", "update")
         .env("GSD_BROWSER_SKIP_CHROMIUM", "1")
         .env("GSD_BROWSER_SKIP_SKILL", "1")
+        .env("GSD_BROWSER_CURRENT_VERSION", env!("CARGO_PKG_VERSION"))
         .status()?;
 
     if !status.success() {
@@ -2443,8 +2456,53 @@ fn format_text_control(value: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod cli_output_tests {
-    use super::format_text_control;
+    use super::{format_text_control, package_managed_update_error};
     use serde_json::json;
+    use std::process::Command;
+
+    #[test]
+    fn package_managed_update_refuses_the_standalone_installer() {
+        assert!(package_managed_update_error(Some("1")).is_some());
+        assert!(package_managed_update_error(None).is_none());
+        assert!(package_managed_update_error(Some("0")).is_none());
+    }
+
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos")),
+        ignore = "install.sh requires Linux or macOS"
+    )]
+    #[test]
+    fn installer_refuses_to_downgrade_the_running_version() {
+        let temp_dir = tempfile::tempdir().expect("temp directory");
+        let install_dir = temp_dir.path().join("install");
+        let installer = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../install.sh");
+        let output = Command::new("bash")
+            .arg(installer)
+            .env("HOME", temp_dir.path())
+            .env("GSD_BROWSER_DIR", &install_dir)
+            .env("GSD_BROWSER_VERSION", "0.2.1")
+            .env("GSD_BROWSER_CURRENT_VERSION", "0.2.2")
+            .env("GSD_BROWSER_INSTALL_MODE", "update")
+            .env("GSD_BROWSER_SKIP_CHROMIUM", "1")
+            .env("GSD_BROWSER_SKIP_SKILL", "1")
+            .output()
+            .expect("run installer");
+        let output_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(!output.status.success(), "installer unexpectedly succeeded");
+        assert!(
+            output_text.contains("refusing to downgrade"),
+            "unexpected installer output: {output_text}"
+        );
+        assert!(
+            !install_dir.join("bin").exists(),
+            "installer created a target before rejecting the downgrade"
+        );
+    }
 
     #[test]
     fn control_formatter_prints_shared_control_state() {

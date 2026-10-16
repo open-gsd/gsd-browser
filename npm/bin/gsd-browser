@@ -16,7 +16,10 @@ if (!fs.existsSync(binaryPath)) {
   process.exit(1);
 }
 
-const result = spawnSync(binaryPath, process.argv.slice(2), { stdio: "inherit" });
+const result = spawnSync(binaryPath, process.argv.slice(2), {
+  stdio: "inherit",
+  env: { ...process.env, GSD_BROWSER_PACKAGE_MANAGED: "1" },
+});
 
 if (result.error) {
   console.error(`gsd-browser: failed to launch ${binaryPath}: ${result.error.message}`);

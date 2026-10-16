@@ -356,6 +356,8 @@ gsd-browser update
 
 </daemon>
 
+`gsd-browser update` applies to standalone installs. For the npm-managed package, update through npm or the owning package manager instead.
+
 <full_reference>
 For the complete up-to-date surface (including all MCP tool names, inputSchemas, prompt definitions, and resource URIs), connect an MCP client to `gsd-browser mcp` and inspect `tools/list`, `resources/list`, and `prompts/list`, or read the implementation in `cli/src/mcp.rs`.
 

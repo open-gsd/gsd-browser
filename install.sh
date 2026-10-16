@@ -115,6 +115,22 @@ detect_platform() {
   esac
 }
 
+compare_versions() {
+  awk -v left="${1#v}" -v right="${2#v}" '
+    BEGIN {
+      left_count = split(left, left_parts, ".")
+      right_count = split(right, right_parts, ".")
+      if (left_count != 3 || right_count != 3) exit 2
+      for (i = 1; i <= 3; i++) {
+        if (left_parts[i] !~ /^[0-9]+$/ || right_parts[i] !~ /^[0-9]+$/) exit 2
+        if (left_parts[i] + 0 < right_parts[i] + 0) { print "-1"; exit 0 }
+        if (left_parts[i] + 0 > right_parts[i] + 0) { print "1"; exit 0 }
+      }
+      print "0"
+    }
+  '
+}
+
 resolve_version() {
   if [ "$VERSION" = "latest" ]; then
     info "Fetching latest release..."
@@ -123,6 +139,18 @@ resolve_version() {
       fail "Could not determine latest version from $REPO. Set GSD_BROWSER_VERSION manually."
     fi
   fi
+
+  local current_version="${GSD_BROWSER_CURRENT_VERSION:-}"
+  if [ "$INSTALL_MODE" = "update" ] && [ -n "$current_version" ]; then
+    local comparison
+    if ! comparison=$(compare_versions "$VERSION" "$current_version"); then
+      fail "Cannot compare release version '$VERSION' with running version '$current_version'; refusing to update."
+    fi
+    if [ "$comparison" = "-1" ]; then
+      fail "Latest release ($VERSION) is older than the running version ($current_version); refusing to downgrade."
+    fi
+  fi
+
   ok "Version: $VERSION"
 }
 

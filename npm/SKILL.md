@@ -535,7 +535,7 @@ gsd-browser daemon health                          # Health check (read-only, do
 gsd-browser daemon start                           # Explicit start (pre-warm browser before commands)
 gsd-browser mcp                                    # Run MCP server over stdio
 gsd-browser cloud-methods                          # Print the cloud browser method manifest
-gsd-browser update                                 # Install the current release
+gsd-browser update                                 # Update a standalone install
 ```
 
 ---

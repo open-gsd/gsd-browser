@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refused npm-managed self-updates that would install a separate binary, and prevented the release installer from downgrading a running standalone binary.
 - Hardened npm `postinstall` against missing `bin/` directories and unhandled write-stream errors by ensuring the destination directory exists immediately before `createWriteStream` and catching directory-creation failures.
 - Removed partially downloaded binaries when a postinstall download fails, deferring the cleanup until the write stream has closed so no corrupt or truncated file is left behind.
 - Prevented the postinstall script from running its downloader when required as a module from tests.
